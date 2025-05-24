@@ -25,12 +25,8 @@ services:
       DATABASE_URL: postgresql://trading_user:password123@db:5432/trading_db
       UPSTOX_API_KEY: ${UPSTOX_API_KEY}
       UPSTOX_API_SECRET: ${UPSTOX_API_SECRET}
-      UPSTOX_ACCESS_TOKEN: ${UPSTOX_ACCESS_TOKEN}
       ZERODHA_API_KEY: ${ZERODHA_API_KEY}
       ZERODHA_API_SECRET: ${ZERODHA_API_SECRET}
-      ZERODHA_USERNAME: ${ZERODHA_USERNAME}
-      ZERODHA_PASSWORD: ${ZERODHA_PASSWORD}
-      ZERODHA_TOTP_TOKEN: ${ZERODHA_TOTP_TOKEN}
     depends_on:
       db:
         condition: service_healthy

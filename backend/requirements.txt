@@ -13,3 +13,5 @@ pyotp
 tenacity
 httpx
 fastapi-users
+python-jose
+passlib

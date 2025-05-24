@@ -4,3 +4,8 @@ pandas
 sqlalchemy
 altair
 python-dotenv
+ta
+streamlit-option-menu
+lightweight-charts
+streamlit-lightweight-charts
+nsepython

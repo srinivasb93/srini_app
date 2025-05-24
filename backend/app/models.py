@@ -12,16 +12,10 @@ class User(Base):
     upstox_api_secret = Column(String)
     upstox_access_token = Column(String)
     upstox_access_token_expiry = Column(DateTime)
-    upstox_username = Column(String)
-    upstox_password = Column(String)
-    upstox_totp_token = Column(String)
     zerodha_api_key = Column(String)
     zerodha_api_secret = Column(String)
     zerodha_access_token = Column(String)
     zerodha_access_token_expiry = Column(DateTime)
-    zerodha_username = Column(String)
-    zerodha_password = Column(String)
-    zerodha_totp_token = Column(String)
     created_at = Column(DateTime, server_default=func.now())
 
 class Order(Base):

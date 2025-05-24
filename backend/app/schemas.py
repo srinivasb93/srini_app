@@ -9,14 +9,9 @@ class UserCreate(UserBase):
     password: str
     upstox_api_key: Optional[str] = None
     upstox_api_secret: Optional[str] = None
-    upstox_username: Optional[str] = None
-    upstox_password: Optional[str] = None
-    upstox_totp_token: Optional[str] = None
     zerodha_api_key: Optional[str] = None
     zerodha_api_secret: Optional[str] = None
-    zerodha_username: Optional[str] = None
-    zerodha_password: Optional[str] = None
-    zerodha_totp_token: Optional[str] = None
+
 
 class UserResponse(UserBase):
     user_id: str

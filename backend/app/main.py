@@ -126,14 +126,8 @@ async def register(user: UserCreate, db: AsyncSession = Depends(get_db)):
         hashed_password=hashed_password,
         upstox_api_key=user.upstox_api_key,
         upstox_api_secret=user.upstox_api_secret,
-        upstox_username=user.upstox_username,
-        upstox_password=user.upstox_password,
-        upstox_totp_token=user.upstox_totp_token,
         zerodha_api_key=user.zerodha_api_key,
         zerodha_api_secret=user.zerodha_api_secret,
-        zerodha_username=user.zerodha_username,
-        zerodha_password=user.zerodha_password,
-        zerodha_totp_token=user.zerodha_totp_token,
         created_at=datetime.now()
     )
     db.add(new_user)
