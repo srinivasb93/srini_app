@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+sqlalchemy[asyncio]
+pydantic
+asyncpg
+upstox-python-sdk
+kiteconnect
+pandas
+requests
+python-dotenv
+apscheduler
+pyotp
+tenacity
+httpx
+fastapi-users

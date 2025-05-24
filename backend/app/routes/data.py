@@ -1,11 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
-from backend.app.database import get_db
 import logging
 from typing import List, Dict, Optional
-from backend.app.auth import oauth2_scheme
 import re
+import os, sys
+# Add the project_root to the Python path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
+sys.path.insert(0, project_root)
+from backend.app.database import get_db
+from backend.app.auth import oauth2_scheme
 
 logger = logging.getLogger(__name__)
 

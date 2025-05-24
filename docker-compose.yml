@@ -1,0 +1,58 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: trading_user
+      POSTGRES_PASSWORD: password123
+      POSTGRES_DB: trading_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/app/schemas.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading_user -d trading_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    command: ["postgres", "-c", "log_connections=on", "-c", "log_disconnections=on"]
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://trading_user:password123@db:5432/trading_db
+      UPSTOX_API_KEY: ${UPSTOX_API_KEY}
+      UPSTOX_API_SECRET: ${UPSTOX_API_SECRET}
+      UPSTOX_ACCESS_TOKEN: ${UPSTOX_ACCESS_TOKEN}
+      ZERODHA_API_KEY: ${ZERODHA_API_KEY}
+      ZERODHA_API_SECRET: ${ZERODHA_API_SECRET}
+      ZERODHA_USERNAME: ${ZERODHA_USERNAME}
+      ZERODHA_PASSWORD: ${ZERODHA_PASSWORD}
+      ZERODHA_TOTP_TOKEN: ${ZERODHA_TOTP_TOKEN}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./common_utils:/app/common_utils
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      BACKEND_URL: http://backend:8000
+      UPSTOX_API_KEY: ${UPSTOX_API_KEY}
+      UPSTOX_API_SECRET: ${UPSTOX_API_SECRET}
+    depends_on:
+      - backend
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./common_utils:/app/common_utils
+
+volumes:
+  postgres_data:
