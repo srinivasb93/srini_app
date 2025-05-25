@@ -327,6 +327,7 @@ class OrderManager:
                     result = await place_order(
                         api=api,
                         instrument_token=order["instrument_token"],
+                        trading_symbol=order["trading_symbol"],
                         transaction_type=order["transaction_type"],
                         quantity=order["quantity"],
                         price=order["price"],
@@ -707,12 +708,11 @@ async def fetch_zerodha_access_token(db: AsyncSession, user_id: str, request_tok
         logger.error(f"Error fetching Zerodha access token for user {user_id}: {str(e)}")
         return None
 
-async def place_order(api, instrument_token, transaction_type, quantity, price=0, order_type="MARKET",
+async def place_order(api, instrument_token, trading_symbol, transaction_type, quantity, price=0, order_type="MARKET",
                       trigger_price=0, is_amo=False, product_type="D", validity='DAY', stop_loss=None, target=None,
                       broker="Upstox", db: AsyncSession = None, upstox_apis=None, kite_apis=None,
                       user_id: str = "default_user"):
     try:
-        trading_symbol = get_symbol_for_instrument(instrument_token=instrument_token)
         if broker == "Upstox":
             order = upstox_client.PlaceOrderRequest(
                 quantity=quantity,
@@ -733,7 +733,7 @@ async def place_order(api, instrument_token, transaction_type, quantity, price=0
             zerodha_validity = "DAY" if validity == "DAY" else "IOC"
             order_params = {
                 "tradingsymbol": trading_symbol,
-                "exchange": instrument_token.split(":")[0].split("_")[0],
+                "exchange": "NSE",
                 "transaction_type": transaction_type,
                 "order_type": order_type,
                 "quantity": quantity,
@@ -761,8 +761,8 @@ async def place_order(api, instrument_token, transaction_type, quantity, price=0
             "product_type": product_type,
             "status": "PENDING",
             "remarks": "Order placed via API",
+            "order_timestamp": datetime.now(),
             "user_id": user_id,
-            "order_timestamp": datetime.now()
         }])
         await load_sql_data(order_data, "orders", load_type="append", index_required=False, db=db,
                             database="trading_db")

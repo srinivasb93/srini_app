@@ -62,6 +62,7 @@ class ScheduledOrder(BaseModel):
 class ScheduledOrderRequest(BaseModel):
     broker: str
     instrument_token: str
+    trading_symbol: str
     transaction_type: str
     quantity: int
     order_type: str
@@ -95,6 +96,7 @@ class AutoOrder(BaseModel):
         from_attributes = True
 
 class AutoOrderRequest(BaseModel):
+    trading_symbol: str
     instrument_token: str
     transaction_type: str
     risk_per_trade: float
@@ -158,6 +160,7 @@ class TradeHistory(BaseModel):
         from_attributes = True
 
 class PlaceOrderRequest(BaseModel):
+    trading_symbol: str
     instrument_token: str
     quantity: int
     order_type: str

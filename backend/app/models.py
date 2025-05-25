@@ -40,6 +40,7 @@ class ScheduledOrder(Base):
     scheduled_order_id = Column(String, primary_key=True, index=True)
     broker = Column(String)
     instrument_token = Column(String)
+    trading_symbol = Column(String)
     transaction_type = Column(String)
     quantity = Column(Integer)
     order_type = Column(String)
@@ -57,6 +58,7 @@ class AutoOrder(Base):
     __tablename__ = "auto_orders"
     auto_order_id = Column(String, primary_key=True)
     instrument_token = Column(String)
+    trading_symbol = Column(String)
     transaction_type = Column(String)
     risk_per_trade = Column(Float)
     stop_loss_type = Column(String)

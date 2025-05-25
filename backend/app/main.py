@@ -267,6 +267,7 @@ async def place_new_order(order: PlaceOrderRequest, user_id: str = Depends(get_c
                 "scheduled_order_id": scheduled_order_id,
                 "broker": order.broker,
                 "instrument_token": order.instrument_token,
+                "trading_symbol": order.trading_symbol,
                 "transaction_type": order.transaction_type,
                 "quantity": order.quantity,
                 "order_type": order.order_type,
@@ -287,6 +288,7 @@ async def place_new_order(order: PlaceOrderRequest, user_id: str = Depends(get_c
             response = await place_order(
                 api=api,
                 instrument_token=order.instrument_token,
+                trading_symbol=order.trading_symbol,
                 transaction_type=order.transaction_type,
                 quantity=order.quantity,
                 price=order.price,
@@ -438,6 +440,7 @@ async def create_scheduled_order(order: ScheduledOrderRequest, user_id: str = De
         scheduled_order_id=str(uuid.uuid4()),
         broker=order.broker,
         instrument_token=order.instrument_token,
+        trading_symbol=order.trading_symbol,
         transaction_type=order.transaction_type,
         quantity=order.quantity,
         order_type=order.order_type,
@@ -462,6 +465,7 @@ async def create_auto_order(order: AutoOrderRequest, user_id: str = Depends(get_
     auto_order = AutoOrderModel(
         auto_order_id=str(uuid.uuid4()),
         instrument_token=order.instrument_token,
+        trading_symbol=order.trading_symbol,
         transaction_type=order.transaction_type,
         risk_per_trade=order.risk_per_trade,
         stop_loss_type=order.stop_loss_type,
@@ -471,8 +475,8 @@ async def create_auto_order(order: AutoOrderRequest, user_id: str = Depends(get_
         product_type=order.product_type,
         order_type=order.order_type,
         limit_price=order.limit_price,
-        broker=order.broker,
-        user_id=user_id
+        user_id=user_id,
+        broker=order.broker
     )
     db.add(auto_order)
     await db.commit()

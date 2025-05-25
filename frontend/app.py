@@ -33,6 +33,11 @@ st.markdown("""
     .metric-box { background-color: #336699; color: white; padding: 10px; border-radius: 5px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); }
     .stForm { border: 1px solid #d3d3d3; padding: 15px; border-radius: 10px; }
     .login-container { max-width: 500px; margin: auto; padding: 20px; }
+    @media (max-width: 768px) {
+        .main { padding: 10px; margin-top: -2em; }
+        .metric-box { font-size: 0.9em; padding: 8px; }
+        .stButton>button { width: 100%; }
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -152,6 +157,15 @@ def render_login_page():
 def render_sidebar():
     with st.sidebar:
         st.title("Trading Dashboard")
+        theme = st.selectbox("Theme", ["Light", "Dark"])
+        if theme == "Dark":
+            st.markdown("""
+                        <style>
+                        .main { background-color: #1e1e1e; color: #ffffff; }
+                        .sidebar .sidebar-content { background-color: #2c2c2c; }
+                        .metric-box { background-color: #1a3c6e; }
+                        </style>
+                    """, unsafe_allow_html=True)
         selected = option_menu(
             menu_title=None,
             options=["Dashboard", "Get Token", "Order Management", "Order Book", "Positions", "Trade Dashboard",
@@ -222,9 +236,12 @@ def render_order_management(broker):
     tabs = st.tabs(["Regular Orders", "Scheduled Orders", "GTT Orders"])
 
     with tabs[0]:
+        main_cols = st.columns(2)
+        index_name = main_cols[0].selectbox("Select Index", ["NIFTY 50", "NIFTY NEXT 50"], key="order_index")
+        schedule_order = main_cols[1].checkbox("Schedule Order")
+
         with st.form("regular_order_form"):
-            index_name = st.selectbox("Select Index", ["NIFTY 50", "NIFTY NEXT 50"], key="order_index")
-            instruments = fetch_index_instruments(index_name)
+
             stock_symbol = st.selectbox("Symbol", options=instruments.keys(), key="order_symbol")
             instrument_token = instruments.get(stock_symbol)
             cols = st.columns(4)
@@ -238,16 +255,16 @@ def render_order_management(broker):
             stop_loss = st.number_input("Stop-Loss", min_value=0.0, value=0.0)
             target = st.number_input("Target", min_value=0.0, value=0.0)
             amo_order = st.checkbox("AMO Order")
-            schedule_order = st.checkbox("Schedule Order")
             schedule_datetime = None
             if schedule_order:
                 schedule_cols = st.columns(2)
                 schedule_date = schedule_cols[0].date_input("Schedule Date", value=datetime.now())
-                schedule_time = schedule_cols[1].time_input("Schedule Time", value=datetime.now().time())
+                schedule_time = schedule_cols[1].time_input("Schedule Time", value=datetime.now().time(), step=60)
                 schedule_datetime = datetime.combine(schedule_date, schedule_time)
 
             if st.form_submit_button("Place Order"):
                 order_data = {
+                    "trading_symbol": stock_symbol,
                     "instrument_token": instrument_token,
                     "quantity": quantity,
                     "order_type": order_type,
@@ -267,7 +284,7 @@ def render_order_management(broker):
                         response = make_api_request("POST",
                                                     f"{BACKEND_URL}/{'scheduled-orders' if schedule_order else 'orders'}/",
                                                     json=order_data, token=st.session_state.access_token)
-                    st.success(f"Order {'scheduled' if schedule_order else 'placed'}: {response['order_id']}")
+                    st.success(f"Order {'scheduled' if schedule_order else 'placed'}: {response['order_id'] if broker == 'Upstox' else response}")
                     st.toast("Order processed successfully!", icon="✅")
                 except Exception as e:
                     st.error(f"Failed to {'schedule' if schedule_order else 'place'} order: {str(e)}")
