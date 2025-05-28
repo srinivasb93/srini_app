@@ -5,32 +5,44 @@ import os
 from datetime import datetime, time as date_time, timedelta
 from typing import Optional, Dict, Any, List
 import pandas as pd
-import pyotp
+import numpy as np
 import requests
+import smtplib
+from email.mime.text import MIMEText
+
+import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.sql import text, func
-from fastapi import Depends
+from fastapi import Depends, HTTPException
 from kiteconnect import KiteConnect
 import upstox_client
+
 from common_utils.db_utils import async_fetch_query, async_execute_query
 from common_utils.read_write_sql_data import load_sql_data
 from common_utils.utils import notify
-from common_utils.upstox_utils import get_symbol_for_instrument
+from common_utils.upstox_utils import get_symbol_for_instrument, get_historical_data_latest, get_market_quote
 from models import Order, ScheduledOrder, QueuedOrder, User, GTTOrder
 from schemas import Order as OrderSchema, ScheduledOrder as ScheduledOrderSchema, OrderHistory, Trade, QuoteResponse, \
-    OHLCResponse, LTPResponse, HistoricalDataResponse, Instrument, HistoricalDataPoint
+    OHLCResponse, LTPResponse, HistoricalDataResponse, Instrument, HistoricalDataPoint, MFSIPResponse, MFSIPRequest
 from database import get_db
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_not_exception_type
+from common_utils.indicators import calculate_ema, calculate_rsi, calculate_linear_regression, calculate_atr, \
+    calculate_macd, calculate_bollinger_bands, calculate_stochastic_oscillator
+from common_utils.strategies import check_macd_crossover, check_bollinger_band_signals, check_stochastic_signals, \
+    check_support_resistance_breakout, macd_strategy, bollinger_band_strategy, rsi_strategy
 
 logger = logging.getLogger(__name__)
 
-# Define token expiry times
-UPSTOX_TOKEN_EXPIRY_TIME = date_time(3, 30)  # 3:30 AM IST
-ZERODHA_TOKEN_EXPIRY_TIME = date_time(6, 0)  # 6:00 AM IST
+strategy_tasks = {}
+
+UPSTOX_TOKEN_EXPIRY_TIME = date_time(3, 30)
+ZERODHA_TOKEN_EXPIRY_TIME = date_time(6, 0)
+EMAIL_SENDER = os.getenv("SMTP_USER")
+EMAIL_PASSWORD = os.getenv("SMTP_PASSWORD")
+
 
 def get_next_expiry_time(target_time: date_time) -> datetime:
-    """Calculate the next occurrence of the target time (e.g., 3:30 AM IST or 6:00 AM IST)."""
     now = datetime.now()
     target_datetime = datetime.combine(now.date(), target_time)
     if now > target_datetime:
@@ -38,18 +50,36 @@ def get_next_expiry_time(target_time: date_time) -> datetime:
     return target_datetime
 
 class TokenExpiredError(Exception):
-    """Custom exception for expired tokens."""
     def __init__(self, broker: str):
         self.broker = broker
         self.message = f"{broker} access token has expired. Please re-authenticate."
         super().__init__(self.message)
 
+async def send_email(subject: str, body: str, recipient: str):
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_SENDER
+    msg["To"] = recipient
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+        logger.info(f"Email sent to {recipient}: {subject}")
+    except Exception as e:
+        logger.error(f"Failed to send email to {recipient}: {str(e)}")
+
+async def notify(title: str, message: str, recipient: Optional[str] = None, type: str = 'success'):
+    logger.info(f"Notification: {title} - {message}")
+    if recipient and EMAIL_SENDER and EMAIL_PASSWORD:
+        await send_email(title, message, recipient)
+
 class OrderMonitor:
     def __init__(self):
-        self.running = True
-        self.polling_interval = 60
-        self.order_queue = None
-        self.monitor_tasks = []
+        self.running: bool = True
+        self.polling_interval: int = 60
+        self.order_queue: Optional[asyncio.Queue] = None
+        self.monitor_tasks: List[asyncio.Task] = []
         logger.info("OrderMonitor initialized")
 
     async def initialize_queue(self):
@@ -57,7 +87,33 @@ class OrderMonitor:
             self.order_queue = asyncio.Queue()
             logger.info("Order queue initialized")
 
-    async def sync_order_statuses(self, upstox_api, zerodha_api, db: AsyncSession):
+    async def run_scheduled_tasks(self, user_apis: Dict[str, Dict[str, Any]]):
+        """Run periodic tasks for syncing order statuses and monitoring GTT orders."""
+        logger.info("Starting OrderMonitor scheduled tasks")
+        try:
+            while self.running:
+                async for db in get_db():
+                    try:
+                        for user_id, apis in user_apis.items():
+                            upstox_api = apis["upstox"]["order"]
+                            zerodha_api = apis["zerodha"]["kite"]
+                            await self.sync_order_statuses(upstox_api, zerodha_api, db)
+                            if upstox_api:
+                                await self.monitor_gtt_orders(upstox_api, db)
+                    except Exception as e:
+                        logger.error(f"Error in scheduled tasks: {str(e)}")
+                await asyncio.sleep(self.polling_interval)
+        except asyncio.CancelledError:
+            logger.info("OrderMonitor scheduled tasks cancelled")
+            self.running = False
+            await self.cancel_all_tasks()
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in run_scheduled_tasks: {str(e)}")
+            self.running = False
+            await self.cancel_all_tasks()
+
+    async def sync_order_statuses(self, upstox_api: Optional[Any], zerodha_api: Optional[Any], db: AsyncSession) -> bool:
         try:
             stmt = select(Order).where(
                 func.lower(Order.status).in_([status.lower() for status in ["open", "pending", "trigger pending"]])
@@ -75,6 +131,15 @@ class OrderMonitor:
                         continue
                     order.status = order_status.lower()
                     logger.info(f"Updated order {order.order_id} status to {order.status}")
+                    if order.status in ["complete", "rejected", "cancelled"]:
+                        result = await db.execute(select(User).filter(User.user_id == order.user_id))
+                        user = result.scalars().first()
+                        if user:
+                            await notify(
+                                f"Order Status Update: {order.order_id}",
+                                f"Order {order.order_id} for {order.trading_symbol} is {order.status}",
+                                user.email
+                            )
                 except Exception as e:
                     logger.error(f"Error syncing status for order {order.order_id}: {str(e)}")
             await db.commit()
@@ -83,13 +148,24 @@ class OrderMonitor:
             logger.error(f"Error in sync_order_statuses: {str(e)}")
             return False
 
-    async def monitor_order(self, order_id, instrument_token, trading_symbol, transaction_type, quantity, product_type,
-                            stop_loss_price, target_price, api, broker, db: AsyncSession, upstox_apis, kite_apis):
+    async def monitor_order(self, order_id: str, instrument_token: str, trading_symbol: str, transaction_type: str,
+                           quantity: int, product_type: str, stop_loss_price: Optional[float], target_price: Optional[float],
+                           api: Any, broker: str, db: AsyncSession, upstox_apis: Dict[str, Any], kite_apis: Dict[str, Any]):
+        logger.info(f"Starting monitor_order for order {order_id}")
         task = asyncio.current_task()
         self.monitor_tasks.append(task)
         try:
             await self.initialize_queue()
+            # Fetch the Order instance to access user_id
+            result = await db.execute(select(Order).filter(Order.order_id == order_id, Order.broker == broker))
+            order: Optional[Order] = result.scalars().first()
+            if not order:
+                logger.error(f"Order {order_id} not found in database")
+                return
+
             if stop_loss_price or target_price:
+                logger.info(
+                    f"Queuing stop-loss/target for order {order_id}: stop_loss={stop_loss_price}, target={target_price}")
                 sl_transaction = "BUY" if transaction_type == "SELL" else "SELL"
                 if stop_loss_price:
                     await self.order_queue.put({
@@ -124,7 +200,10 @@ class OrderMonitor:
                         "status": "QUEUED"
                     })
                 await self._store_queued_orders(db)
-                notify("SL/Target Orders Queued", f"Queued SL and target for {trading_symbol}")
+                result = await db.execute(select(User).filter(User.user_id == order.user_id))
+                user = result.scalars().first()
+                if user:
+                    await notify("SL/Target Orders Queued", f"Queued SL and target for {trading_symbol}", user.email)
 
             max_attempts = 60
             attempt = 0
@@ -152,15 +231,42 @@ class OrderMonitor:
             if task in self.monitor_tasks:
                 self.monitor_tasks.remove(task)
 
-    async def _get_pending_orders(self, db: AsyncSession):
-        query = """
-            SELECT order_id, status, broker, instrument_token, trading_symbol 
-            FROM orders 
-            WHERE status IN ('open', 'pending', 'trigger pending')
-        """
-        return pd.DataFrame(await async_fetch_query(db, text(query), {}))
+    async def monitor_gtt_orders(self, upstox_api: Optional[Any], db: AsyncSession):
+        stmt = select(GTTOrder).where(GTTOrder.status == "PENDING", GTTOrder.broker == "Upstox")
+        result = await db.execute(stmt)
+        gtt_orders: List[GTTOrder] = result.scalars().all()
+        for gtt in gtt_orders:
+            try:
+                ltp_data = await get_ltp(upstox_api, None, [gtt.instrument_token])
+                ltp = ltp_data[0].last_price
+                if gtt.trigger_type == "single" and ltp >= gtt.trigger_price:
+                    await place_order(
+                        api=upstox_api,
+                        instrument_token=gtt.instrument_token,
+                        trading_symbol=gtt.trading_symbol,
+                        transaction_type=gtt.transaction_type,
+                        quantity=gtt.quantity,
+                        price=gtt.limit_price,
+                        order_type="LIMIT",
+                        broker="Upstox",
+                        db=db,
+                        user_id=gtt.user_id
+                    )
+                    gtt.status = "TRIGGERED"
+                    await db.commit()
+                    result = await db.execute(select(User).filter(User.user_id == gtt.user_id))
+                    user = result.scalars().first()
+                    if user:
+                        await notify(
+                            f"GTT Order Triggered: {gtt.gtt_order_id}",
+                            f"GTT order for {gtt.trading_symbol} triggered at ₹{ltp}",
+                            user.email
+                        )
+            except Exception as e:
+                logger.error(f"Error monitoring GTT order {gtt.gtt_order_id}: {str(e)}")
+        await asyncio.sleep(10)
 
-    async def _update_order_status(self, order_id, status, broker, db: AsyncSession):
+    async def _update_order_status(self, order_id: str, status: str, broker: str, db: AsyncSession):
         query = """
             UPDATE orders 
             SET status = :status 
@@ -169,21 +275,32 @@ class OrderMonitor:
         await async_execute_query(db, text(query), {"status": status, "order_id": order_id, "broker": broker})
 
     async def _store_queued_orders(self, db: AsyncSession):
+        logger.info("Storing queued orders")
         while not self.order_queue.empty():
             order = await self.order_queue.get()
-            await async_execute_query(db, text("""
-                INSERT INTO queued_orders (
-                    queued_order_id, parent_order_id, instrument_token, trading_symbol, transaction_type, 
-                    quantity, order_type, price, trigger_price, product_type, validity, is_gtt, status
-                ) VALUES (
-                    :queued_order_id, :parent_order_id, :instrument_token, :trading_symbol, :transaction_type, 
-                    :quantity, :order_type, :price, :trigger_price, :product_type, :validity, :is_gtt, :status
-                )
-            """), order)
+            logger.info(f"Inserting queued order: {order['queued_order_id']}")
+            try:
+                await async_execute_query(db, text("""
+                    INSERT INTO queued_orders (
+                        queued_order_id, parent_order_id, instrument_token, trading_symbol, transaction_type, 
+                        quantity, order_type, price, trigger_price, product_type, validity, is_gtt, status,
+                        broker, user_id)
+                    ) VALUES (
+                        :queued_order_id, :parent_order_id, :instrument_token, :trading_symbol, :transaction_type, 
+                        :quantity, :order_type, :price, :trigger_price, :product_type, :validity, :is_gtt, :status,
+                        :broker, :user_id)
+                    )
+                """), order)
+                await db.commit()
+                logger.info(f"Successfully inserted queued order: {order['queued_order_id']}")
+            except Exception as e:
+                logger.error(f"Error inserting queued order {order['queued_order_id']}: {str(e)}")
+                await db.rollback()
+                raise
             self.order_queue.task_done()
 
-    async def _process_queued_orders(self, order_id, instrument_token, trading_symbol, api, broker, db: AsyncSession,
-                                     upstox_apis, kite_apis):
+    async def _process_queued_orders(self, order_id: str, instrument_token: str, trading_symbol: str, api: Any,
+                                     broker: str, db: AsyncSession, upstox_apis: Dict[str, Any], kite_apis: Dict[str, Any]):
         query = """
             SELECT * FROM queued_orders 
             WHERE parent_order_id = :order_id AND status = 'QUEUED'
@@ -194,6 +311,7 @@ class OrderMonitor:
                 await place_order(
                     api=api,
                     instrument_token=instrument_token,
+                    trading_symbol=trading_symbol,
                     transaction_type=row["transaction_type"],
                     quantity=row["quantity"],
                     price=row["price"],
@@ -219,7 +337,7 @@ class OrderMonitor:
             except Exception as e:
                 logger.error(f"Error processing queued order for {order_id}: {str(e)}")
 
-    async def _clear_queued_orders(self, order_id, db: AsyncSession):
+    async def _clear_queued_orders(self, order_id: str, db: AsyncSession):
         query = """
             UPDATE queued_orders 
             SET status = 'CANCELLED' 
@@ -235,39 +353,25 @@ class OrderMonitor:
         await asyncio.gather(*[task for task in self.monitor_tasks if not task.done()], return_exceptions=True)
         self.monitor_tasks = []
 
-    async def run_scheduled_tasks(self, upstox_api=None, zerodha_api=None, user_apis=None):
-        await self.initialize_queue()
-        logger.info("Starting periodic sync tasks")
+    async def delete_gtt_order(self, api: Optional[Any], gtt_id: str, db: AsyncSession):
         try:
-            async for db in get_db():
-                # Fetch all users
-                result = await db.execute(select(User))
-                users = result.scalars().all()
-                for user in users:
-                    # Get user-specific APIs
-                    if user_apis and user.user_id in user_apis:
-                        upstox_api = user_apis[user.user_id]["upstox"]["order"]
-                        zerodha_api = user_apis[user.user_id]["zerodha"]["kite"]
-                    else:
-                        upstox_api = None
-                        zerodha_api = None
-                    await self.sync_order_statuses(upstox_api, zerodha_api, db)
-                while self.running:
-                    await asyncio.sleep(self.polling_interval)
-                    async for db_inner in get_db():
-                        for user in users:
-                            if user_apis and user.user_id in user_apis:
-                                upstox_api = user_apis[user.user_id]["upstox"]["order"]
-                                zerodha_api = user_apis[user.user_id]["zerodha"]["kite"]
-                            else:
-                                upstox_api = None
-                                zerodha_api = None
-                            await self.sync_order_statuses(upstox_api, zerodha_api, db_inner)
-        except asyncio.CancelledError:
-            logger.info("Periodic sync tasks cancelled")
-            raise
-        finally:
-            logger.info("Stopped periodic sync tasks")
+            result = await db.execute(select(GTTOrder).filter(GTTOrder.gtt_order_id == gtt_id))
+            gtt_order = result.scalars().first()
+            if not gtt_order:
+                logger.error(f"GTT order {gtt_id} not found in database")
+                raise HTTPException(status_code=404, detail=f"GTT order {gtt_id} not found")
+            if api:
+                api.delete_gtt(trigger_id=gtt_id)
+            query = "DELETE FROM gtt_orders WHERE gtt_order_id = :gtt_id"
+            await async_execute_query(db, text(query), {"gtt_id": gtt_id})
+            result = await db.execute(select(User).filter(User.user_id == gtt_order.user_id))
+            user = result.scalars().first()
+            if user:
+                await notify("GTT Order Deleted", f"GTT order {gtt_id} deleted", user.email)
+            return {"status": "success", "message": f"GTT order {gtt_id} deleted"}
+        except Exception as e:
+            logger.error(f"Error deleting GTT order {gtt_id}: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error deleting GTT order: {str(e)}")
 
 class OrderManager:
     def __init__(self, monitor: OrderMonitor):
@@ -282,7 +386,7 @@ class OrderManager:
     async def start(self, user_apis=None):
         async for db in get_db():
             await self._load_scheduled_orders(db)
-        await self._process_scheduled_orders(user_apis)
+        await self._process_scheduled_orders(db, user_apis)
 
     async def _load_scheduled_orders(self, db: AsyncSession):
         try:
@@ -295,25 +399,65 @@ class OrderManager:
             logger.error(f"Error in load_scheduled_orders: {str(e)}")
             self.scheduled_order_queue = []
 
-    async def _process_scheduled_orders(self, user_apis=None):
-        logger.info("Starting scheduled order processing")
+    async def _process_scheduled_orders(self, db: AsyncSession, user_apis: Dict[str, Dict[str, Any]]):
         try:
             while self.running:
-                async with self.order_lock:
-                    for order in self.scheduled_order_queue[:]:
-                        async for db in get_db():
-                            user_id = order.get("user_id", "default_user")
-                            if user_apis and user_id in user_apis:
-                                upstox_apis = user_apis[user_id]["upstox"]
-                                kite_apis = user_apis[user_id]["zerodha"]
-                            else:
-                                logger.warning(f"Skipping scheduled order {order['scheduled_order_id']}: APIs not initialized for user {user_id}")
+                query = """
+                    SELECT * FROM scheduled_orders 
+                    WHERE status = :status
+                """
+                scheduled_orders = await async_fetch_query(db, text(query), {"status": "PENDING"})
+                now = datetime.now()
+                for order in scheduled_orders:
+                    try:
+                        # Parse schedule_datetime if it's a string
+                        schedule_datetime = order["schedule_datetime"]
+                        if isinstance(schedule_datetime, str):
+                            schedule_datetime = datetime.strptime(schedule_datetime, "%Y-%m-%d %H:%M:%S")
+                        # Check if it's time to execute
+                        if schedule_datetime <= now:
+                            user_id = order["user_id"]
+                            upstox_api = user_apis.get(user_id, {}).get("upstox", {}).get("order")
+                            zerodha_api = user_apis.get(user_id, {}).get("zerodha", {}).get("kite")
+                            api = upstox_api if order["broker"] == "Upstox" else zerodha_api
+                            if not api:
+                                logger.warning(f"API not initialized for user {user_id}, broker {order['broker']}")
                                 continue
-                            await self._execute_scheduled_order(order, db, upstox_apis, kite_apis)
-                await asyncio.sleep(1)
+                            response = await place_order(
+                                api=api,
+                                instrument_token=order["instrument_token"],
+                                trading_symbol=order["trading_symbol"],
+                                transaction_type=order["transaction_type"],
+                                quantity=order["quantity"],
+                                price=order["price"],
+                                order_type=order["order_type"],
+                                trigger_price=order["trigger_price"],
+                                is_amo=order["is_amo"],
+                                product_type=order["product_type"],
+                                validity="DAY",
+                                stop_loss=order["stop_loss"],
+                                target=order["target"],
+                                broker=order["broker"],
+                                db=db,
+                                upstox_apis=user_apis.get(user_id, {}).get("upstox", {}),
+                                kite_apis=user_apis.get(user_id, {}).get("zerodha", {}),
+                                user_id=user_id
+                            )
+                            update_query = """
+                                UPDATE scheduled_orders 
+                                SET status = 'EXECUTED' 
+                                WHERE scheduled_order_id = :order_id
+                            """
+                            await async_execute_query(db, text(update_query), {"order_id": order["scheduled_order_id"]})
+                            logger.info(f"Scheduled order {order['scheduled_order_id']} executed")
+                    except Exception as e:
+                        logger.error(f"Error processing scheduled order {order['scheduled_order_id']}: {str(e)}")
+                await asyncio.sleep(60)  # Check every minute
         except asyncio.CancelledError:
             logger.info("Scheduled order processing cancelled")
             raise
+        except Exception as e:
+            logger.error(f"Unexpected error in _process_scheduled_orders: {str(e)}")
 
     async def _execute_scheduled_order(self, order, db: AsyncSession, upstox_apis=None, kite_apis=None):
         async with self.order_lock:
@@ -346,12 +490,19 @@ class OrderManager:
                     )
                     if result:
                         order_id = result.data.order_id if order["broker"] == "Upstox" else result
-                        self.scheduled_order_queue = [
-                            o for o in self.scheduled_order_queue if
-                            o["scheduled_order_id"] != order["scheduled_order_id"]
-                        ]
+                        query = """
+                            UPDATE scheduled_orders 
+                            SET status = 'EXECUTED' 
+                            WHERE scheduled_order_id = :order_id
+                        """
+                        await async_execute_query(db, text(query), {"order_id": order["scheduled_order_id"]})
                         query = "DELETE FROM scheduled_orders WHERE scheduled_order_id = :order_id"
                         await async_execute_query(db, text(query), {"order_id": order["scheduled_order_id"]})
+                        logger.info(f"Scheduled order {order['scheduled_order_id']} executed with order ID {order_id}")
+                        result = await db.execute(select(User).filter(User.user_id == order.get("user_id", "default_user")))
+                        user = result.scalars().first()
+                        if user:
+                            await notify("Scheduled Order Executed", f"Order ID: {order_id}", user.email)
             except Exception as e:
                 logger.error(f"Error executing scheduled order {order['scheduled_order_id']}: {str(e)}")
 
@@ -361,9 +512,39 @@ class OrderManager:
                               db: AsyncSession = None, user_id: str = "default_user"):
         try:
             if broker != "Zerodha":
-                await place_order(api, instrument_token, transaction_type, quantity, limit_price,
-                                  "LIMIT", trigger_price, False, "CNC", "DAY", None, None, broker, db, user_id=user_id)
-                return {"status": "success", "gtt_id": None}
+                gtt_id = str(uuid.uuid4())
+                query = """
+                    INSERT INTO gtt_orders (
+                        gtt_order_id, instrument_token, trading_symbol, transaction_type, quantity, 
+                        trigger_type, trigger_price, limit_price, second_trigger_price, second_limit_price, 
+                        status, broker, created_at, user_id
+                    ) VALUES (
+                        :gtt_id, :instrument_token, :trading_symbol, :transaction_type, :quantity, 
+                        :trigger_type, :trigger_price, :limit_price, :second_trigger_price, 
+                        :second_limit_price, :status, :broker, :created_at, :user_id
+                    )
+                """
+                await async_execute_query(db, text(query), {
+                    "gtt_id": gtt_id,
+                    "instrument_token": instrument_token,
+                    "trading_symbol": trading_symbol,
+                    "transaction_type": transaction_type,
+                    "quantity": quantity,
+                    "trigger_type": trigger_type,
+                    "trigger_price": trigger_price,
+                    "limit_price": limit_price,
+                    "second_trigger_price": second_trigger_price,
+                    "second_limit_price": second_limit_price,
+                    "status": "PENDING",
+                    "broker": broker,
+                    "created_at": datetime.now(),
+                    "user_id": user_id
+                })
+                result = await db.execute(select(User).filter(User.user_id == user_id))
+                user = result.scalars().first()
+                if user:
+                    await notify("GTT Order Placed", f"GTT order {gtt_id} for {trading_symbol} placed", user.email)
+                return {"status": "success", "gtt_id": gtt_id}
             condition = {
                 "exchange": "NSE",
                 "tradingsymbol": trading_symbol,
@@ -438,6 +619,10 @@ class OrderManager:
                 "created_at": datetime.now(),
                 "user_id": user_id
             })
+            result = await db.execute(select(User).filter(User.user_id == user_id))
+            user = result.scalars().first()
+            if user:
+                await notify("GTT Order Placed", f"GTT order {gtt_id} for {trading_symbol} placed", user.email)
             return {"status": "success", "gtt_id": gtt_id}
         except Exception as e:
             logger.error(f"Error placing GTT order for {trading_symbol}: {str(e)}")
@@ -447,17 +632,15 @@ class OrderManager:
                                second_trigger_price: Optional[float] = None, second_limit_price: Optional[float] = None,
                                db: AsyncSession = None):
         try:
-            # Fetch the existing GTT order to get details
             stmt = select(GTTOrder).where(GTTOrder.gtt_order_id == gtt_id)
             result = await db.execute(stmt)
             gtt_order = result.scalars().first()
             if not gtt_order:
                 raise ValueError(f"GTT order {gtt_id} not found")
-
             condition = {
                 "exchange": "NSE",
                 "tradingsymbol": gtt_order.trading_symbol,
-                "last_price": trigger_price  # Approximate with trigger price as we don't have last price here
+                "last_price": trigger_price
             }
             if trigger_type == "single":
                 condition["trigger_values"] = [trigger_price]
@@ -501,7 +684,6 @@ class OrderManager:
                 last_price=condition["last_price"],
                 orders=orders
             )
-            # Update the database
             query = """
                 UPDATE gtt_orders 
                 SET trigger_type = :trigger_type, trigger_price = :trigger_price, limit_price = :limit_price,
@@ -516,43 +698,23 @@ class OrderManager:
                 "second_trigger_price": second_trigger_price,
                 "second_limit_price": second_limit_price
             })
+            result = await db.execute(select(User).filter(User.user_id == gtt_order.user_id))
+            user = result.scalars().first()
+            if user:
+                await notify("GTT Order Modified", f"GTT order {gtt_id} modified", user.email)
             return {"status": "success", "gtt_id": gtt_id}
         except Exception as e:
             logger.error(f"Error modifying GTT order {gtt_id}: {str(e)}")
             return {"status": "error", "message": str(e)}
 
-    async def delete_gtt_order(self, api, gtt_id: str, db: AsyncSession):
-        try:
-            api.delete_gtt(trigger_id=gtt_id)
-            query = "DELETE FROM gtt_orders WHERE gtt_order_id = :gtt_id"
-            await async_execute_query(db, text(query), {"gtt_id": gtt_id})
-            return {"status": "success", "message": f"GTT order {gtt_id} deleted"}
-        except Exception as e:
-            logger.error(f"Error deleting GTT order {gtt_id}: {str(e)}")
-            return {"status": "error", "message": str(e)}
-
 @retry(stop=stop_after_attempt(3), retry=retry_if_not_exception_type(TokenExpiredError))
 async def init_upstox_api(db: AsyncSession, user_id: str, auth_code: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Initialize Upstox APIs for the given user.
-
-    Args:
-        db: Database session
-        user_id: User ID
-        auth_code: Authorization code for Upstox (optional)
-
-    Returns:
-        Dict of Upstox APIs or None if initialization fails
-    """
     try:
         result = await db.execute(select(User).filter(User.user_id == user_id))
         user = result.scalars().first()
         if not user:
             raise ValueError(f"User {user_id} not found")
-
         upstox_apis = {"order": None, "portfolio": None, "market_data": None, "user": None}
-
-        # Initialize Upstox APIs
         if user.upstox_access_token and user.upstox_access_token_expiry and datetime.now() < user.upstox_access_token_expiry:
             logger.info(f"Upstox access token still valid for user {user_id}, expires at {user.upstox_access_token_expiry}")
             config = upstox_client.Configuration()
@@ -566,15 +728,8 @@ async def init_upstox_api(db: AsyncSession, user_id: str, auth_code: Optional[st
                 "history": upstox_client.HistoryApi(api_client)
             }
         else:
-            logger.info(f"Upstox access token expired or missing for user {user_id}, fetching new token")
-            if not user.upstox_access_token or not user.upstox_access_token_expiry:
-                logger.warning(f"No Upstox access token for user {user_id}")
-                return {"user": None, "order": None, "portfolio": None, "market_data": None, "history": None}
-
-            if user.upstox_access_token_expiry < datetime.now():
-                logger.warning(f"Upstox access token expired for user {user_id}")
-                raise TokenExpiredError(broker="Upstox")
-
+            logger.info(f"Upstox access token expired or missing for user {user_id}")
+            return {"user": None, "order": None, "portfolio": None, "market_data": None, "history": None}
         logger.info(f"Upstox APIs initialized for user {user_id}")
         return upstox_apis
     except Exception as e:
@@ -583,42 +738,20 @@ async def init_upstox_api(db: AsyncSession, user_id: str, auth_code: Optional[st
 
 @retry(stop=stop_after_attempt(3), retry=retry_if_not_exception_type(TokenExpiredError))
 async def init_zerodha_api(db: AsyncSession, user_id: str, request_token: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Initialize Zerodha APIs for the given user.
-
-    Args:
-        db: Database session
-        user_id: User ID
-        request_token: Request token for Zerodha (optional)
-
-    Returns:
-        Dict of Zerodha APIs or None if initialization fails
-    """
     try:
         result = await db.execute(select(User).filter(User.user_id == user_id))
         user = result.scalars().first()
         if not user:
             raise ValueError(f"User {user_id} not found")
-
         kite_apis = {"kite": None}
-
-        # Initialize Zerodha APIs
         if user.zerodha_access_token and user.zerodha_access_token_expiry and datetime.now() < user.zerodha_access_token_expiry:
-            logger.info(
-                f"Zerodha access token still valid for user {user_id}, expires at {user.zerodha_access_token_expiry}")
+            logger.info(f"Zerodha access token still valid for user {user_id}, expires at {user.zerodha_access_token_expiry}")
             kite = KiteConnect(api_key=user.zerodha_api_key)
             kite.set_access_token(user.zerodha_access_token)
             kite_apis = {"kite": kite}
         else:
-            logger.info(f"Zerodha access token expired or missing for user {user_id}, fetching new token")
-            if not user.zerodha_access_token or not user.zerodha_access_token_expiry:
-                logger.warning(f"No Zerodha access token for user {user_id}")
-                return {"kite": None}
-
-            if user.zerodha_access_token_expiry < datetime.now():
-                logger.warning(f"Zerodha access token expired for user {user_id}")
-                raise TokenExpiredError(broker="Zerodha")
-
+            logger.info(f"Zerodha access token expired or missing for user {user_id}")
+            return {"kite": None}
         logger.info(f"Zerodha APIs initialized for user {user_id}")
         return kite_apis
     except Exception as e:
@@ -632,22 +765,9 @@ async def fetch_upstox_access_token(db: AsyncSession, user_id: str, auth_code: s
         user = result.scalars().first()
         if not user:
             raise ValueError(f"User {user_id} not found")
-
         if not all([user.upstox_api_key, user.upstox_api_secret]):
             logger.error(f"Missing Upstox API credentials for user {user_id}")
             return None
-
-        if not auth_code:
-            logger.error(f"Missing auth_code for Upstox token generation for user {user_id}")
-            raise ValueError(
-                f"Missing auth_code for Upstox token generation for user {user_id}. "
-                "Please obtain a new auth_code by following these steps:\n"
-                f"1. Visit https://api.upstox.com/v2/login/authorization/dialog?client_id={user.upstox_api_key}&redirect_uri=https://your-redirect-uri&response_type=code\n"
-                "2. Log in and authorize the application to get the 'code' from the redirect URL.\n"
-                "3. Call the /auth/upstox/ endpoint with the 'auth_code' query parameter (e.g., /auth/upstox/?auth_code=<code>)"
-            )
-
-        # Construct the Upstox login URL
         redirect_uri = "https://api.upstox.com/v2/login"
         url = "https://api.upstox.com/v2/login/authorization/token"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
@@ -658,21 +778,19 @@ async def fetch_upstox_access_token(db: AsyncSession, user_id: str, auth_code: s
             "client_secret": user.upstox_api_secret,
             "redirect_uri": redirect_uri
         }
-        # Make the request to fetch the access token
         response = requests.post(url, headers=headers, data=data)
         if response.status_code == 200:
             access_token = response.json()["access_token"]
             expiry_time = get_next_expiry_time(UPSTOX_TOKEN_EXPIRY_TIME)
-
             user.upstox_access_token = access_token
             user.upstox_access_token_expiry = expiry_time
             await db.commit()
             logger.info(f"Upstox access token fetched for user {user_id}")
+            await notify("Upstox Authentication", "Successfully authenticated with Upstox", user.email)
             return access_token
         else:
             logger.error(f"Failed to fetch Upstox access token: {response.text}")
             return None
-
     except Exception as e:
         logger.error(f"Error fetching Upstox access token for user {user_id}: {str(e)}")
         return None
@@ -684,26 +802,23 @@ async def fetch_zerodha_access_token(db: AsyncSession, user_id: str, request_tok
         user = result.scalars().first()
         if not user:
             raise ValueError(f"User {user_id} not found")
-
         if not all([user.zerodha_api_key, user.zerodha_api_secret]):
-            logger.error(f"Missing Zerodha API Key & Secret for user {user_id}")
+            logger.error(f"Missing Zerodha API credentials for user {user_id}")
             return None
-
         kite = KiteConnect(api_key=user.zerodha_api_key)
         response = kite.generate_session(request_token, user.zerodha_api_secret)
         access_token = response['access_token']
         expiry_time = get_next_expiry_time(ZERODHA_TOKEN_EXPIRY_TIME)
-
         if access_token:
             user.zerodha_access_token = access_token
             user.zerodha_access_token_expiry = expiry_time
             await db.commit()
             logger.info(f"Zerodha access token fetched for user {user_id}")
+            await notify("Zerodha Authentication", "Successfully authenticated with Zerodha", user.email)
             return access_token
         else:
             logger.error(f"Failed to fetch Zerodha access token: {response}")
             return None
-
     except Exception as e:
         logger.error(f"Error fetching Zerodha access token for user {user_id}: {str(e)}")
         return None
@@ -711,8 +826,12 @@ async def fetch_zerodha_access_token(db: AsyncSession, user_id: str, request_tok
 async def place_order(api, instrument_token, trading_symbol, transaction_type, quantity, price=0, order_type="MARKET",
                       trigger_price=0, is_amo=False, product_type="D", validity='DAY', stop_loss=None, target=None,
                       broker="Upstox", db: AsyncSession = None, upstox_apis=None, kite_apis=None,
-                      user_id: str = "default_user"):
+                      user_id: str = "default_user", order_monitor=None):
     try:
+        if quantity <= 0:
+            raise ValueError("Quantity must be positive")
+        if price < 0 or trigger_price < 0:
+            raise ValueError("Price and trigger price cannot be negative")
         if broker == "Upstox":
             order = upstox_client.PlaceOrderRequest(
                 quantity=quantity,
@@ -764,30 +883,35 @@ async def place_order(api, instrument_token, trading_symbol, transaction_type, q
             "order_timestamp": datetime.now(),
             "user_id": user_id,
         }])
-        await load_sql_data(order_data, "orders", load_type="append", index_required=False, db=db,
-                            database="trading_db")
+        await load_sql_data(order_data, "orders", load_type="append", index_required=False, db=db)
         if stop_loss or target:
-            asyncio.create_task(OrderMonitor().monitor_order(
+            asyncio.create_task(order_monitor.monitor_order(
                 primary_order_id, instrument_token, trading_symbol, transaction_type, quantity,
                 product_type, stop_loss, target, api, broker, db, upstox_apis, kite_apis
             ))
+        result = await db.execute(select(User).filter(User.user_id == user_id))
+        user = result.scalars().first()
+        if user:
+            await notify(f"Order Placed: {transaction_type} for {trading_symbol}",
+                         f"Order ID: {primary_order_id}, Quantity: {quantity}, Price: {price}", user.email)
+        logger.info(f"Order placed: {primary_order_id} for {trading_symbol}, user {user_id}")
         return response
+    except ValueError as ve:
+        logger.error(f"Validation error placing {broker} order for {trading_symbol}: {str(ve)}")
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        logger.error(f"Error placing {broker} order: {str(e)}")
-        raise
+        logger.error(f"Error placing {broker} order for {trading_symbol}, user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to place order: {str(e)}")
 
 async def modify_order(api, order_id: str, quantity: Optional[int] = None, order_type: Optional[str] = None,
                        price: Optional[float] = None, trigger_price: Optional[float] = None,
                        validity: Optional[str] = "DAY", broker: str = "Upstox", db: AsyncSession = None):
     try:
-        # Fetch the existing order to get current details
         stmt = select(Order).where(Order.order_id == order_id, Order.broker == broker)
         result = await db.execute(stmt)
         order = result.scalars().first()
         if not order:
             raise ValueError(f"Order {order_id} not found")
-
-        # Prepare modified parameters
         modified_params = {
             "quantity": quantity if quantity is not None else order.quantity,
             "order_type": order_type if order_type is not None else order.order_type,
@@ -795,7 +919,6 @@ async def modify_order(api, order_id: str, quantity: Optional[int] = None, order
             "trigger_price": trigger_price if trigger_price is not None else order.trigger_price,
             "validity": validity
         }
-
         if broker == "Upstox":
             modify_request = upstox_client.ModifyOrderRequest(
                 quantity=modified_params["quantity"],
@@ -816,8 +939,6 @@ async def modify_order(api, order_id: str, quantity: Optional[int] = None, order
                 trigger_price=modified_params["trigger_price"] if modified_params["order_type"] in ["SL", "SL-M"] else 0,
                 validity=zerodha_validity
             )
-
-        # Update the database
         query = """
             UPDATE orders 
             SET quantity = :quantity, order_type = :order_type, price = :price, trigger_price = :trigger_price, validity = :validity
@@ -832,369 +953,271 @@ async def modify_order(api, order_id: str, quantity: Optional[int] = None, order
             "trigger_price": modified_params["trigger_price"],
             "validity": modified_params["validity"]
         })
+        result = await db.execute(select(User).filter(User.user_id == order.user_id))
+        user = result.scalars().first()
+        if user:
+            await notify(f"Order Modified: {order_id}",
+                         f"Updated quantity: {quantity}, order_type: {order_type}", user.email)
         return {"status": "success", "order_id": order_id}
     except Exception as e:
         logger.error(f"Error modifying order {order_id}: {str(e)}")
         raise
 
-def get_order_book(upstox_api, kite_api):
-    orders = []
+async def get_order_book(upstox_api, kite_api):
     try:
-        # Fetch Upstox orders
+        orders = []
         if upstox_api:
             upstox_orders = upstox_api.get_order_book(api_version="v2").data
             for order in upstox_orders:
                 order_dict = order.to_dict()
                 orders.append({
                     "Broker": "Upstox",
-                    "Order ID": order_dict.get("order_id", ""),
+                    "OrderID": order_dict.get("order_id", ""),
                     "Symbol": order_dict.get("trading_symbol", ""),
                     "Exchange": order_dict.get("exchange", ""),
-                    "Trans. Type": order_dict.get("transaction_type", ""),
-                    "Order Type": order_dict.get("order_type", ""),
+                    "TransType": order_dict.get("transaction_type", ""),
+                    "OrderType": order_dict.get("order_type", ""),
                     "Product": order_dict.get("product", ""),
                     "Quantity": order_dict.get("quantity", 0),
                     "Status": order_dict.get("status", ""),
                     "Price": order_dict.get("price", 0),
-                    "Trigger Price": order_dict.get("trigger_price", 0),
-                    "Avg. Price": order_dict.get("average_price", 0),
-                    "Filled Qty": order_dict.get("filled_quantity", 0),
-                    "Order Time": order_dict.get("order_timestamp", ""),
+                    "TriggerPrice": order_dict.get("trigger_price", 0),
+                    "AvgPrice": order_dict.get("average_price", 0),
+                    "FilledQty": order_dict.get("filled_quantity", 0),
+                    "OrderTime": order_dict.get("order_timestamp", ""),
                     "Remarks": order_dict.get("status_message", "")
                 })
-    except Exception as e:
-        logger.error(f"Error fetching Upstox orders: {str(e)}")
-        raise
-
-    try:
-        # Fetch Zerodha orders
         if kite_api:
             zerodha_orders = kite_api.orders()
             for order in zerodha_orders:
                 orders.append({
                     "Broker": "Zerodha",
-                    "Order ID": order.get("order_id", ""),
+                    "OrderID": order.get("order_id", ""),
                     "Symbol": order.get("tradingsymbol", ""),
                     "Exchange": order.get("exchange", ""),
-                    "Trans. Type": order.get("transaction_type", ""),
-                    "Order Type": order.get("order_type", ""),
+                    "TransType": order.get("transaction_type", ""),
+                    "OrderType": order.get("order_type", ""),
                     "Product": order.get("product", ""),
                     "Quantity": order.get("quantity", 0),
                     "Status": order.get("status", ""),
                     "Price": order.get("price", 0),
-                    "Trigger Price": order.get("trigger_price", 0),
-                    "Avg. Price": order.get("average_price", 0),
-                    "Filled Qty": order.get("filled_quantity", 0),
-                    "Order Time": order.get("order_timestamp", ""),
+                    "TriggerPrice": order.get("trigger_price", 0),
+                    "AvgPrice": order.get("average_price", 0),
+                    "FilledQty": order.get("filled_quantity", 0),
+                    "OrderTime": order.get("order_timestamp", ""),
                     "Remarks": order.get("status_message", "")
                 })
+        orders_df = pd.DataFrame(orders)
+        return orders_df
     except Exception as e:
-        logger.error(f"Error fetching Zerodha orders: {str(e)}")
+        logger.error(f"Error fetching order book: {str(e)}")
         raise
 
-    return pd.DataFrame(orders)
-
-def get_positions(upstox_api, zerodha_api):
+async def get_positions(upstox_api, zerodha_api):
     try:
         positions = []
-        try:
-            # Upstox positions
-            if upstox_api:
-                upstox_positions = upstox_api.get_positions(api_version="v2").data
-                for pos in upstox_positions:
-                    pos_dict = pos.to_dict()
-                    positions.append({
-                        "Broker": "Upstox",
-                        "Symbol": pos_dict.get("trading_symbol", ""),
-                        "Exchange": pos_dict.get("exchange", ""),
-                        "Product": pos_dict.get("product", ""),
-                        "Quantity": pos_dict.get("quantity", 0),
-                        "Avg. Price": pos_dict.get("average_price", 0),
-                        "Last Price": pos_dict.get("last_price", 0),
-                        "P&L": pos_dict.get("pnl", 0),
-                        "Instrument Token": pos_dict.get("instrument_token", "")
-                    })
-        except Exception as e:
-            logger.error(f"Failed to fetch Upstox positions: {e}")
-
-        try:
-            # Zerodha positions
-            if zerodha_api:
-                zerodha_positions = zerodha_api.positions().get("net", [])
-                for pos in zerodha_positions:
-                    positions.append({
-                        "Broker": "Zerodha",
-                        "Symbol": pos.get("tradingsymbol", ""),
-                        "Exchange": pos.get("exchange", ""),
-                        "Product": pos.get("product", ""),
-                        "Quantity": pos.get("net_quantity", 0),
-                        "Avg. Price": pos.get("average_price", 0),
-                        "Last Price": pos.get("last_price", 0),
-                        "P&L": pos.get("pnl", 0),
-                        "Instrument Token": f"{pos.get('exchange')}|{pos.get('tradingsymbol')}"
-                    })
-        except Exception as e:
-            logger.error(f"Failed to fetch Zerodha positions: {e}")
-
-        return pd.DataFrame(positions)
+        if upstox_api:
+            upstox_positions = upstox_api.get_positions(api_version="v2").data
+            for pos in upstox_positions:
+                pos_dict = pos.to_dict()
+                positions.append({
+                    "Broker": "Upstox",
+                    "Symbol": pos_dict.get("trading_symbol", ""),
+                    "Exchange": pos_dict.get("exchange", ""),
+                    "Product": pos_dict.get("product", ""),
+                    "Quantity": pos_dict.get("quantity", 0),
+                    "AvgPrice": pos_dict.get("average_price", 0),
+                    "LastPrice": pos_dict.get("last_price", 0),
+                    "PnL": pos_dict.get("pnl", 0),
+                    "InstrumentToken": pos_dict.get("instrument_token", "")
+                })
+        if zerodha_api:
+            zerodha_positions = zerodha_api.positions().get("net", [])
+            for pos in zerodha_positions:
+                positions.append({
+                    "Broker": "Zerodha",
+                    "Symbol": pos.get("tradingsymbol", ""),
+                    "Exchange": pos.get("exchange", ""),
+                    "Product": pos.get("product", ""),
+                    "Quantity": pos.get("net_quantity", 0),
+                    "AvgPrice": pos.get("average_price", 0),
+                    "LastPrice": pos.get("last_price", 0),
+                    "PnL": pos.get("pnl", 0),
+                    "InstrumentToken": f"{pos.get('exchange')}|{pos.get('tradingsymbol')}"
+                })
+        positions_df = pd.DataFrame(positions)
+        return positions_df
     except Exception as e:
         logger.error(f"Error fetching positions: {str(e)}")
         raise
 
-def get_portfolio(upstox_api, zerodha_api):
+async def get_portfolio(upstox_api, zerodha_api):
     try:
         holdings = []
-        try:
-            # Upstox portfolio
-            if upstox_api:
-                upstox_holdings = upstox_api.get_holdings(api_version="v2").data
-                for holding in upstox_holdings:
-                    holding_dict = holding.to_dict()
-                    holdings.append({
-                        "Broker": "Upstox",
-                        "Symbol": holding_dict.get("trading_symbol", ""),
-                        "Exchange": holding_dict.get("exchange", ""),
-                        "Quantity": holding_dict.get("quantity", 0),
-                        "Last Price": holding_dict.get("last_price", 0),
-                        "Avg. Price": holding_dict.get("average_price", 0),
-                        "P&L": holding_dict.get("pnl", 0),
-                        "Day Change": holding_dict.get("day_change", 0) * holding_dict.get("quantity", 0),
-                        "Day Change %": holding_dict.get("day_change_percentage", 0),
-                    })
-        except Exception as e:
-            logger.error(f"Failed to fetch Upstox portfolio: {e}")
-
-        try:
-            # Zerodha portfolio
-            if zerodha_api:
-                zerodha_holdings = zerodha_api.holdings()
-                for holding in zerodha_holdings:
-                    holdings.append({
-                        "Broker": "Zerodha",
-                        "Symbol": holding.get("tradingsymbol", ""),
-                        "Exchange": holding.get("exchange", ""),
-                        "Quantity": holding.get("quantity", 0),
-                        "Last Price": holding.get("last_price", 0),
-                        "Avg. Price": holding.get("average_price", 0),
-                        "P&L": holding.get("pnl", 0),
-                        "Day Change": holding.get("day_change", 0) * holding.get("quantity", 0),
-                        "Day Change %": holding.get("day_change_percentage", 0),
-                    })
-        except Exception as e:
-            logger.error(f"Failed to fetch Zerodha portfolio: {e}")
-
-        return pd.DataFrame(holdings)
+        if upstox_api:
+            upstox_holdings = upstox_api.get_holdings(api_version="v2").data
+            for holding in upstox_holdings:
+                holding_dict = holding.to_dict()
+                holdings.append({
+                    "Broker": "Upstox",
+                    "Symbol": holding_dict.get("trading_symbol", ""),
+                    "Exchange": holding_dict.get("exchange", ""),
+                    "Quantity": holding_dict.get("quantity", 0),
+                    "LastPrice": holding_dict.get("last_price", 0),
+                    "AvgPrice": holding_dict.get("average_price", 0),
+                    "PnL": holding_dict.get("pnl", 0),
+                    "DayChange": holding_dict.get("day_change", 0) * holding_dict.get("quantity", 0),
+                    "DayChangePct": holding_dict.get("day_change_percentage", 0),
+                })
+        if zerodha_api:
+            zerodha_holdings = zerodha_api.holdings()
+            for holding in zerodha_holdings:
+                holdings.append({
+                    "Broker": "Zerodha",
+                    "Symbol": holding.get("tradingsymbol", ""),
+                    "Exchange": holding.get("exchange", ""),
+                    "Quantity": holding.get("quantity", 0),
+                    "LastPrice": holding.get("last_price", 0),
+                    "AvgPrice": holding.get("average_price", 0),
+                    "PnL": holding.get("pnl", 0),
+                    "DayChange": holding.get("day_change", 0) * holding.get("quantity", 0),
+                    "DayChangePct": holding.get("day_change_percentage", 0),
+                })
+        portfolio_df = pd.DataFrame(holdings)
+        return portfolio_df
     except Exception as e:
         logger.error(f"Error fetching portfolio: {str(e)}")
         raise
 
-def get_gtt_orders(zerodha_api):
-    """Fetch GTT orders (Zerodha only)."""
-    try:
-        if not zerodha_api:
-            return pd.DataFrame()
-        gtt_orders = zerodha_api.get_gtts()
-        gtt_list = [{
-            "Broker": "Zerodha",
-            "GTT ID": gtt["id"],
-            "Symbol": gtt["condition"]["tradingsymbol"],
-            "Exchange": gtt["condition"]["exchange"],
-            "Transaction Type": gtt["orders"][0]["transaction_type"],
-            "Quantity": gtt["orders"][0]["quantity"],
-            "Trigger Price": gtt["condition"]["trigger_values"][0],
-            "Limit Price": gtt["orders"][0]["price"],
-            "Status": gtt["status"],
-            "Created At": gtt["created_at"],
-            "Expires At": gtt["expires_at"],
-            "Result": gtt["orders"][0]["result"]["order_result"]["status"] if gtt["orders"][0]["result"] else None,
-        } for gtt in gtt_orders]
-        return pd.DataFrame(gtt_list)
-    except Exception as e:
-        logger.error(f"Failed to fetch GTT orders: {e}")
-        return pd.DataFrame()
-
-def get_funds_data(api, broker):
-    """Fetch funds data for Upstox or Zerodha."""
+async def get_funds_data(api, broker: str) -> dict:
     try:
         if not api:
             return {}
         if broker == "Upstox":
             funds_data = api.get_user_fund_margin(api_version="v2").data
+            # Ensure funds_data is a dictionary
+            if not isinstance(funds_data, dict):
+                logger.error(f"Unexpected Upstox funds data format: {type(funds_data)}")
+                return {}
+            return {
+                "equity": {
+                    "available_margin": funds_data.get("equity", {}).get("available_margin", 0),
+                    "used_margin": funds_data.get("equity", {}).get("used_margin", 0)
+                },
+                "commodity": {
+                    "available_margin": funds_data.get("commodity", {}).get("available_margin", 0),
+                    "used_margin": funds_data.get("commodity", {}).get("used_margin", 0)
+                }
+            }
         else:
             funds_data = api.margins()
-
-        return funds_data
+            return funds_data
     except Exception as e:
-        logger.error(f"Error fetching funds data: {str(e)}")
-        return None
+        logger.error(f"Error fetching funds data for {broker}: {str(e)}")
+        return {}
 
-def get_quotes(upstox_api, kite_api, instruments: List[str]) -> List[QuoteResponse]:
+async def get_quotes(upstox_api, kite_api, instruments: List[str]) -> List[QuoteResponse]:
     try:
         quotes = []
-        if upstox_api:
-            # Upstox expects a list of instrument tokens in the format "exchange:token"
-            response = upstox_api.get_full_market_quote(",".join(instruments), api_version="v2").data
-            for instrument, quote in response.items():
-                quote_dict = quote.to_dict()
-                quotes.append(QuoteResponse(
-                    instrument_token=instrument,
-                    last_price=quote_dict.get("last_price", 0.0),
-                    volume=quote_dict.get("volume", 0),
-                    average_price=quote_dict.get("average_price"),
-                    ohlc={
-                        "open": quote_dict.get("ohlc", {}).get("open", 0.0),
-                        "high": quote_dict.get("ohlc", {}).get("high", 0.0),
-                        "low": quote_dict.get("ohlc", {}).get("low", 0.0),
-                        "close": quote_dict.get("ohlc", {}).get("close", 0.0)
-                    }
-                ))
-        if kite_api:
-            response = kite_api.quote(instruments)
-            for instrument, quote in response.items():
-                quotes.append(QuoteResponse(
-                    instrument_token=instrument,
-                    last_price=quote.get("last_price", 0.0),
-                    volume=quote.get("volume", 0),
-                    average_price=quote.get("average_price"),
-                    ohlc={
-                        "open": quote.get("ohlc", {}).get("open", 0.0),
-                        "high": quote.get("ohlc", {}).get("high", 0.0),
-                        "low": quote.get("ohlc", {}).get("low", 0.0),
-                        "close": quote.get("ohlc", {}).get("close", 0.0)
-                    }
-                ))
+        response = upstox_api.get_full_market_quote(",".join(instruments), api_version="v2").data
+        for instrument, quote in response.items():
+            quote_dict = quote.to_dict()
+            quotes.append(QuoteResponse(
+                instrument_token=instrument,
+                last_price=quote_dict.get("last_price", 0.0),
+                volume=quote_dict.get("volume", 0),
+                average_price=quote_dict.get("average_price"),
+                ohlc={
+                    "open": quote_dict.get("ohlc", {}).get("open", 0.0),
+                    "high": quote_dict.get("ohlc", {}).get("high", 0.0),
+                    "low": quote_dict.get("ohlc", {}).get("low", 0.0),
+                    "close": quote_dict.get("ohlc", {}).get("close", 0.0)
+                }
+            ))
         return quotes
     except Exception as e:
         logger.error(f"Error fetching quotes: {str(e)}")
         raise
 
-def get_ohlc(upstox_api, kite_api, instruments: List[str]) -> List[OHLCResponse]:
+async def get_ohlc(upstox_api, kite_api, instruments: List[str]) -> List[OHLCResponse]:
     try:
         ohlc_data = []
-        if upstox_api:
-            response = upstox_api.get_full_market_quote(",".join(instruments), api_version="v2").data
-            for instrument, ohlc in response.items():
-                ohlc_dict = ohlc.to_dict()
-                ohlc_data.append(OHLCResponse(
-                    instrument_token=instrument,
-                    open=ohlc_dict.get("open", 0.0),
-                    high=ohlc_dict.get("high", 0.0),
-                    low=ohlc_dict.get("low", 0.0),
-                    close=ohlc_dict.get("close", 0.0),
-                    volume=ohlc_dict.get("volume")
-                ))
-        if kite_api:
-            response = kite_api.ohlc(instruments)
-            for instrument, ohlc in response.items():
-                ohlc_data.append(OHLCResponse(
-                    instrument_token=instrument,
-                    open=ohlc.get("ohlc", {}).get("open", 0.0),
-                    high=ohlc.get("ohlc", {}).get("high", 0.0),
-                    low=ohlc.get("ohlc", {}).get("low", 0.0),
-                    close=ohlc.get("ohlc", {}).get("close", 0.0),
-                    volume=ohlc.get("volume")
-                ))
+        response = upstox_api.get_full_market_quote(",".join(instruments), api_version="v2").data
+        for instrument, ohlc in response.items():
+            ohlc_dict = ohlc.to_dict()
+            ohlc_data.append(OHLCResponse(
+                instrument_token=instrument,
+                open=ohlc_dict.get("open", 0.0),
+                high=ohlc_dict.get("high", 0.0),
+                low=ohlc_dict.get("low", 0.0),
+                close=ohlc_dict.get("close", 0.0),
+                volume=ohlc_dict.get("volume")
+            ))
         return ohlc_data
     except Exception as e:
         logger.error(f"Error fetching OHLC data: {str(e)}")
         raise
 
-def get_ltp(upstox_api, kite_api, instruments: List[str]) -> List[LTPResponse]:
+async def get_ltp(upstox_api, kite_api, instruments: List[str]) -> List[LTPResponse]:
     try:
         ltp_data = []
-        if upstox_api:
-            response = upstox_api.get_full_market_quote(",".join(instruments), api_version="v2").data
-            for instrument, quote in response.items():
-                quote_dict = quote.to_dict()
-                ltp_data.append(LTPResponse(
-                    instrument_token=instrument,
-                    last_price=quote_dict.get("last_price", 0.0)
-                ))
-        if kite_api:
-            response = kite_api.ltp(instruments)
-            for instrument, ltp in response.items():
-                ltp_data.append(LTPResponse(
-                    instrument_token=instrument,
-                    last_price=ltp.get("last_price", 0.0)
-                ))
+        response = upstox_api.get_full_market_quote(",".join(instruments), api_version="v2").data
+        for instrument, quote in response.items():
+            quote_dict = quote.to_dict()
+            ltp_data.append(LTPResponse(
+                instrument_token=instrument,
+                last_price=quote_dict.get("last_price", 0.0)
+            ))
         return ltp_data
     except Exception as e:
         logger.error(f"Error fetching LTP: {str(e)}")
         raise
 
-def get_historical_data(upstox_api, kite_api, instrument: str, from_date: str, to_date: str, interval: str) -> HistoricalDataResponse:
+async def get_historical_data(upstox_api, kite_api, instrument: str, from_date: str, to_date: str, interval: str) -> HistoricalDataResponse:
     try:
         data_points = []
-        if upstox_api:
-            response = upstox_api.get_historical_candle_data1(
-                instrument_key=instrument,
-                interval=interval,
-                from_date=from_date,
-                to_date=to_date,
-                api_version="v2"
-            ).data.candles
-            for candle in response:
-                data_points.append(HistoricalDataPoint(
-                    timestamp=datetime.strptime(candle[0], "%Y-%m-%dT%H:%M:%S%z"),
-                    open=candle[1],
-                    high=candle[2],
-                    low=candle[3],
-                    close=candle[4],
-                    volume=candle[5]
-                ))
-        if kite_api:
-            response = kite_api.historical_data(
-                instrument_token=instrument.split(":")[1] if ":" in instrument else instrument,
-                from_date=from_date,
-                to_date=to_date,
-                interval=interval,
-                continuous=False
-            )
-            for candle in response:
-                data_points.append(HistoricalDataPoint(
-                    timestamp=datetime.strptime(candle["date"], "%Y-%m-%dT%H:%M:%S%z"),
-                    open=candle["open"],
-                    high=candle["high"],
-                    low=candle["low"],
-                    close=candle["close"],
-                    volume=candle.get("volume")
-                ))
-        return HistoricalDataResponse(instrument_token=instrument, data=data_points)
+        response = upstox_api.get_historical_candle_data1(
+            instrument_key=instrument,
+            interval=interval,
+            from_date=from_date,
+            to_date=to_date,
+            api_version="v2"
+        ).data.candles
+        for candle in response:
+            data_points.append(HistoricalDataPoint(
+                timestamp=datetime.strptime(candle[0], "%Y-%m-%dT%H:%M:%S%z"),
+                open=candle[1],
+                high=candle[2],
+                low=candle[3],
+                close=candle[4],
+                volume=candle[5]
+            ))
+        historical_data = HistoricalDataResponse(instrument_token=instrument, data=data_points)
+        return historical_data
     except Exception as e:
         logger.error(f"Error fetching historical data: {str(e)}")
         raise
 
-def get_instruments(upstox_api, kite_api, exchange: Optional[str] = None) -> List[Instrument]:
+async def get_instruments(upstox_api, kite_api, exchange: Optional[str] = None) -> List[Instrument]:
     try:
         instruments = []
-        if upstox_api:
-            response = upstox_api.instruments(api_version="v2").data
-            for inst in response:
-                inst_dict = inst.to_dict()
-                if exchange and inst_dict.get("exchange") != exchange:
-                    continue
-                instruments.append(Instrument(
-                    instrument_token=inst_dict.get("instrument_key"),
-                    exchange=inst_dict.get("exchange"),
-                    trading_symbol=inst_dict.get("trading_symbol"),
-                    name=inst_dict.get("name"),
-                    instrument_type=inst_dict.get("instrument_type"),
-                    segment=inst_dict.get("segment")
-                ))
-        if kite_api:
-            response = kite_api.instruments(exchange=exchange) if exchange else kite_api.instruments()
-            for inst in response:
-                instruments.append(Instrument(
-                    instrument_token=str(inst["instrument_token"]),
-                    exchange=inst["exchange"],
-                    trading_symbol=inst["tradingsymbol"],
-                    name=inst.get("name"),
-                    instrument_type=inst["instrument_type"],
-                    segment=inst["segment"]
-                ))
+        response = upstox_api.instruments(api_version="v2").data
+        for inst in response:
+            inst_dict = inst.to_dict()
+            if exchange and inst_dict.get("exchange") != exchange:
+                continue
+            instruments.append(Instrument(
+                instrument_token=inst_dict.get("instrument_key"),
+                exchange=inst_dict.get("exchange"),
+                trading_symbol=inst_dict.get("trading_symbol"),
+                name=inst_dict.get("name"),
+                instrument_type=inst_dict.get("instrument_type"),
+                segment=inst_dict.get("segment")
+            ))
+        logger.info(f"Fetched {len(instruments)} instruments for exchange {exchange}")
         return instruments
     except Exception as e:
-        logger.error(f"Error fetching instruments: {str(e)}")
+        logger.error(f"Error fetching instruments for exchange {exchange}: {str(e)}")
         raise
 
 def get_order_history(upstox_api, kite_api, order_id: str, broker: str) -> List[OrderHistory]:
@@ -1258,3 +1281,417 @@ def get_order_trades(upstox_api, kite_api, order_id: str, broker: str) -> List[T
     except Exception as e:
         logger.error(f"Error fetching trades for order {order_id}: {str(e)}")
         raise
+
+async def execute_strategy(api, strategy: str, instrument_token: str, quantity: int, stop_loss: float, take_profit: float,
+                           broker: str, db: AsyncSession, user_id: str):
+    try:
+        if quantity <= 0:
+            raise ValueError("Quantity must be positive")
+        if stop_loss < 0 or take_profit < 0:
+            raise ValueError("Stop loss and take profit cannot be negative")
+        if strategy not in ["MACD Crossover", "Bollinger Bands", "RSI Oversold/Overbought", "Stochastic Oscillator", "Support/Resistance Breakout"]:
+            raise ValueError(f"Invalid strategy: {strategy}")
+        data = await get_historical_data(upstox_api=api, kite_api=None, instrument=instrument_token,
+                                         from_date=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
+                                         to_date=datetime.now().strftime("%Y-%m-%d"), interval="day")
+        if not data.data:
+            raise ValueError("Failed to fetch historical data")
+        df = pd.DataFrame([{
+            "timestamp": point.timestamp,
+            "open": point.open,
+            "high": point.high,
+            "low": point.low,
+            "close": point.close,
+            "volume": point.volume
+        } for point in data.data])
+        signal = None
+        if strategy == "MACD Crossover":
+            macd_line, signal_line, _ = calculate_macd(df)
+            signal = check_macd_crossover(macd_line, signal_line)
+        elif strategy == "Bollinger Bands":
+            _, upper_band, lower_band = calculate_bollinger_bands(df)
+            signal = check_bollinger_band_signals(df, upper_band, lower_band)
+        elif strategy == "RSI Oversold/Overbought":
+            rsi = calculate_rsi(df)
+            signal = "BUY" if rsi.iloc[-1] < 30 else "SELL" if rsi.iloc[-1] > 70 else None
+        elif strategy == "Stochastic Oscillator":
+            k, d = calculate_stochastic_oscillator(df)
+            signal = check_stochastic_signals(k, d)
+        elif strategy == "Support/Resistance Breakout":
+            signal = check_support_resistance_breakout(df)
+        if signal:
+            trading_symbol = get_symbol_for_instrument(instrument_token)
+            current_price = df["close"].iloc[-1]
+            stop_loss_price = current_price * (1 - stop_loss / 100) if signal == "BUY" else current_price * (1 + stop_loss / 100)
+            take_profit_price = current_price * (1 + take_profit / 100) if signal == "BUY" else current_price * (1 - take_profit / 100)
+            result = await place_order(
+                api=api,
+                instrument_token=instrument_token,
+                trading_symbol=trading_symbol,
+                transaction_type=signal,
+                quantity=quantity,
+                price=0,
+                order_type="MARKET",
+                trigger_price=0,
+                is_amo=False,
+                product_type="CNC",
+                validity="DAY",
+                stop_loss=stop_loss_price,
+                target=take_profit_price,
+                broker=broker,
+                db=db,
+                user_id=user_id
+            )
+            if result:
+                order_id = result.data.order_id if broker == "Upstox" else result
+                logger.info(f"Strategy {strategy} executed for {trading_symbol}, order ID {order_id}, user {user_id}")
+                result = await db.execute(select(User).filter(User.user_id == user_id))
+                user = result.scalars().first()
+                if user:
+                    await notify(f"Strategy Order Placed: {strategy}",
+                                 f"Signal: {signal}, Order ID: {order_id}, Symbol: {trading_symbol}",
+                                 user.email)
+                return f"{signal} signal executed with order ID {order_id}"
+            logger.warning(f"Strategy {strategy} signal detected but order placement failed for {trading_symbol}")
+            return f"{signal} signal detected but order placement failed"
+        logger.info(f"No trading signal detected for strategy {strategy}, symbol {instrument_token}")
+        return "No trading signal detected"
+    except ValueError as ve:
+        logger.error(f"Validation error executing strategy {strategy} for {instrument_token}, user {user_id}: {str(ve)}")
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Error executing strategy {strategy} for {instrument_token}, user {user_id}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to execute strategy: {str(e)}")
+
+async def schedule_strategy_execution(api, strategy: str, instrument_token: str, quantity: int, stop_loss: float,
+                                     take_profit: float, interval_minutes: int, run_hours: List[tuple], broker: str,
+                                     db: AsyncSession, user_id: str):
+    try:
+        def is_market_open():
+            now = datetime.now().time()
+            weekday = datetime.now().weekday()
+            if weekday >= 5:  # Skip weekends
+                return False
+            for start_hour, end_hour in run_hours:
+                start_time = date_time(start_hour, 0)
+                end_time = date_time(end_hour, 0)
+                if start_time <= now <= end_time:
+                    return True
+            return False
+
+        async def run_strategy():
+            while True:
+                if is_market_open():
+                    result = await execute_strategy(
+                        api, strategy, instrument_token, quantity, stop_loss, take_profit, broker, db, user_id
+                    )
+                    logger.info(f"Strategy execution result for {strategy}: {result}")
+                    result = await db.execute(select(User).filter(User.user_id == user_id))
+                    user = result.scalars().first()
+                    if user:
+                        await notify(f"Strategy Execution: {strategy}", result, user.email)
+                else:
+                    logger.info("Market closed. Waiting for next interval.")
+                await asyncio.sleep(interval_minutes * 60)
+
+        task = asyncio.create_task(run_strategy())
+        logger.info(f"Scheduled strategy {strategy} for {instrument_token} every {interval_minutes} minutes")
+        task_key = f"{user_id}_{strategy}_{instrument_token}"
+        strategy_tasks[task_key] = task
+        return {"status": "success", "message": f"Strategy {strategy} scheduled"}
+    except Exception as e:
+        logger.error(f"Error scheduling strategy {strategy}: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+async def stop_strategy_execution(strategy: str, instrument_token: str, user_id: str, db: AsyncSession):
+    try:
+        # Note: In a production system, store task references in a database or Redis
+        # For simplicity, assume tasks are tracked in a global dict (not ideal)
+        global strategy_tasks
+        task_key = f"{user_id}_{strategy}_{instrument_token}"
+        if task_key in strategy_tasks:
+            task = strategy_tasks[task_key]
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                logger.info(f"Stopped strategy {strategy} for {instrument_token}, user {user_id}")
+            del strategy_tasks[task_key]
+            result = await db.execute(select(User).filter(User.user_id == user_id))
+            user = result.scalars().first()
+            if user:
+                await notify("Strategy Execution Stopped",
+                             f"Stopped strategy {strategy} for {instrument_token}",
+                             user.email)
+            return {"status": "success", "message": f"Stopped strategy {strategy} for {instrument_token}"}
+        else:
+            return {"status": "error", "message": f"No active strategy {strategy} for {instrument_token}"}
+    except Exception as e:
+        logger.error(f"Error stopping strategy {strategy} for {instrument_token}, user {user_id}: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str, params: Dict, start_date: str, end_date: str):
+    try:
+        data = await get_historical_data(upstox_api=None, kite_api=None, instrument=instrument_token,
+                                   from_date=start_date, to_date=end_date, interval=timeframe)
+        if not data.data:
+            return {"error": "Failed to fetch historical data"}
+        df = pd.DataFrame([{
+            "timestamp": point.timestamp,
+            "open": point.open,
+            "high": point.high,
+            "low": point.low,
+            "close": point.close,
+            "volume": point.volume
+        } for point in data.data])
+        if strategy == "Short Sell Optimization":
+            initial_investment = params.get("initial_investment", 50000)
+            stop_loss_atr_mult_range = params.get("stop_loss_atr_mult_range", [1.5, 2.5])
+            target_atr_mult_range = params.get("target_atr_mult_range", [4.0, 6.0])
+            stop_loss_atr_mult_values = [x for x in np.arange(stop_loss_atr_mult_range[0], stop_loss_atr_mult_range[1] + 0.5, 0.5)]
+            target_atr_mult_values = [x for x in np.arange(target_atr_mult_range[0], target_atr_mult_range[1] + 0.5, 0.5)]
+            best_result = None
+            best_profit = float('-inf')
+            for stop_loss_mult in stop_loss_atr_mult_values:
+                for target_mult in target_atr_mult_values:
+                    result = await backtest_short_sell(df, initial_investment, stop_loss_mult, target_mult)
+                    if result["TotalProfit"] > best_profit:
+                        best_profit = result["TotalProfit"]
+                        best_result = result
+            return best_result
+        else:
+            strategy_func = {
+                "MACD Crossover": macd_strategy,
+                "Bollinger Bands": bollinger_band_strategy,
+                "RSI Oversold/Overbought": rsi_strategy
+            }.get(strategy)
+            if not strategy_func:
+                return {"error": f"Unsupported strategy: {strategy}"}
+            result = await backtest_strategy_generic(df, strategy_func, **params)
+            return result
+    except Exception as e:
+        logger.error(f"Error backtesting strategy {strategy}: {str(e)}")
+        return {"error": str(e)}
+
+async def backtest_short_sell(df, initial_investment: float, stop_loss_atr_mult: float, target_atr_mult: float):
+    portfolio_value = initial_investment
+    tradebook = []
+    position = None
+    entry_price = 0
+    atr = calculate_atr(df)
+    for i, row in df.iterrows():
+        if position is None:
+            signal = check_short_sell_signal(row, atr.iloc[i])
+            if signal == "SELL":
+                position = "short"
+                entry_price = row["close"]
+                stop_loss = entry_price * (1 + stop_loss_atr_mult * atr.iloc[i] / entry_price)
+                target = entry_price * (1 - target_atr_mult * atr.iloc[i] / entry_price)
+        elif position == "short":
+            if row["high"] >= stop_loss:
+                exit_price = stop_loss
+                profit = (entry_price - exit_price) * initial_investment / entry_price
+                portfolio_value += profit
+                tradebook.append({
+                    "Date": row["timestamp"],
+                    "EntryPrice": entry_price,
+                    "ExitPrice": exit_price,
+                    "Profit": profit,
+                    "PortfolioValue": portfolio_value
+                })
+                position = None
+            elif row["low"] <= target:
+                exit_price = target
+                profit = (entry_price - exit_price) * initial_investment / entry_price
+                portfolio_value += profit
+                tradebook.append({
+                    "Date": row["timestamp"],
+                    "EntryPrice": entry_price,
+                    "ExitPrice": exit_price,
+                    "Profit": profit,
+                    "PortfolioValue": portfolio_value
+                })
+                position = None
+    total_trades = len(tradebook)
+    winning_trades = len([t for t in tradebook if t["Profit"] > 0])
+    total_profit = portfolio_value - initial_investment
+    win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+    yearly_summary = pd.DataFrame(tradebook).groupby(pd.to_datetime(tradebook["Date"]).dt.year).agg({
+        "Profit": "sum",
+        "PortfolioValue": "last"
+    }).to_dict()
+    return {
+        "InitialInvestment": initial_investment,
+        "StopLossATRMult": stop_loss_atr_mult,
+        "TargetATRMult": target_atr_mult,
+        "FinalPortfolioValue": portfolio_value,
+        "TotalProfit": total_profit,
+        "WinRate": win_rate,
+        "TotalTrades": total_trades,
+        "WinningTrades": winning_trades,
+        "LosingTrades": total_trades - winning_trades,
+        "YearlySummary": yearly_summary,
+        "Tradebook": pd.DataFrame(tradebook)
+    }
+
+def check_short_sell_signal(row, atr):
+    return "SELL" if row["close"] > row["open"] else None
+
+async def backtest_strategy_generic(df, strategy_func, **params):
+    df_copy = df.copy()
+    signals = strategy_func(df_copy, **params)
+    df_copy['signal'] = signals
+    df_copy['position'] = 0
+    df_copy['pnl'] = 0
+    position = 0
+    buy_price = 0
+    for i, row in df_copy.iterrows():
+        if row['signal'] == "BUY" and position == 0:
+            position = 1
+            buy_price = row['close']
+            df_copy.at[i, 'position'] = position
+        elif row['signal'] == "SELL" and position == 1:
+            position = 0
+            sell_price = row['close']
+            df_copy.at[i, 'position'] = position
+            df_copy.at[i, 'pnl'] = sell_price - buy_price
+    df_copy['cumulative_pnl'] = df_copy['pnl'].cumsum()
+    total_trades = df_copy['signal'].value_counts().sum()
+    profitable_trades = len(df_copy[df_copy['pnl'] > 0])
+    win_rate = profitable_trades / total_trades * 100 if total_trades > 0 else 0
+    return {
+        "data": df_copy.to_dict(orient="records"),
+        "total_trades": total_trades,
+        "win_rate": win_rate,
+        "total_pnl": df_copy['cumulative_pnl'].iloc[-1]
+    }
+
+async def get_analytics_data(upstox_api, instrument_token: str, timeframe: str, ema_period: int,
+                             rsi_period: int, lr_period: int, stochastic_k: int, stochastic_d: int) -> dict:
+    try:
+        from_date = (datetime.now() - timedelta(days=100)).strftime("%Y-%m-%d")
+        to_date = datetime.now().strftime("%Y-%m-%d")
+        data = await get_historical_data(upstox_api, None, instrument_token, from_date, to_date, timeframe)
+        # Convert HistoricalDataResponse to DataFrame
+        df = pd.DataFrame([
+            {
+                "timestamp": point.timestamp,
+                "open": point.open,
+                "high": point.high,
+                "low": point.low,
+                "close": point.close,
+                "volume": point.volume
+            }
+            for point in data.data
+        ])
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        ema = calculate_ema(df["close"], ema_period)
+        rsi = calculate_rsi(df["close"], rsi_period)
+        lr = calculate_linear_regression(df["close"], lr_period)
+        macd_line, signal_line, _ = calculate_macd(df["close"])  # Fixed: Unpack all three values
+        bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(df["close"])
+        stochastic_k_val, stochastic_d_val = calculate_stochastic_oscillator(df["high"], df["low"], df["close"], stochastic_k, stochastic_d)
+        atr = calculate_atr(df["high"], df["low"], df["close"])
+        # Replace NaN/inf with None
+        result = {
+            "ema": [None if pd.isna(x) or not np.isfinite(x) else x for x in ema],
+            "rsi": [None if pd.isna(x) or not np.isfinite(x) else x for x in rsi],
+            "lr": [None if pd.isna(x) or not np.isfinite(x) else x for x in lr],
+            "macd": [None if pd.isna(x) or not np.isfinite(x) else x for x in macd_line],
+            "signal": [None if pd.isna(x) or not np.isfinite(x) else x for x in signal_line],
+            "bb_upper": [None if pd.isna(x) or not np.isfinite(x) else x for x in bb_upper],
+            "bb_middle": [None if pd.isna(x) or not np.isfinite(x) else x for x in bb_middle],
+            "bb_lower": [None if pd.isna(x) or not np.isfinite(x) else x for x in bb_lower],
+            "stochastic_k": [None if pd.isna(x) or not np.isfinite(x) else x for x in stochastic_k_val],
+            "stochastic_d": [None if pd.isna(x) or not np.isfinite(x) else x for x in stochastic_d_val],
+            "atr": [None if pd.isna(x) or not np.isfinite(x) else x for x in atr]
+        }
+        return result
+    except Exception as e:
+        logger.error(f"Error in get_analytics_data: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def place_mf_sip(api, sip: MFSIPRequest, db: AsyncSession, user_id: str) -> MFSIPResponse:
+    try:
+        response = api.mf_sip(
+            fund=sip.scheme_code,
+            amount=sip.amount,
+            frequency=sip.frequency,
+            start_date=sip.start_date.strftime("%Y-%m-%d"),
+            instalments=-1  # Ongoing SIP
+        )
+        sip_id = response.get("sip_id")
+        sip_data = {
+            "sip_id": sip_id,
+            "scheme_code": sip.scheme_code,
+            "amount": sip.amount,
+            "frequency": sip.frequency,
+            "start_date": sip.start_date,
+            "status": "ACTIVE",
+            "user_id": user_id,
+            "created_at": datetime.now()
+        }
+        await async_execute_query(db, text("""
+            INSERT INTO mf_sips (
+                sip_id, scheme_code, amount, frequency, start_date, status, user_id, created_at
+            ) VALUES (
+                :sip_id, :scheme_code, :amount, :frequency, :start_date, :status, :user_id, :created_at
+            )
+        """), sip_data)
+        result = await db.execute(select(User).filter(User.user_id == user_id))
+        user = result.scalars().first()
+        if user:
+            await notify("Mutual Fund SIP Created",
+                         f"SIP {sip_id} for {sip.scheme_code} with amount ₹{sip.amount} created",
+                         user.email)
+        return MFSIPResponse(**sip_data)
+    except Exception as e:
+        logger.error(f"Error creating SIP for user {user_id}: {str(e)}")
+        raise
+
+async def get_mf_sips(api, db: AsyncSession, user_id: str) -> List[MFSIPResponse]:
+    try:
+        sips = api.mf_sips()
+        query = """
+            SELECT * FROM mf_sips WHERE user_id = :user_id AND status = 'ACTIVE'
+        """
+        db_sips = await async_fetch_query(db, text(query), {"user_id": user_id})
+        sip_list = []
+        for sip in sips:
+            db_sip = next((ds for ds in db_sips if ds["sip_id"] == sip["sip_id"]), None)
+            if db_sip:
+                sip_list.append(MFSIPResponse(
+                    sip_id=sip["sip_id"],
+                    scheme_code=sip["fund"],
+                    amount=sip["amount"],
+                    frequency=sip["frequency"],
+                    start_date=datetime.strptime(sip["start_date"], "%Y-%m-%d"),
+                    status=sip["status"],
+                    user_id=user_id,
+                    created_at=db_sip["created_at"]
+                ))
+        return sip_list
+    except Exception as e:
+        logger.error(f"Error listing SIPs for user {user_id}: {str(e)}")
+        raise
+
+async def cancel_mf_sip(api, sip_id: str, db: AsyncSession, user_id: str) -> dict:
+    try:
+        api.cancel_mf_sip(sip_id=sip_id)
+        query = """
+            UPDATE mf_sips 
+            SET status = 'CANCELLED' 
+            WHERE sip_id = :sip_id AND user_id = :user_id
+        """
+        await async_execute_query(db, text(query), {"sip_id": sip_id, "user_id": user_id})
+        result = await db.execute(select(User).filter(User.user_id == user_id))
+        user = result.scalars().first()
+        if user:
+            await notify("Mutual Fund SIP Cancelled",
+                         f"SIP {sip_id} cancelled",
+                         user.email)
+        return {"status": "success", "message": f"SIP {sip_id} cancelled"}
+    except Exception as e:
+        logger.error(f"Error cancelling SIP {sip_id} for user {user_id}: {str(e)}")
+        raise
+

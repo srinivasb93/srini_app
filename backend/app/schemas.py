@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, validator
 from datetime import datetime
 from typing import Optional, List, Dict
 
@@ -175,6 +175,15 @@ class PlaceOrderRequest(BaseModel):
     broker: str
     schedule_datetime: Optional[str] = None
 
+    @validator("schedule_datetime")
+    def validate_schedule_datetime(cls, v):
+        if v:
+            try:
+                datetime.strptime(v, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                raise ValueError("schedule_datetime must be in format 'YYYY-MM-DD HH:MM:SS'")
+        return v
+
 class ModifyOrderRequest(BaseModel):
     quantity: Optional[int] = None
     order_type: Optional[str] = None
@@ -247,3 +256,35 @@ class Trade(BaseModel):
     quantity: int
     price: float
     timestamp: datetime
+
+class StrategyRequest(BaseModel):
+    strategy: str
+    instrument_token: str
+    quantity: int
+    stop_loss: float
+    take_profit: float
+    broker: str
+
+class BacktestRequest(BaseModel):
+    instrument_token: str
+    timeframe: str
+    strategy: str
+    params: Dict[str, float]
+    start_date: str
+    end_date: str
+
+class MFSIPRequest(BaseModel):
+    scheme_code: str
+    amount: float
+    frequency: str
+    start_date: datetime
+
+class MFSIPResponse(BaseModel):
+    sip_id: str
+    scheme_code: str
+    amount: float
+    frequency: str
+    start_date: datetime
+    status: str
+    user_id: str
+    created_at: datetime

@@ -9,3 +9,5 @@ streamlit-option-menu
 lightweight-charts
 streamlit-lightweight-charts
 nsepython
+aiohttp
+streamlit-echarts

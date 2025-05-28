@@ -7,8 +7,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-async def load_sql_data(df: pd.DataFrame, table_name: str, load_type: str, index_required: bool, db: AsyncSession,
-                        database: str) -> None:
+async def load_sql_data(df: pd.DataFrame, table_name: str, load_type: str, index_required: bool, db: AsyncSession) -> None:
     """
     Load data from a DataFrame into the database using a bulk INSERT statement.
 

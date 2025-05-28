@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 DATABASE = 'NSEDATA'
 
 
-def get_historical_data(instrument_token, timeframe="days", sort_data=True):
+def get_historical_data_latest(instrument_token, timeframe="days", sort_data=True):
     try:
         end_date = datetime.now().strftime("%Y-%m-%d")
         start_date = (datetime.now() - timedelta(days=3650)).strftime("%Y-%m-%d")

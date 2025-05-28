@@ -119,3 +119,14 @@ class QueuedOrder(Base):
     status = Column(String)
     broker = Column(String)
     user_id = Column(String)
+
+class MFSIP(Base):
+    __tablename__ = "mf_sips"
+    sip_id = Column(String, primary_key=True)
+    scheme_code = Column(String)
+    amount = Column(Float)
+    frequency = Column(String)
+    start_date = Column(DateTime)
+    status = Column(String)
+    user_id = Column(String)
+    created_at = Column(DateTime)
