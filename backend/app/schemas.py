@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, validator
+from pydantic import BaseModel, EmailStr, validator, field_validator
 from datetime import datetime
 from typing import Optional, List, Dict
 
@@ -175,7 +175,7 @@ class PlaceOrderRequest(BaseModel):
     broker: str
     schedule_datetime: Optional[str] = None
 
-    @validator("schedule_datetime")
+    @field_validator("schedule_datetime")
     def validate_schedule_datetime(cls, v):
         if v:
             try:
@@ -235,9 +235,8 @@ class HistoricalDataResponse(BaseModel):
 
 class Instrument(BaseModel):
     instrument_token: str
-    exchange: str
     trading_symbol: str
-    name: Optional[str] = None
+    exchange: str
     instrument_type: Optional[str] = None
     segment: Optional[str] = None
 

@@ -25,7 +25,7 @@ from services import (
     OrderManager, OrderMonitor, init_upstox_api, init_zerodha_api,
     fetch_upstox_access_token, fetch_zerodha_access_token, place_order,
     get_order_book, get_positions, get_portfolio, get_funds_data,
-    get_quotes, get_ohlc, get_ltp, get_historical_data, get_instruments,
+    get_quotes, get_ohlc, get_ltp, get_historical_data, fetch_instruments,
     get_order_history, get_order_trades, modify_order, TokenExpiredError,
     execute_strategy, backtest_strategy, get_analytics_data, place_mf_sip,
     get_mf_sips, cancel_mf_sip, schedule_strategy_execution, stop_strategy_execution
@@ -283,9 +283,7 @@ async def place_new_order(order: PlaceOrderRequest, user_id: str = Depends(get_c
     try:
         if order.schedule_datetime:
             scheduled_order_id = str(uuid.uuid4())
-            # Parse schedule_datetime string to datetime
-            schedule_datetime = datetime.strptime(order.schedule_datetime,
-                                                  "%Y-%m-%d %H:%M:%S") if order.schedule_datetime else None
+
             order_data = {
                 "scheduled_order_id": scheduled_order_id,
                 "broker": order.broker,
@@ -297,7 +295,8 @@ async def place_new_order(order: PlaceOrderRequest, user_id: str = Depends(get_c
                 "price": order.price,
                 "trigger_price": order.trigger_price,
                 "product_type": order.product_type,
-                "schedule_datetime": order.schedule_datetime,
+                "schedule_datetime": datetime.strptime(order.schedule_datetime,
+                                                  "%Y-%m-%d %H:%M:%S") if order.schedule_datetime else None,
                 "stop_loss": order.stop_loss,
                 "target": order.target,
                 "status": "PENDING",
@@ -777,7 +776,7 @@ async def get_ltp_data(broker: str, instruments: str, user_id: str = Depends(get
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/historical-data/{broker}", response_model=HistoricalDataResponse, tags=["market-data"])
-async def get_historical(broker: str, instrument: str, from_date: str, to_date: str, interval: str,
+async def get_historical(broker: str, instrument: str, from_date: str, to_date: str, unit: str,  interval: str,
                         user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail="Invalid broker")
@@ -787,26 +786,34 @@ async def get_historical(broker: str, instrument: str, from_date: str, to_date: 
     if not (upstox_api or kite_api):
         raise HTTPException(status_code=400, detail=f"{broker} API not initialized")
     try:
-        historical_data = await get_historical_data(upstox_api, kite_api, instrument, from_date, to_date, interval)
+        result = await db.execute(select(User).filter(User.user_id == user_id))
+        user = result.scalars().first()
+        if not user:
+            raise ValueError(f"User {user_id} not found")
+
+        historical_data = await get_historical_data(upstox_api, user.upstox_access_token, instrument, from_date, to_date, unit, interval)
         return historical_data
     except Exception as e:
         logger.error(f"Error fetching {broker} historical data: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/instruments/{broker}", response_model=List[Instrument], tags=["market-data"])
-async def get_instruments_list(broker: str, exchange: Optional[str] = None, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_instruments_list(
+    broker: str,
+    exchange: Optional[str] = None,
+    refresh: bool = False,
+    db: AsyncSession = Depends(get_db)
+):
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail="Invalid broker")
-    user_apis_dict = await initialize_user_apis(user_id, db)
-    upstox_api = user_apis_dict["upstox"]["market_data"] if broker == "Upstox" else None
-    kite_api = user_apis_dict["zerodha"]["kite"] if broker == "Zerodha" else None
-    if not (upstox_api or kite_api):
-        raise HTTPException(status_code=400, detail=f"{broker} API not initialized")
     try:
-        instruments = await get_instruments(upstox_api, kite_api, exchange)
+        instruments = await fetch_instruments(db, refresh=refresh)
+        if exchange:
+            instruments = [inst for inst in instruments if inst.exchange == exchange]
+        logger.info(f"Fetched {len(instruments)} instruments for broker {broker}, exchange {exchange}")
         return instruments
     except Exception as e:
-        logger.error(f"Error fetching {broker} instruments: {str(e)}")
+        logger.error(f"Error fetching instruments: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/mutual-funds/instruments", tags=["mutual-funds"])

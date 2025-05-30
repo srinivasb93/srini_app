@@ -130,3 +130,12 @@ class MFSIP(Base):
     status = Column(String)
     user_id = Column(String)
     created_at = Column(DateTime)
+
+class Instrument(Base):
+    __tablename__ = "instruments"
+
+    instrument_token = Column(String(50), primary_key=True)
+    trading_symbol = Column(String(50), nullable=False, index=True)
+    exchange = Column(String(20), nullable=False)
+    instrument_type = Column(String(20), nullable=False)
+    segment = Column(String(20))

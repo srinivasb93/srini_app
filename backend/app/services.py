@@ -22,9 +22,9 @@ from common_utils.db_utils import async_fetch_query, async_execute_query
 from common_utils.read_write_sql_data import load_sql_data
 from common_utils.utils import notify
 from common_utils.upstox_utils import get_symbol_for_instrument, get_historical_data_latest, get_market_quote
-from models import Order, ScheduledOrder, QueuedOrder, User, GTTOrder
+from models import Order, ScheduledOrder, QueuedOrder, User, GTTOrder, Instrument
 from schemas import Order as OrderSchema, ScheduledOrder as ScheduledOrderSchema, OrderHistory, Trade, QuoteResponse, \
-    OHLCResponse, LTPResponse, HistoricalDataResponse, Instrument, HistoricalDataPoint, MFSIPResponse, MFSIPRequest
+    OHLCResponse, LTPResponse, HistoricalDataResponse, Instrument as InstrumentSchema, HistoricalDataPoint, MFSIPResponse, MFSIPRequest
 from database import get_db
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_not_exception_type
 from common_utils.indicators import calculate_ema, calculate_rsi, calculate_linear_regression, calculate_atr, \
@@ -883,18 +883,21 @@ async def place_order(api, instrument_token, trading_symbol, transaction_type, q
             "order_timestamp": datetime.now(),
             "user_id": user_id,
         }])
+
         await load_sql_data(order_data, "orders", load_type="append", index_required=False, db=db)
-        if stop_loss or target:
-            asyncio.create_task(order_monitor.monitor_order(
-                primary_order_id, instrument_token, trading_symbol, transaction_type, quantity,
-                product_type, stop_loss, target, api, broker, db, upstox_apis, kite_apis
-            ))
         result = await db.execute(select(User).filter(User.user_id == user_id))
         user = result.scalars().first()
         if user:
             await notify(f"Order Placed: {transaction_type} for {trading_symbol}",
                          f"Order ID: {primary_order_id}, Quantity: {quantity}, Price: {price}", user.email)
         logger.info(f"Order placed: {primary_order_id} for {trading_symbol}, user {user_id}")
+
+        if stop_loss or target:
+            asyncio.create_task(order_monitor.monitor_order(
+                primary_order_id, instrument_token, trading_symbol, transaction_type, quantity,
+                product_type, stop_loss, target, api, broker, db, upstox_apis, kite_apis
+            ))
+
         return response
     except ValueError as ve:
         logger.error(f"Validation error placing {broker} order for {trading_symbol}: {str(ve)}")
@@ -1117,9 +1120,11 @@ async def get_funds_data(api, broker: str) -> dict:
         return {}
 
 async def get_quotes(upstox_api, kite_api, instruments: List[str]) -> List[QuoteResponse]:
+    if not upstox_api:
+        raise HTTPException(status_code=400, detail="Upstox API required for quotes")
     try:
-        quotes = []
         response = upstox_api.get_full_market_quote(",".join(instruments), api_version="v2").data
+        quotes = []
         for instrument, quote in response.items():
             quote_dict = quote.to_dict()
             quotes.append(QuoteResponse(
@@ -1137,31 +1142,35 @@ async def get_quotes(upstox_api, kite_api, instruments: List[str]) -> List[Quote
         return quotes
     except Exception as e:
         logger.error(f"Error fetching quotes: {str(e)}")
-        raise
+        raise HTTPException(status_code=500, detail=str(e))
 
 async def get_ohlc(upstox_api, kite_api, instruments: List[str]) -> List[OHLCResponse]:
+    if not upstox_api:
+        raise HTTPException(status_code=400, detail="Upstox API required for OHLC")
     try:
+        response = upstox_api.get_market_quote_ohlc(",".join(instruments), interval="1d", api_version="v2").data
         ohlc_data = []
-        response = upstox_api.get_full_market_quote(",".join(instruments), api_version="v2").data
         for instrument, ohlc in response.items():
             ohlc_dict = ohlc.to_dict()
             ohlc_data.append(OHLCResponse(
                 instrument_token=instrument,
-                open=ohlc_dict.get("open", 0.0),
-                high=ohlc_dict.get("high", 0.0),
-                low=ohlc_dict.get("low", 0.0),
-                close=ohlc_dict.get("close", 0.0),
+                open=ohlc_dict.get("ohlc", {}).get("open", 0.0),
+                high=ohlc_dict.get("ohlc", {}).get("high", 0.0),
+                low=ohlc_dict.get("ohlc", {}).get("low", 0.0),
+                close=ohlc_dict.get("ohlc", {}).get("close", 0.0),
                 volume=ohlc_dict.get("volume")
             ))
         return ohlc_data
     except Exception as e:
         logger.error(f"Error fetching OHLC data: {str(e)}")
-        raise
+        raise HTTPException(status_code=500, detail=str(e))
 
 async def get_ltp(upstox_api, kite_api, instruments: List[str]) -> List[LTPResponse]:
+    if not upstox_api:
+        raise HTTPException(status_code=400, detail="Upstox API required for LTP")
     try:
+        response = upstox_api.ltp(",".join(instruments), api_version="v2").data
         ltp_data = []
-        response = upstox_api.get_full_market_quote(",".join(instruments), api_version="v2").data
         for instrument, quote in response.items():
             quote_dict = quote.to_dict()
             ltp_data.append(LTPResponse(
@@ -1171,54 +1180,107 @@ async def get_ltp(upstox_api, kite_api, instruments: List[str]) -> List[LTPRespo
         return ltp_data
     except Exception as e:
         logger.error(f"Error fetching LTP: {str(e)}")
-        raise
+        raise HTTPException(status_code=500, detail=str(e))
 
-async def get_historical_data(upstox_api, kite_api, instrument: str, from_date: str, to_date: str, interval: str) -> HistoricalDataResponse:
+async def fetch_and_load_index_data(index_name, db: AsyncSession = None) -> pd.DataFrame:
     try:
+        url = f"https://www.nseindia.com/api/equity-stockIndices?index={index_name.replace(' ', '%20')}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json().get("data", [])
+            df = pd.DataFrame(data)
+            df["index_name"] = index_name
+            df = df[["index_name", "symbol", "open", "dayHigh", "dayLow", "lastPrice", "previousClose","pChange", "yearHigh", "yearLow", "totalTradedVolume"]]
+            await load_sql_data(df, "index_data", load_type="replace", index_required=False, db=db)
+            return df
+        logger.error(f"Failed to fetch index data: {response.text}")
+        return pd.DataFrame()
+    except Exception as e:
+        logger.error(f"Error fetching index data: {str(e)}")
+        return pd.DataFrame()
+
+
+async def get_historical_data(upstox_api, upstox_access_token, instrument: str, from_date: str, to_date: str, unit: str,
+                              interval: str) -> HistoricalDataResponse:
+    if not upstox_api:
+        raise HTTPException(status_code=400, detail="Upstox API required for historical data")
+    try:
+        headers = {"Authorization": f"Bearer {upstox_access_token}"}
+        url = f"https://api.upstox.com/v3/historical-candle/{instrument}/{unit}/{interval}/{to_date}/{from_date}"
+        response = requests.get(url, headers=headers)
         data_points = []
-        response = upstox_api.get_historical_candle_data1(
-            instrument_key=instrument,
-            interval=interval,
-            from_date=from_date,
-            to_date=to_date,
-            api_version="v2"
-        ).data.candles
-        for candle in response:
-            data_points.append(HistoricalDataPoint(
-                timestamp=datetime.strptime(candle[0], "%Y-%m-%dT%H:%M:%S%z"),
-                open=candle[1],
-                high=candle[2],
-                low=candle[3],
-                close=candle[4],
-                volume=candle[5]
-            ))
-        historical_data = HistoricalDataResponse(instrument_token=instrument, data=data_points)
+        if response.status_code == 200:
+            candles = response.json().get("data", []).get("candles", [])
+            for candle in candles:
+                data_points.append(HistoricalDataPoint(
+                    timestamp=datetime.strptime(candle[0], "%Y-%m-%dT%H:%M:%S%z"),
+                    open=float(candle[1]),
+                    high=float(candle[2]),
+                    low=float(candle[3]),
+                    close=float(candle[4]),
+                    volume=int(candle[5])
+                ))
+            historical_data = HistoricalDataResponse(instrument_token=instrument,
+                                                     data=sorted(data_points, key=lambda x: x.timestamp))
+        else:
+            logger.error(f"Upstox API error: {response.text}")
+            raise HTTPException(status_code=502, detail="Failed to fetch historical data")
+
+        logger.info(f"Fetched {len(data_points)} historical data points for {instrument}")
         return historical_data
+    except requests.RequestException as re:
+        logger.error(f"Network error fetching historical data: {str(re)}")
+        raise HTTPException(status_code=502, detail="Network error")
     except Exception as e:
         logger.error(f"Error fetching historical data: {str(e)}")
-        raise
+        raise HTTPException(status_code=500, detail=str(e))
 
-async def get_instruments(upstox_api, kite_api, exchange: Optional[str] = None) -> List[Instrument]:
+
+async def fetch_instruments(db: AsyncSession, refresh: bool = False) -> List[InstrumentSchema]:
     try:
-        instruments = []
-        response = upstox_api.instruments(api_version="v2").data
-        for inst in response:
-            inst_dict = inst.to_dict()
-            if exchange and inst_dict.get("exchange") != exchange:
-                continue
-            instruments.append(Instrument(
-                instrument_token=inst_dict.get("instrument_key"),
-                exchange=inst_dict.get("exchange"),
-                trading_symbol=inst_dict.get("trading_symbol"),
-                name=inst_dict.get("name"),
-                instrument_type=inst_dict.get("instrument_type"),
-                segment=inst_dict.get("segment")
-            ))
-        logger.info(f"Fetched {len(instruments)} instruments for exchange {exchange}")
-        return instruments
+        if refresh:
+            path = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
+            instruments_df = pd.read_json(path)
+            instruments_df = instruments_df[
+                ['trading_symbol', 'instrument_key', 'exchange', 'instrument_type', 'segment']
+            ][(instruments_df['segment'] == 'NSE_EQ') & (instruments_df['instrument_type'] == 'EQ')]
+
+            await db.execute(text("DELETE FROM instruments"))
+            for _, row in instruments_df.iterrows():
+                instrument = Instrument(
+                    instrument_token=row["instrument_key"],
+                    trading_symbol=row["trading_symbol"],
+                    exchange=row["exchange"],
+                    instrument_type=row["instrument_type"],
+                    segment=row["segment"]
+                )
+                db.add(instrument)
+            await db.commit()
+            logger.info(f"Refreshed {len(instruments_df)} instruments in NSEDATA database")
+
+        query = select(Instrument)
+        result = await db.execute(query)
+        instruments = result.scalars().all()
+        if not instruments:
+            raise HTTPException(status_code=404, detail="No instruments found")
+
+        return [
+            InstrumentSchema(
+                instrument_token=inst.instrument_token,
+                exchange=inst.exchange,
+                trading_symbol=inst.trading_symbol,
+                instrument_type=inst.instrument_type,
+                segment=inst.segment
+            )
+            for inst in instruments
+        ]
+    except requests.RequestException as re:
+        logger.error(f"Network error fetching instruments: {str(re)}")
+        raise HTTPException(status_code=502, detail="Network error")
     except Exception as e:
-        logger.error(f"Error fetching instruments for exchange {exchange}: {str(e)}")
-        raise
+        logger.error(f"Error fetching instruments: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 def get_order_history(upstox_api, kite_api, order_id: str, broker: str) -> List[OrderHistory]:
     try:
@@ -1695,3 +1757,8 @@ async def cancel_mf_sip(api, sip_id: str, db: AsyncSession, user_id: str) -> dic
         logger.error(f"Error cancelling SIP {sip_id} for user {user_id}: {str(e)}")
         raise
 
+
+if __name__ == "__main__":
+    # Example usage
+    data = fetch_and_load_index_data("NIFTY 50")
+    print(data)
