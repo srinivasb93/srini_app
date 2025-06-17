@@ -27,12 +27,12 @@ headers = {
 
 def fetch_nse_data(payload):
     try:
-        output = requests.get(payload, headers=headers).json()
-        # print(output)
-    except ValueError:
         s = requests.Session()
-        output = s.get("http://nseindia.com", headers=headers)
-        output = s.get(payload, headers=headers).json()
+        s.get("https://www.nseindia.com", headers=headers, timeout=10)
+        s.get("https://www.nseindia.com/option-chain", headers=headers, timeout=10)
+        output = s.get(payload, headers=headers, timeout=10).json()
+    except ValueError:
+        output = {}
     return output
 
 
@@ -220,10 +220,10 @@ if __name__ == "__main__":
     # thematic_indices_list = []
     # indices_list = broad_indices_list + sector_indices_list + thematic_indices_list
     md = MarketData()
-    # print(md.fetch_and_load_etf_data())
-    data = md.fetch_index_pe_pb_div_data(start_date="1-1-2020",
-                                         end_date="1-1-2025")
-    print(data)
+    print(md.fetch_and_load_etf_data())
+    # data = md.fetch_index_pe_pb_div_data(start_date="1-1-2020",
+    #                                      end_date="1-1-2025")
+    # print(data)
     # print(md.load_index_stocks_data(indices_list))
     # print(md.load_all_stocks_table_with_stock_index(indices_list))
     # print(md.get_main_nse_indices_list())

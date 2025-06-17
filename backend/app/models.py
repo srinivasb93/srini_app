@@ -1,6 +1,7 @@
-from sqlalchemy import Column, String, Integer, Float, DateTime, Boolean, func
+from sqlalchemy import Column, String, Integer, Float, DateTime, Boolean, func, JSON
 from database import Base
 from datetime import datetime
+from uuid import uuid4
 
 class User(Base):
     __tablename__ = "users"
@@ -82,6 +83,7 @@ class GTTOrder(Base):
     trigger_type = Column(String)
     trigger_price = Column(Float)
     limit_price = Column(Float)
+    last_price = Column(Float)
     second_trigger_price = Column(Float, nullable=True)
     second_limit_price = Column(Float, nullable=True)
     status = Column(String)
@@ -139,3 +141,17 @@ class Instrument(Base):
     exchange = Column(String(20), nullable=False)
     instrument_type = Column(String(20), nullable=False)
     segment = Column(String(20))
+
+class Strategy(Base):
+    __tablename__ = "strategies"
+    strategy_id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    user_id = Column(String, nullable=False)
+    broker = Column(String, nullable=False)
+    name = Column(String, nullable=False)
+    description = Column(String)
+    entry_conditions = Column(JSON, nullable=False)
+    exit_conditions = Column(JSON, nullable=False)
+    parameters = Column(JSON, nullable=False)
+    status = Column(String, default="inactive")
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)

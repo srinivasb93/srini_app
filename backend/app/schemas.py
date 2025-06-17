@@ -1,6 +1,6 @@
 from pydantic import BaseModel, EmailStr, validator, field_validator
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 class UserBase(BaseModel):
     email: EmailStr
@@ -121,6 +121,7 @@ class GTTOrder(BaseModel):
     trigger_type: Optional[str] = None
     trigger_price: Optional[float] = None
     limit_price: Optional[float] = None
+    last_price: Optional[float] = None
     second_trigger_price: Optional[float] = None
     second_limit_price: Optional[float] = None
     status: Optional[str] = None
@@ -257,12 +258,28 @@ class Trade(BaseModel):
     timestamp: datetime
 
 class StrategyRequest(BaseModel):
-    strategy: str
-    instrument_token: str
-    quantity: int
-    stop_loss: float
-    take_profit: float
     broker: str
+    name: str
+    description: Optional[str] = None
+    entry_conditions: List[Dict[str, Any]]
+    exit_conditions: List[Dict[str, Any]]
+    parameters: Dict[str, Any]
+
+class StrategyResponse(BaseModel):
+    strategy_id: str
+    user_id: str
+    broker: str
+    name: str
+    description: Optional[str] = None
+    entry_conditions: List[Dict[str, Any]]
+    exit_conditions: List[Dict[str, Any]]
+    parameters: Dict[str, Any]
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
 
 class BacktestRequest(BaseModel):
     instrument_token: str

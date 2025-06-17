@@ -71,7 +71,10 @@ def fetch_instruments():
     try:
         path = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
         instruments_df = pd.read_json(path)
-        instruments_df = instruments_df[['trading_symbol', 'instrument_key']][(instruments_df['segment'] == 'NSE_EQ') & (instruments_df['instrument_type'] == 'EQ')]
+        instruments_df = instruments_df[['trading_symbol', 'instrument_key']][
+            (instruments_df['segment'] == 'NSE_EQ') &
+            (instruments_df['instrument_type'] == 'EQ') &
+        (~instruments_df['name'].str.contains('TEST', case=False, na=False))]
         instruments_dict = dict(zip(instruments_df['trading_symbol'].values.tolist(),
                                     instruments_df['instrument_key'].values.tolist()))
         return instruments_dict

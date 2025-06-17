@@ -24,6 +24,14 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "http://localhost:8000"
 
+# Constants for storage keys
+STORAGE_TOKEN_KEY = 'token'
+STORAGE_EMAIL_KEY = 'email'
+STORAGE_USER_ID_KEY = 'user_id'
+STORAGE_BROKER_KEY = 'broker'
+STORAGE_THEME_KEY = 'theme'
+STORAGE_WEBSOCKET_KEY = 'websocket_connected'
+
 # --- State Management --- (Using app.storage for simplicity)
 # app.storage.user stores user-specific data like token, email, broker settings
 # app.storage.general stores application-wide data like instruments
@@ -36,28 +44,29 @@ def get_general_storage():
 
 # --- API Helper --- (Enhanced Error Handling)
 async def fetch_api(endpoint, method="GET", data=None, token=None):
-    user_storage = get_user_storage()
-    if token is None:
-        token = user_storage.get("token")
-
     headers = {}
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
     request_data = {}
+    full_url = f"{BASE_URL}{endpoint}"
     if "auth/login" in endpoint:
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         request_data = {"data": data}
-    # Handle GET requests with params passed via data dict
     elif method == "GET" and data is not None and isinstance(data, dict):
-        request_data = {"params": data}
+        params = {k: v for k, v in data.items() if k not in ["args", "kwargs"]}
+        request_data = {"params": params}
+        if params:
+            full_url += "?" + "&".join(f"{k}={v}" for k, v in params.items())
     elif data is not None:
         headers["Content-Type"] = "application/json"
         request_data = {"json": data}
 
+    # logger.info(f"Sending {method} request to: {full_url}")
+    print(f"Sending {method} request to: {full_url}")
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.request(method, f"{BASE_URL}{endpoint}", headers=headers, **request_data) as response:
+            async with session.request(method, full_url, headers=headers, **request_data) as response:
                 logger.info(f'API call: {method} {endpoint}, Params/Data: {request_data.get("params", request_data.get("json", "N/A"))}, Status: {response.status}')
                 if response.status == 200:
                     try:
@@ -68,8 +77,11 @@ async def fetch_api(endpoint, method="GET", data=None, token=None):
                     return {"success": True, "message": "Operation successful (No Content)"}
                 elif response.status == 401:
                     ui.notify("Session expired or invalid. Please log in again.", type="negative")
-                    user_storage["token"] = None
-                    user_storage["email"] = None
+                    try:
+                        if hasattr(app, 'storage') and hasattr(app.storage, 'user') and app.storage.user is not None:
+                            app.storage.user.clear()
+                    except Exception as e_clear:
+                        logger.error(f"Error clearing app.storage.user on 401: {e_clear}")
                     ui.navigate.to("/")
                     return None
                 else:
@@ -77,17 +89,18 @@ async def fetch_api(endpoint, method="GET", data=None, token=None):
                         error_details = await response.json()
                         error_message = error_details.get("detail", "Unknown API error")
                         if isinstance(error_message, list):
-                            error_message = "; ".join([f'{e.get("loc",[""])[-1]}: {e.get("msg","Invalid input")}' for e in error_message])
+                            error_message = "; ".join([f'{e.get("loc", [""])[-1]}: {e.get("msg", "Invalid input")}' for e in error_message])
                         logger.error(f"API Error ({response.status}) for {method} {endpoint}: {error_message}")
                         ui.notify(f"API Error: {error_message}", type="negative")
+                        return None
                     except Exception as json_error:
                         error_text = await response.text()
                         logger.error(f"API Error ({response.status}) for {method} {endpoint}. Could not parse JSON response: {json_error}. Response text: {error_text}")
                         ui.notify(f"API Error ({response.status}): {error_text[:100]}", type="negative")
-                    return None
+                        return None
     except aiohttp.ClientConnectorError as e:
         logger.error(f"Connection Error for {method} {endpoint}: {e}")
-        ui.notify(f"Connection Error: Could not connect to the backend at {BASE_URL}. Please ensure it's running", type="negative")
+        ui.notify(f"Connection Error: Could not connect to the backend at {BASE_URL}.", type="negative")
         return None
     except Exception as e:
         logger.exception(f"Unexpected error during API request to {endpoint}: {e}")
@@ -95,74 +108,63 @@ async def fetch_api(endpoint, method="GET", data=None, token=None):
         return None
 
 # --- WebSocket Client --- (Improved connection handling)
-async def connect_websocket():
-    user_storage = get_user_storage()
-    token = user_storage.get("token")
+async def connect_websocket(token, user_id):
     if not token:
-        logger.warning("No token found, cannot connect WebSocket.")
+        logger.warning("No token provided for WebSocket connection.")
         return
 
-    try:
-        decoded_token = jwt.decode(token, options={"verify_signature": False})
-        user_id = decoded_token.get("sub", "default_user")
-        user_storage["user_id"] = user_id
-        logger.info(f"User ID from token: {user_id}")
-    except jwt.DecodeError:
-        logger.error("Failed to decode JWT token to get user ID.")
-        user_id = "default_user"
-        user_storage["user_id"] = user_id
-
     ws_url = f"{BASE_URL}/ws/orders/{user_id}?token={token}"
-    logger.info(f"Attempting WebSocket connection to: {ws_url}")
+    max_retries = 5
+    retry_count = 0
+    message_queue = []
 
-    while user_storage.get("token"):
+    while retry_count < max_retries:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.ws_connect(ws_url) as ws:
                     logger.info("WebSocket connected successfully.")
-                    user_storage["websocket_connected"] = True
+                    while message_queue:
+                        ui.notify(message_queue.pop(0), type="info")
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             try:
                                 data = json.loads(msg.data)
-                                logger.debug(f"WebSocket message received: {data}")
                                 if isinstance(data, list) and len(data) > 0 and "status" in data[0]:
-                                    ui.notify(f'Order Update: {data[0].get("trading_symbol","N/A")} - {data[0]["status"]}', type="info")
+                                    message = f'Order Update: {data[0].get("trading_symbol","N/A")} - {data[0]["status"]}'
+                                    ui.notify(message, type="info")
+                                elif isinstance(data, dict) and "status" in data:
+                                    message = f'Order Update: {data.get("trading_symbol","N/A")} - {data["status"]}'
+                                    ui.notify(message, type="info")
                             except json.JSONDecodeError:
-                                logger.error(f"Failed to decode WebSocket JSON message: {msg.data}")
-                            except Exception as e:
-                                logger.exception(f"Error processing WebSocket message: {e}")
+                                logger.error(f"Invalid WebSocket message: {msg.data}")
                         elif msg.type == aiohttp.WSMsgType.ERROR:
-                            logger.error(f"WebSocket connection closed with exception {ws.exception()}")
+                            logger.error(f"WebSocket error: {ws.exception()}")
                             break
                         elif msg.type == aiohttp.WSMsgType.CLOSED:
-                            logger.warning("WebSocket connection closed.")
+                            logger.warning("WebSocket closed.")
                             break
         except aiohttp.ClientConnectorError as e:
-            logger.error(f"WebSocket connection failed: {e}. Retrying in 10 seconds...")
+            retry_count += 1
+            logger.error(f"WebSocket connection failed ({retry_count}/{max_retries}): {e}")
         except Exception as e:
-            logger.exception(f"Unexpected WebSocket error: {e}. Retrying in 10 seconds...")
-
-        user_storage["websocket_connected"] = False
-        if not user_storage.get("token"):
-            break
-        await asyncio.sleep(10)
-    logger.info("WebSocket connection loop terminated.")
+            retry_count += 1
+            logger.exception(f"WebSocket error ({retry_count}/{max_retries}): {e}")
+        if retry_count < max_retries:
+            await asyncio.sleep(10)
+    logger.warning("WebSocket connection attempts exceeded. Terminating.")
 
 # --- Theme Styling --- (Simplified)
-def apply_theme():
-    user_storage = get_user_storage()
-    theme_mode = user_storage.get("theme", "Dark")
-    if theme_mode == "Dark":
+def apply_theme(theme):
+    if theme == "Dark":
         ui.query("body").classes(add="bg-dark text-white", remove="bg-grey-2 text-black")
+        ui.dark_mode().enable()
     else:
         ui.query("body").classes(add="bg-grey-2 text-black", remove="bg-dark text-white")
-
+        ui.dark_mode().disable()
 # --- UI Components --- #
 
 # Reusable Header
-def render_header():
-    user_storage = get_user_storage()
+def render_header(email):
     with ui.header(elevated=True).classes("items-center justify-between"):
         with ui.row(wrap=False).classes("items-center"):
             ui.button(icon="menu", on_click=lambda: left_drawer.toggle()).props("flat color=white dense").classes("lt-md")
@@ -176,13 +178,12 @@ def render_header():
                 ui.button(page_name, on_click=lambda path=page_path: ui.navigate.to(path)).props("flat color=white")
 
         with ui.row(wrap=False).classes("items-center gap-2"):
-            if user_storage.get("email"):
-                ui.label(f'Welcome, {user_storage.get("email")}').classes("text-sm gt-xs")
+            if email:
+                ui.label(f'Welcome, {email}').classes("text-sm gt-xs")
                 ui.button("Logout", on_click=logout, icon="logout").props("flat color=white dense")
 
 # Reusable Left Drawer (Sidebar)
-async def render_left_drawer():
-    user_storage = get_user_storage()
+async def render_left_drawer(broker, theme):
     with ui.left_drawer(fixed=False).classes("bg-grey-8 text-white") as drawer:
         ui.label("Menu").classes("text-h6 q-pa-md")
         ui.separator()
@@ -196,10 +197,10 @@ async def render_left_drawer():
             ui.separator().classes("lt-md")
 
         ui.label("Settings").classes("text-subtitle1 q-pa-md")
-        theme_select = ui.select(["Dark", "Light"], label="Theme", value=user_storage.get("theme", "Dark"),
-                                 on_change=lambda e: update_setting("theme", e.value)).classes("q-ma-md")
-        broker_select = ui.select(["Upstox", "Zerodha"], label="Broker", value=user_storage.get("broker", "Zerodha"),
-                                  on_change=lambda e: update_setting("broker", e.value)).classes("q-ma-md")
+        theme_select = ui.select(["Dark", "Light"], label="Theme", value=theme,
+                                 on_change=lambda e: update_setting(STORAGE_THEME_KEY, e.value)).classes("q-ma-md")
+        broker_select = ui.select(["Upstox", "Zerodha"], label="Broker", value=broker,
+                                  on_change=lambda e: update_setting(STORAGE_BROKER_KEY, e.value)).classes("q-ma-md")
 
         ui.separator()
         ui.label("Broker Status").classes("text-subtitle1 q-pa-md")
@@ -208,16 +209,16 @@ async def render_left_drawer():
         async def check_and_display_broker_status():
             status_container.clear()
             with status_container:
-                for broker in ["Zerodha", "Upstox"]:
+                for broker_name in ["Zerodha", "Upstox"]:
                     loading_spinner = ui.spinner(size="sm").props("color=white")
-                    status_label = ui.label(f"Checking {broker}...")
-                    profile = await fetch_api(f"/profile/{broker}")
+                    status_label = ui.label(f"Checking {broker_name}...")
+                    profile = await fetch_api(f"/profile/{broker_name}", token=app.storage.user.get(STORAGE_TOKEN_KEY))
                     loading_spinner.delete()
                     if profile and profile.get("name"):
-                        status_label.text = f'{broker}: Connected ({profile["name"]})'
+                        status_label.text = f'{broker_name}: Connected ({profile["name"]})'
                         status_label.classes(add="text-positive")
                     else:
-                        status_label.text = f"{broker}: Not Connected"
+                        status_label.text = f"{broker_name}: Not Connected"
                         status_label.classes(add="text-negative")
 
         ui.button("Refresh Status", on_click=check_and_display_broker_status, icon="refresh").classes("q-ma-md")
@@ -227,21 +228,18 @@ async def render_left_drawer():
 
 # Helper to update user settings
 def update_setting(key, value):
-    user_storage = get_user_storage()
-    user_storage[key] = value
-    if key == "theme":
-        apply_theme()
+    app.storage.user[key] = value
+    if key == STORAGE_THEME_KEY:
+        apply_theme(value)
     logger.info(f"Setting updated: {key} = {value}")
-    if key == "broker":
+    if key == STORAGE_BROKER_KEY:
         ui.notify(f"Broker changed to {value}. Refreshing data...")
 
-# Logout Function
 def logout():
-    user_storage = get_user_storage()
-    user_storage["token"] = None
-    user_storage["email"] = None
-    user_storage["user_id"] = None
-    user_storage["websocket_connected"] = False
+    try:
+        app.storage.user.clear()
+    except Exception as e:
+        logger.error(f"Error clearing app.storage.user during logout: {e}")
     ui.notify("Logged out successfully.", type="positive")
     ui.navigate.to("/")
 
@@ -249,37 +247,51 @@ def logout():
 
 @ui.page("/")
 async def login_page(client: Client):
-    user_storage = get_user_storage()
-    if user_storage.get("token"):
-        profile = await fetch_api("/profile/Zerodha")
-        if profile:
+    await client.connected()
+    try:
+        if app.storage.user.get(STORAGE_TOKEN_KEY):
             ui.navigate.to("/dashboard")
             return
-        else:
-            user_storage["token"] = None
-            user_storage["email"] = None
+    except Exception as e:
+        logger.error(f"Error accessing app.storage.user in login_page: {e}")
 
     async def handle_login():
         login_button.props("loading=true")
         error_label.set_text("")
+        with ui.element("div").classes("flex items-center"):
+            ui.spinner(size="lg")
+            ui.label("Logging in...").classes("ml-2")
         data = {"username": email.value, "password": password.value, "grant_type": "password"}
         response = await fetch_api("/auth/login", method="POST", data=data, token=None)
         login_button.props("loading=false")
 
         if response and "access_token" in response:
-            user_storage["token"] = response["access_token"]
+            app.storage.user[STORAGE_TOKEN_KEY] = response["access_token"]
             try:
                 decoded_token = jwt.decode(response["access_token"], options={"verify_signature": False})
-                user_storage["email"] = decoded_token.get("sub")
+                app.storage.user[STORAGE_EMAIL_KEY] = decoded_token.get("sub")
+                app.storage.user[STORAGE_USER_ID_KEY] = decoded_token.get("sub")
             except jwt.DecodeError:
-                user_storage["email"] = email.value
+                app.storage.user[STORAGE_EMAIL_KEY] = email.value
+                app.storage.user[STORAGE_USER_ID_KEY] = email.value
 
-            logger.info(f'Login successful for {user_storage["email"]}')
+            app.storage.user[STORAGE_BROKER_KEY] = "Zerodha"
+            app.storage.user[STORAGE_THEME_KEY] = "Dark"
+            app.storage.user[STORAGE_WEBSOCKET_KEY] = False
+
+            logger.info(f'Login successful for {app.storage.user[STORAGE_EMAIL_KEY]}')
             ui.notify("Login successful!", type="positive")
-            # asyncio.create_task(connect_websocket())
-            ui.navigate.to("/dashboard")
+            profile = await fetch_api("/profile/Zerodha", token=response["access_token"])
+            if profile:
+                asyncio.create_task(connect_websocket(response["access_token"], app.storage.user[STORAGE_USER_ID_KEY]))
+                ui.navigate.to("/dashboard")
+            else:
+                error_label.set_text("Failed to fetch profile. Please try again or contact support.")
+                show_error("Failed to fetch profile. Please try again or contact support.")
+                ui.notify("Profile fetch failed.", type="warning")
         else:
             error_label.set_text("Login failed. Please check your credentials.")
+            show_error("Login failed. Please check your credentials.")
             ui.notify("Login failed. Check credentials.", type="warning")
 
     async def handle_register():
@@ -291,10 +303,10 @@ async def login_page(client: Client):
             register_button.props("loading=false")
             return
         if not all([new_username.value, new_password.value, confirm_password.value]):
-             reg_error_label.set_text("Please fill in all required fields.")
-             ui.notify("Please fill in all required fields.", type="warning")
-             register_button.props("loading=false")
-             return
+            reg_error_label.set_text("Please fill in all required fields.")
+            ui.notify("Please fill in all required fields.", type="warning")
+            register_button.props("loading=false")
+            return
 
         data = {
             "email": new_username.value,
@@ -314,7 +326,7 @@ async def login_page(client: Client):
             reg_error_label.set_text("Registration failed. Please try again.")
             ui.notify("Registration failed.", type="warning")
 
-    apply_theme()
+    apply_theme(app.storage.user.get(STORAGE_THEME_KEY, "Dark"))
     with ui.column().classes("absolute-center items-center"):
         ui.label("Algo Trader").classes("text-h4 font-weight-bold q-mb-md")
         with ui.card().classes("w-96"):
@@ -472,8 +484,12 @@ async def dashboard_page():
         with ui.row().classes("w-full gap-4 items-stretch"):
             with ui.card().classes("w-1/3"):
                 ui.label("Market Watch").classes("text-subtitle1")
-                instrument_select = ui.select(options=[], label="Select Instrument", with_input=True,
-                                              on_change=update_ltp).classes("w-full")
+                instrument_select = ui.select(
+                    options=sorted(list(general_storage.get("instruments", {}).keys())),
+                    label="Select Instrument",
+                    with_input=True,
+                    on_change=update_ltp
+                ).props("clearable filter").classes("w-full")
                 ltp_label = ui.label("Select Instrument").classes("text-h6 q-mt-md")
 
             with ui.card().classes("flex-grow"):
@@ -694,21 +710,23 @@ async def mutual_funds_page():
 
 @app.on_startup
 async def startup():
-    app.storage.user.update({
-        "token": None,
-        "email": None,
-        "user_id": None,
-        "broker": "Zerodha",
-        "theme": "Dark",
-        "websocket_connected": False,
-    })
-    app.storage.general.update({
-        "instruments": {},
-    })
-    logger.info("User and general storage initialized.")
+    app.storage.general.update({"instruments": {}})
+    logger.info("General storage initialized.")
+    logger.info("Fetching instruments at startup...")
+    instruments_data = await fetch_api(f"/instruments/Zerodha/?exchange=NSE", token=None)
+    if isinstance(instruments_data, list):
+        equity_instruments = [i for i in instruments_data if i.get("segment") == "NSE" and i.get("instrument_type") == "EQ"]
+        app.storage.general["instruments"] = {i["trading_symbol"]: i["instrument_token"] for i in equity_instruments}
+    logger.info(f"Loaded {len(app.storage.general['instruments'])} instruments.")
+
+def show_error(message):
+    with ui.dialog() as dialog, ui.card():
+        ui.label(f"Error: {message}")
+        ui.button("Close", on_click=dialog.close).props("outline")
+    dialog.open()
 
 left_drawer: ui.left_drawer = None
 
-ui.run(title="Algo Trader", port=8080, storage_secret="YOUR_SECRET_KEY_HERE", dark=True)
+ui.run(title="Algo Trader", port=8080, storage_secret="secure-random-secret-123", dark=True)
 # IMPORTANT: Replace "YOUR_SECRET_KEY_HERE" with a real secret key.
 

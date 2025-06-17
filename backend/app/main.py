@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, WebSocket
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import List, Optional
 import logging
@@ -14,12 +14,13 @@ import pandas as pd
 import asyncio
 import bcrypt
 from collections import defaultdict
+from uuid import uuid4
 
 # Add the project_root to the Python path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 sys.path.insert(0, project_root)
 from models import Order, ScheduledOrder as ScheduledOrderModel, AutoOrder as AutoOrderModel, \
-    GTTOrder as GTTOrderModel, User
+    GTTOrder as GTTOrderModel, User, Strategy
 from backend.app.routes import data
 from services import (
     OrderManager, OrderMonitor, init_upstox_api, init_zerodha_api,
@@ -35,8 +36,8 @@ from common_utils.read_write_sql_data import load_sql_data
 from schemas import (
     PlaceOrderRequest, UserCreate, UserResponse, ScheduledOrder, ScheduledOrderRequest, AutoOrder, AutoOrderRequest,
     GTTOrder, GTTOrderRequest, ProfileResponse, MarginResponse, QuoteResponse, OHLCResponse, LTPResponse,
-    HistoricalDataResponse, Instrument, OrderHistory, Trade, ModifyOrderRequest, StrategyRequest, BacktestRequest,
-    MFSIPRequest, MFSIPResponse
+    HistoricalDataResponse, Instrument, OrderHistory, Trade, ModifyOrderRequest, StrategyRequest, StrategyResponse,
+    BacktestRequest, MFSIPRequest, MFSIPResponse
 )
 from auth import UserManager, oauth2_scheme
 
@@ -92,6 +93,7 @@ auth_limiter = InMemoryRateLimiter(times=10, seconds=60)
 order_limiter = InMemoryRateLimiter(times=20, seconds=60)
 gtt_limiter = InMemoryRateLimiter(times=5, seconds=60)
 portfolio_limiter = InMemoryRateLimiter(times=10, seconds=60)
+backtest_limiter = InMemoryRateLimiter(times=10, seconds=60)
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     user_id = UserManager.verify_token(token)
@@ -362,7 +364,7 @@ async def cancel_order(order_id: str, user_id: str = Depends(get_current_user), 
         if order.broker == "Upstox":
             api.cancel_order(order_id=order_id, api_version="v2")
         else:
-            api.cancel_order(order_id=order_id, variety="regular")
+            api.cancel_order(order_id=order_id, variety="regular" if "amo" not in order.status else "amo")
         order.status = "cancelled"
         await db.commit()
         return {"status": "success", "message": f"Order {order_id} cancelled"}
@@ -459,7 +461,7 @@ async def create_scheduled_order(order: ScheduledOrderRequest, user_id: str = De
         price=order.price,
         trigger_price=order.trigger_price,
         product_type=order.product_type,
-        schedule_datetime=datetime.strptime(order.schedule_datetime, "%Y-%m-%d %H:%M:%S"),
+        schedule_datetime=order.schedule_datetime,
         stop_loss=order.stop_loss,
         target=order.target,
         status="PENDING",
@@ -544,6 +546,7 @@ async def get_gtt_orders(broker: str, user_id: str = Depends(get_current_user), 
                     trigger_type=gtt["type"],
                     trigger_price=gtt["condition"]["trigger_values"][0],
                     limit_price=gtt["orders"][0]["price"],
+                    last_price=gtt["condition"]["last_price"],
                     second_trigger_price=gtt["condition"]["trigger_values"][1] if len(gtt["condition"]["trigger_values"]) > 1 else None,
                     second_limit_price=gtt["orders"][1]["price"] if len(gtt["orders"]) > 1 else None,
                     status=gtt["status"],
@@ -581,6 +584,7 @@ async def get_gtt_order(broker: str, gtt_id: str, user_id: str = Depends(get_cur
                 trigger_type=gtt["type"],
                 trigger_price=gtt["condition"]["trigger_values"][0],
                 limit_price=gtt["orders"][0]["price"],
+                last_price=gtt["condition"]["last_price"],
                 second_trigger_price=gtt["condition"]["trigger_values"][1] if len(gtt["condition"]["trigger_values"]) > 1 else None,
                 second_limit_price=gtt["orders"][1]["price"] if len(gtt["orders"]) > 1 else None,
                 status=gtt["status"],
@@ -613,6 +617,8 @@ async def modify_gtt_order(broker: str, gtt_id: str, order: GTTOrderRequest, use
             trigger_type=order.trigger_type,
             trigger_price=order.trigger_price,
             limit_price=order.limit_price,
+            last_price=order.last_price,
+            quantity=order.quantity,
             second_trigger_price=order.second_trigger_price,
             second_limit_price=order.second_limit_price,
             db=db
@@ -729,13 +735,14 @@ async def get_market_quotes(broker: str, instruments: str, user_id: str = Depend
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail="Invalid broker")
     user_apis_dict = await initialize_user_apis(user_id, db)
-    upstox_api = user_apis_dict["upstox"]["market_data"] if broker == "Upstox" else None
-    kite_api = user_apis_dict["zerodha"]["kite"] if broker == "Zerodha" else None
-    if not (upstox_api or kite_api):
-        raise HTTPException(status_code=400, detail=f"{broker} API not initialized")
+    # upstox_api = user_apis_dict["upstox"]["history"] if broker == "Upstox" else None
+    # kite_api = user_apis_dict["zerodha"]["kite"] if broker == "Zerodha" else None
+    upstox_api = user_apis_dict["upstox"]["market_data"]
+    if not upstox_api:
+        raise HTTPException(status_code=400, detail="Upstox API not initialized")
     try:
         instrument_list = instruments.split(",")
-        quotes = await get_quotes(upstox_api, kite_api, instrument_list)
+        quotes = await get_quotes(upstox_api, None, instrument_list)
         return quotes
     except Exception as e:
         logger.error(f"Error fetching {broker} quotes: {str(e)}")
@@ -746,13 +753,14 @@ async def get_ohlc_data(broker: str, instruments: str, user_id: str = Depends(ge
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail="Invalid broker")
     user_apis_dict = await initialize_user_apis(user_id, db)
-    upstox_api = user_apis_dict["upstox"]["market_data"] if broker == "Upstox" else None
-    kite_api = user_apis_dict["zerodha"]["kite"] if broker == "Zerodha" else None
-    if not (upstox_api or kite_api):
-        raise HTTPException(status_code=400, detail=f"{broker} API not initialized")
+    # upstox_api = user_apis_dict["upstox"]["history"] if broker == "Upstox" else None
+    # kite_api = user_apis_dict["zerodha"]["kite"] if broker == "Zerodha" else None
+    upstox_api = user_apis_dict["upstox"]["market_data"]
+    if not upstox_api:
+        raise HTTPException(status_code=400, detail="Upstox API not initialized")
     try:
         instrument_list = instruments.split(",")
-        ohlc_data = await get_ohlc(upstox_api, kite_api, instrument_list)
+        ohlc_data = await get_ohlc(upstox_api, None, instrument_list)
         return ohlc_data
     except Exception as e:
         logger.error(f"Error fetching {broker} OHLC data: {str(e)}")
@@ -763,13 +771,14 @@ async def get_ltp_data(broker: str, instruments: str, user_id: str = Depends(get
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail="Invalid broker")
     user_apis_dict = await initialize_user_apis(user_id, db)
-    upstox_api = user_apis_dict["upstox"]["market_data"] if broker == "Upstox" else None
-    kite_api = user_apis_dict["zerodha"]["kite"] if broker == "Zerodha" else None
-    if not (upstox_api or kite_api):
-        raise HTTPException(status_code=400, detail=f"{broker} API not initialized")
+    # upstox_api = user_apis_dict["upstox"]["history"] if broker == "Upstox" else None
+    # kite_api = user_apis_dict["zerodha"]["kite"] if broker == "Zerodha" else None
+    upstox_api = user_apis_dict["upstox"]["market_data"]
+    if not upstox_api:
+        raise HTTPException(status_code=400, detail="Upstox API not initialized")
     try:
         instrument_list = instruments.split(",")
-        ltp_data = await get_ltp(upstox_api, kite_api, instrument_list)
+        ltp_data = await get_ltp(upstox_api, None, instrument_list)
         return ltp_data
     except Exception as e:
         logger.error(f"Error fetching {broker} LTP: {str(e)}")
@@ -781,10 +790,11 @@ async def get_historical(broker: str, instrument: str, from_date: str, to_date: 
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail="Invalid broker")
     user_apis_dict = await initialize_user_apis(user_id, db)
-    upstox_api = user_apis_dict["upstox"]["history"] if broker == "Upstox" else None
-    kite_api = user_apis_dict["zerodha"]["kite"] if broker == "Zerodha" else None
-    if not (upstox_api or kite_api):
-        raise HTTPException(status_code=400, detail=f"{broker} API not initialized")
+    # upstox_api = user_apis_dict["upstox"]["history"] if broker == "Upstox" else None
+    # kite_api = user_apis_dict["zerodha"]["kite"] if broker == "Zerodha" else None
+    upstox_api = user_apis_dict["upstox"]["history"]
+    if not upstox_api:
+        raise HTTPException(status_code=400, detail="Upstox API not initialized")
     try:
         result = await db.execute(select(User).filter(User.user_id == user_id))
         user = result.scalars().first()
@@ -923,21 +933,46 @@ async def execute_strategy_endpoint(request: StrategyRequest, user_id: str = Dep
         logger.error(f"Error executing strategy: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/algo-trading/backtest", tags=["algo-trading"])
+@app.post("/algo-trading/backtest", tags=["algo-trading"], dependencies=[Depends(backtest_limiter)])
 async def backtest_strategy_endpoint(request: BacktestRequest, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     try:
+        async def ws_callback(data):
+            # Placeholder for WebSocket progress (handled in WebSocket endpoint)
+            pass
         result = await backtest_strategy(
             instrument_token=request.instrument_token,
             timeframe=request.timeframe,
             strategy=request.strategy,
             params=request.params,
             start_date=request.start_date,
-            end_date=request.end_date
+            end_date=request.end_date,
+            ws_callback=ws_callback
         )
         return result
     except Exception as e:
         logger.error(f"Error backtesting strategy: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail={"error": {"code": "BACKTEST_FAILED", "message": str(e)}})
+
+@app.post("/strategies/", response_model=StrategyResponse, tags=["algo-trading"])
+async def create_strategy(strategy: StrategyRequest, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    try:
+        new_strategy = Strategy(
+            strategy_id=str(uuid4()),
+            user_id=user_id,
+            broker=strategy.broker,
+            name=strategy.name,
+            description=strategy.description,
+            entry_conditions=strategy.entry_conditions,
+            exit_conditions=strategy.exit_conditions,
+            parameters=strategy.parameters
+        )
+        db.add(new_strategy)
+        await db.commit()
+        await db.refresh(new_strategy)
+        return StrategyResponse.from_orm(new_strategy)
+    except Exception as e:
+        logger.error(f"Error creating strategy: {str(e)}")
+        raise HTTPException(status_code=500, detail={"error": {"code": "CREATE_FAILED", "message": str(e)}})
 
 @app.post("/algo-trading/schedule", tags=["algo-trading"], dependencies=[Depends(gtt_limiter)])
 async def schedule_strategy(request: StrategyRequest, interval_minutes: int = 5, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -973,10 +1008,78 @@ async def stop_strategy(strategy: str, instrument_token: str, user_id: str = Dep
         logger.error(f"Error stopping strategy {strategy} for {instrument_token}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/analytics/{instrument_token}", tags=["analytics"])
+@app.get("/strategies/{broker}", response_model=List[StrategyResponse], tags=["algo-trading"])
+async def get_strategies(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    if broker not in ["Upstox", "Zerodha"]:
+        raise HTTPException(status_code=400, detail={"error": {"code": "INVALID_BROKER", "message": "Invalid broker"}})
+    try:
+        result = await db.execute(select(Strategy).filter(Strategy.user_id == user_id, Strategy.broker == broker))
+        strategies = result.scalars().all()
+        return [StrategyResponse.from_orm(s) for s in strategies]
+    except Exception as e:
+        logger.error(f"Error fetching strategies: {str(e)}")
+        raise HTTPException(status_code=500, detail={"error": {"code": "FETCH_FAILED", "message": str(e)}})
+
+@app.get("/strategies/{strategy_id}", response_model=StrategyResponse, tags=["algo-trading"])
+async def get_strategy(strategy_id: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    try:
+        result = await db.execute(select(Strategy).filter(Strategy.strategy_id == strategy_id, Strategy.user_id == user_id))
+        strategy = result.scalars().first()
+        if not strategy:
+            raise HTTPException(status_code=404, detail={"error": {"code": "NOT_FOUND", "message": "Strategy not found"}})
+        return StrategyResponse.from_orm(strategy)
+    except Exception as e:
+        logger.error(f"Error fetching strategy {strategy_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail={"error": {"code": "FETCH_FAILED", "message": str(e)}})
+
+@app.post("/strategies/{strategy_id}/{action}", response_model=dict, tags=["algo-trading"])
+async def toggle_strategy(strategy_id: str, action: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    if action not in ["activate", "deactivate"]:
+        raise HTTPException(status_code=400, detail={"error": {"code": "INVALID_ACTION", "message": "Invalid action"}})
+    try:
+        result = await db.execute(select(Strategy).filter(Strategy.strategy_id == strategy_id, Strategy.user_id == user_id))
+        strategy = result.scalars().first()
+        if not strategy:
+            raise HTTPException(status_code=404, detail={"error": {"code": "NOT_FOUND", "message": "Strategy not found"}})
+        strategy.status = "active" if action == "activate" else "inactive"
+        await db.commit()
+        return {"status": strategy.status, "strategy_id": strategy_id}
+    except Exception as e:
+        logger.error(f"Error toggling strategy {strategy_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail={"error": {"code": "TOGGLE_FAILED", "message": str(e)}})
+
+@app.delete("/strategies/{strategy_id}", response_model=dict, tags=["algo-trading"])
+async def delete_strategy(strategy_id: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    try:
+        result = await db.execute(select(Strategy).filter(Strategy.strategy_id == strategy_id, Strategy.user_id == user_id))
+        strategy = result.scalars().first()
+        if not strategy:
+            raise HTTPException(status_code=404, detail={"error": {"code": "NOT_FOUND", "message": "Strategy not found"}})
+        await db.execute(text("DELETE FROM strategies WHERE strategy_id = :strategy_id"), {"strategy_id": strategy_id})
+        await db.commit()
+        return {"success": True, "message": "Strategy deleted"}
+    except Exception as e:
+        logger.error(f"Error deleting strategy {strategy_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail={"error": {"code": "DELETE_FAILED", "message": str(e)}})
+
+# Add WebSocket for backtest progress
+@app.websocket("/ws/backtest/{user_id}")
+async def websocket_backtest(websocket: WebSocket, user_id: str):
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_json()
+            await websocket.send_json({"progress": data.get("progress", 0), "partial_result": data.get("partial_result")})
+    except Exception as e:
+        logger.error(f"WebSocket error for user {user_id}: {str(e)}")
+    finally:
+        await websocket.close()
+
+@app.get("/analytics/{broker}", tags=["analytics"])
 async def get_analytics(
     instrument_token: str,
-    timeframe: str = "day",
+    unit: str = "days",
+    interval: str = "1",
     ema_period: int = 20,
     rsi_period: int = 14,
     lr_period: int = 20,
@@ -990,10 +1093,17 @@ async def get_analytics(
     if not upstox_api:
         raise HTTPException(status_code=400, detail="Upstox API not initialized")
     try:
+        result = await db.execute(select(User).filter(User.user_id == user_id))
+        user = result.scalars().first()
+        if not user:
+            raise ValueError(f"User {user_id} not found")
+
         data = await get_analytics_data(
             upstox_api=upstox_api,
+            upstox_access_token=user.upstox_access_token,
             instrument_token=instrument_token,
-            timeframe=timeframe,
+            unit=unit,
+            interval=interval,
             ema_period=ema_period,
             rsi_period=rsi_period,
             lr_period=lr_period,
@@ -1043,3 +1153,30 @@ async def delete_mf_sip(sip_id: str, user_id: str = Depends(get_current_user), d
     except Exception as e:
         logger.error(f"Error cancelling SIP {sip_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/scheduled-orders/{broker}",  response_model=List[ScheduledOrder], tags=["orders"])
+async def get_scheduled_orders(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    if broker not in ["Upstox", "Zerodha"]:
+        raise HTTPException(status_code=400, detail="Invalid broker")
+    try:
+        query = select(ScheduledOrderModel).filter(ScheduledOrderModel.user_id == user_id, ScheduledOrderModel.broker == broker)
+        result = await db.execute(query)
+        orders = result.scalars().all()
+        return [ScheduledOrder.from_orm(order) for order in orders]
+    except Exception as e:
+        logger.error(f"Error fetching scheduled orders for {broker}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/auto-orders/{broker}", response_model=List[AutoOrder],tags=["orders"])
+async def get_auto_orders(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    if broker not in ["Upstox", "Zerodha"]:
+        raise HTTPException(status_code=400, detail="Invalid broker")
+    try:
+        query = select(AutoOrderModel).filter(AutoOrderModel.user_id == user_id, AutoOrderModel.broker == broker)
+        result = await db.execute(query)
+        orders = result.scalars().all()
+        return [AutoOrder.from_orm(order) for order in orders]
+    except Exception as e:
+        logger.error(f"Error fetching auto orders for {broker}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+

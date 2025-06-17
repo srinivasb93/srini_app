@@ -1,0 +1,54 @@
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: #1e1e1e; /* Dark theme */
+    color: #ffffff;
+}
+
+.light-theme {
+    background-color: #f3f4f6;
+    color: #1f2937;
+}
+
+.card {
+    @apply bg-gray-800 rounded-lg shadow-md p-2;
+}
+
+.light-theme .card {
+    @apply bg-white;
+}
+
+.button-primary {
+    @apply bg-blue-500 text-white rounded-md px-4 py-2 hover:bg-blue-600 transition;
+}
+
+.button-outline {
+    @apply border border-gray-300 text-gray-300 rounded-md px-4 py-2 hover:bg-gray-700 transition;
+}
+
+.table {
+    @apply w-full bg-gray-900 rounded-lg shadow-md;
+}
+
+.light-theme .table {
+    @apply bg-white;
+}
+
+.table th, .table td {
+    @apply px-4 py-2 text-left;
+}
+
+.table th {
+    @apply bg-gray-800 text-gray-300;
+}
+
+.light-theme .table th {
+    @apply bg-gray-100 text-gray-700;
+}
+
+.input {
+    @apply bg-gray-700 text-white rounded-md px-3 py-1 focus:ring-2 focus:ring-blue-500;
+}
+
+.light-theme .input {
+    @apply bg-gray-100 text-gray-900;
+}

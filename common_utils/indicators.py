@@ -5,6 +5,8 @@ import numpy as np
 def calculate_ema(df, period=20):
     return df["close"].ewm(span=period, adjust=False).mean()
 
+def calculate_sma(df, period=20):
+    return df["close"].rolling(window=period).mean()
 
 def calculate_linear_regression(df, period=20):
     x = np.arange(len(df[-period:]))

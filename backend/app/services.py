@@ -20,6 +20,7 @@ import upstox_client
 
 from common_utils.db_utils import async_fetch_query, async_execute_query
 from common_utils.read_write_sql_data import load_sql_data
+from common_utils.fetch_db_data import *
 from common_utils.utils import notify
 from common_utils.upstox_utils import get_symbol_for_instrument, get_historical_data_latest, get_market_quote
 from models import Order, ScheduledOrder, QueuedOrder, User, GTTOrder, Instrument
@@ -28,7 +29,7 @@ from schemas import Order as OrderSchema, ScheduledOrder as ScheduledOrderSchema
 from database import get_db
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_not_exception_type
 from common_utils.indicators import calculate_ema, calculate_rsi, calculate_linear_regression, calculate_atr, \
-    calculate_macd, calculate_bollinger_bands, calculate_stochastic_oscillator
+    calculate_macd, calculate_bollinger_bands, calculate_stochastic_oscillator, calculate_sma
 from common_utils.strategies import check_macd_crossover, check_bollinger_band_signals, check_stochastic_signals, \
     check_support_resistance_breakout, macd_strategy, bollinger_band_strategy, rsi_strategy
 
@@ -175,13 +176,15 @@ class OrderMonitor:
                         "trading_symbol": trading_symbol,
                         "transaction_type": sl_transaction,
                         "quantity": quantity,
-                        "order_type": "SL-M",
-                        "price": 0,
-                        "trigger_price": stop_loss_price,
+                        "order_type": "LIMIT",
+                        "price": stop_loss_price,
+                        "trigger_price": 0,
                         "product_type": product_type,
                         "validity": "DAY",
                         "is_gtt": "False",
-                        "status": "QUEUED"
+                        "status": "QUEUED",
+                        "broker": broker,
+                        "user_id": order.user_id
                     })
                 if target_price:
                     await self.order_queue.put({
@@ -197,7 +200,9 @@ class OrderMonitor:
                         "product_type": product_type,
                         "validity": "DAY",
                         "is_gtt": "False",
-                        "status": "QUEUED"
+                        "status": "QUEUED",
+                        "broker": broker,
+                        "user_id": order.user_id
                     })
                 await self._store_queued_orders(db)
                 result = await db.execute(select(User).filter(User.user_id == order.user_id))
@@ -285,11 +290,10 @@ class OrderMonitor:
                         queued_order_id, parent_order_id, instrument_token, trading_symbol, transaction_type, 
                         quantity, order_type, price, trigger_price, product_type, validity, is_gtt, status,
                         broker, user_id)
-                    ) VALUES (
+                     VALUES (
                         :queued_order_id, :parent_order_id, :instrument_token, :trading_symbol, :transaction_type, 
                         :quantity, :order_type, :price, :trigger_price, :product_type, :validity, :is_gtt, :status,
                         :broker, :user_id)
-                    )
                 """), order)
                 await db.commit()
                 logger.info(f"Successfully inserted queued order: {order['queued_order_id']}")
@@ -516,11 +520,11 @@ class OrderManager:
                 query = """
                     INSERT INTO gtt_orders (
                         gtt_order_id, instrument_token, trading_symbol, transaction_type, quantity, 
-                        trigger_type, trigger_price, limit_price, second_trigger_price, second_limit_price, 
+                        trigger_type, trigger_price, limit_price, last_price, second_trigger_price, second_limit_price, 
                         status, broker, created_at, user_id
                     ) VALUES (
                         :gtt_id, :instrument_token, :trading_symbol, :transaction_type, :quantity, 
-                        :trigger_type, :trigger_price, :limit_price, :second_trigger_price, 
+                        :trigger_type, :trigger_price, :limit_price, :last_price, :second_trigger_price, 
                         :second_limit_price, :status, :broker, :created_at, :user_id
                     )
                 """
@@ -533,6 +537,7 @@ class OrderManager:
                     "trigger_type": trigger_type,
                     "trigger_price": trigger_price,
                     "limit_price": limit_price,
+                    "last_price": last_price,
                     "second_trigger_price": second_trigger_price,
                     "second_limit_price": second_limit_price,
                     "status": "PENDING",
@@ -591,15 +596,17 @@ class OrderManager:
                 last_price=condition["last_price"],
                 orders=orders
             )
-            gtt_id = response.get("trigger_id")
+            logger.info(f"GTT Order placed successfully - {response}")
+            gtt_id = str(response.get("trigger_id"))
+
             query = """
                 INSERT INTO gtt_orders (
                     gtt_order_id, instrument_token, trading_symbol, transaction_type, quantity, 
-                    trigger_type, trigger_price, limit_price, second_trigger_price, second_limit_price, 
+                    trigger_type, trigger_price, limit_price, last_price, second_trigger_price, second_limit_price, 
                     status, broker, created_at, user_id
                 ) VALUES (
                     :gtt_id, :instrument_token, :trading_symbol, :transaction_type, :quantity, 
-                    :trigger_type, :trigger_price, :limit_price, :second_trigger_price, 
+                    :trigger_type, :trigger_price, :limit_price, :last_price, :second_trigger_price, 
                     :second_limit_price, :status, :broker, :created_at, :user_id
                 )
             """
@@ -612,6 +619,7 @@ class OrderManager:
                 "trigger_type": trigger_type,
                 "trigger_price": trigger_price,
                 "limit_price": limit_price,
+                "last_price": last_price,
                 "second_trigger_price": second_trigger_price,
                 "second_limit_price": second_limit_price,
                 "status": "active",
@@ -629,8 +637,8 @@ class OrderManager:
             return {"status": "error", "message": str(e)}
 
     async def modify_gtt_order(self, api, gtt_id: str, trigger_type: str, trigger_price: float, limit_price: float,
-                               second_trigger_price: Optional[float] = None, second_limit_price: Optional[float] = None,
-                               db: AsyncSession = None):
+                               last_price: float, quantity: int, second_trigger_price: Optional[float] = None,
+                               second_limit_price: Optional[float] = None, db: AsyncSession = None):
         try:
             stmt = select(GTTOrder).where(GTTOrder.gtt_order_id == gtt_id)
             result = await db.execute(stmt)
@@ -640,7 +648,7 @@ class OrderManager:
             condition = {
                 "exchange": "NSE",
                 "tradingsymbol": gtt_order.trading_symbol,
-                "last_price": trigger_price
+                "last_price": last_price
             }
             if trigger_type == "single":
                 condition["trigger_values"] = [trigger_price]
@@ -650,7 +658,7 @@ class OrderManager:
                     "product": "CNC",
                     "order_type": "LIMIT",
                     "transaction_type": gtt_order.transaction_type,
-                    "quantity": gtt_order.quantity,
+                    "quantity": quantity,
                     "price": limit_price
                 }]
             else:
@@ -662,7 +670,7 @@ class OrderManager:
                         "product": "CNC",
                         "order_type": "LIMIT",
                         "transaction_type": gtt_order.transaction_type,
-                        "quantity": gtt_order.quantity,
+                        "quantity": quantity,
                         "price": limit_price
                     },
                     {
@@ -671,7 +679,7 @@ class OrderManager:
                         "product": "CNC",
                         "order_type": "LIMIT",
                         "transaction_type": gtt_order.transaction_type,
-                        "quantity": gtt_order.quantity,
+                        "quantity": quantity,
                         "price": second_limit_price
                     }
                 ]
@@ -687,7 +695,8 @@ class OrderManager:
             query = """
                 UPDATE gtt_orders 
                 SET trigger_type = :trigger_type, trigger_price = :trigger_price, limit_price = :limit_price,
-                    second_trigger_price = :second_trigger_price, second_limit_price = :second_limit_price
+                    second_trigger_price = :second_trigger_price, second_limit_price = :second_limit_price,
+                    quantity = :quantity, last_price = :last_price
                 WHERE gtt_order_id = :gtt_id
             """
             await async_execute_query(db, text(query), {
@@ -696,7 +705,9 @@ class OrderManager:
                 "trigger_price": trigger_price,
                 "limit_price": limit_price,
                 "second_trigger_price": second_trigger_price,
-                "second_limit_price": second_limit_price
+                "second_limit_price": second_limit_price,
+                "quantity": quantity,
+                "last_price": last_price
             })
             result = await db.execute(select(User).filter(User.user_id == gtt_order.user_id))
             user = result.scalars().first()
@@ -1202,39 +1213,110 @@ async def fetch_and_load_index_data(index_name, db: AsyncSession = None) -> pd.D
 
 
 async def get_historical_data(upstox_api, upstox_access_token, instrument: str, from_date: str, to_date: str, unit: str,
-                              interval: str) -> HistoricalDataResponse:
-    if not upstox_api:
-        raise HTTPException(status_code=400, detail="Upstox API required for historical data")
-    try:
-        headers = {"Authorization": f"Bearer {upstox_access_token}"}
-        url = f"https://api.upstox.com/v3/historical-candle/{instrument}/{unit}/{interval}/{to_date}/{from_date}"
-        response = requests.get(url, headers=headers)
-        data_points = []
-        if response.status_code == 200:
-            candles = response.json().get("data", []).get("candles", [])
-            for candle in candles:
-                data_points.append(HistoricalDataPoint(
-                    timestamp=datetime.strptime(candle[0], "%Y-%m-%dT%H:%M:%S%z"),
-                    open=float(candle[1]),
-                    high=float(candle[2]),
-                    low=float(candle[3]),
-                    close=float(candle[4]),
-                    volume=int(candle[5])
-                ))
-            historical_data = HistoricalDataResponse(instrument_token=instrument,
-                                                     data=sorted(data_points, key=lambda x: x.timestamp))
-        else:
-            logger.error(f"Upstox API error: {response.text}")
-            raise HTTPException(status_code=502, detail="Failed to fetch historical data")
+                              interval: str, db: AsyncSession = None) -> HistoricalDataResponse:
+    logger.info(f"Fetching historical data for {instrument} from {from_date} to {to_date}")
+    data_points = []
 
-        logger.info(f"Fetched {len(data_points)} historical data points for {instrument}")
-        return historical_data
-    except requests.RequestException as re:
-        logger.error(f"Network error fetching historical data: {str(re)}")
-        raise HTTPException(status_code=502, detail="Network error")
+    # Convert dates to datetime objects for comparison
+    from_date_dt = datetime.strptime(from_date, "%Y-%m-%d")
+    to_date_dt = datetime.strptime(to_date, "%Y-%m-%d")
+
+    # Try openchart first for NSE stocks
+    try:
+        logger.info(f"Trying openchart for NSE stock: {instrument}")
+        data = load_stock_history(instrument, from_date_dt, to_date_dt, interval=interval, load=False)
+
+        if not data.empty:
+            for _, row in data.iterrows():
+                data_points.append(HistoricalDataPoint(
+                    timestamp=row["timestamp"],
+                    open=float(row["open"]),
+                    high=float(row["high"]),
+                    low=float(row["low"]),
+                    close=float(row["close"]),
+                    volume=int(row["volume"])
+                ))
+            logger.info(f"Successfully fetched {len(data_points)} data points from openchart")
     except Exception as e:
-        logger.error(f"Error fetching historical data: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.warning(f"Failed to fetch data from openchart: {str(e)}")
+
+    # If openchart didn't work, try Upstox API
+    if not data_points and upstox_api:
+        try:
+            logger.info(f"Trying Upstox API for {instrument}")
+            headers = {"Authorization": f"Bearer {upstox_access_token}"}
+            url = f"https://api.upstox.com/v3/historical-candle/{instrument}/{unit}/{interval}/{to_date}/{from_date}"
+            response = requests.get(url, headers=headers)
+
+            if response.status_code == 200:
+                candles = response.json().get("data", {}).get("candles", [])
+                for candle in candles:
+                    data_points.append(HistoricalDataPoint(
+                        timestamp=datetime.strptime(candle[0], "%Y-%m-%dT%H:%M:%S%z"),
+                        open=float(candle[1]),
+                        high=float(candle[2]),
+                        low=float(candle[3]),
+                        close=float(candle[4]),
+                        volume=int(candle[5])
+                    ))
+                logger.info(f"Successfully fetched {len(data_points)} data points from Upstox API")
+            else:
+                logger.error(f"Upstox API error: {response.text}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch data from Upstox API: {str(e)}")
+
+    # If both external sources failed, try the database
+    if not data_points and db:
+        try:
+            # Extract clean table name from instrument
+            table_name = instrument.split("_")[-1].lower()
+            logger.info(f"Trying database table '{table_name}' for historical data")
+
+            query = f"""
+                SELECT * FROM {table_name}
+                WHERE timestamp >= :from_date AND timestamp <= :to_date
+                ORDER BY timestamp
+            """
+
+            # Use parameterized query safely
+            result = await async_fetch_query(
+                db,
+                text(query),
+                {"from_date": from_date_dt, "to_date": to_date_dt}
+            )
+
+            if result:
+                for row in result:
+                    # Convert database row to HistoricalDataPoint
+                    date_val = row.get('timestamp')
+                    if isinstance(date_val, str):
+                        date_val = datetime.strptime(date_val, "%Y-%m-%d")
+
+                    data_points.append(HistoricalDataPoint(
+                        timestamp=date_val,
+                        open=float(row.get('open', 0)),
+                        high=float(row.get('high', 0)),
+                        low=float(row.get('low', 0)),
+                        close=float(row.get('close', 0)),
+                        volume=int(row.get('volume', 0))
+                    ))
+                logger.info(f"Successfully fetched {len(data_points)} data points from database")
+        except Exception as e:
+            logger.error(f"Error fetching from database: {str(e)}")
+
+    # If we still don't have data, raise an error
+    if not data_points:
+        logger.error(f"Could not retrieve historical data for {instrument} from any source")
+        raise HTTPException(status_code=404, detail=f"Historical data not available for {instrument}")
+
+    # Create the response with sorted data
+    historical_data = HistoricalDataResponse(
+        instrument_token=instrument,
+        data=sorted(data_points, key=lambda x: x.timestamp)
+    )
+
+    logger.info(f"Returning {len(data_points)} historical data points for {instrument}")
+    return historical_data
 
 
 async def fetch_instruments(db: AsyncSession, refresh: bool = False) -> List[InstrumentSchema]:
@@ -1244,7 +1326,8 @@ async def fetch_instruments(db: AsyncSession, refresh: bool = False) -> List[Ins
             instruments_df = pd.read_json(path)
             instruments_df = instruments_df[
                 ['trading_symbol', 'instrument_key', 'exchange', 'instrument_type', 'segment']
-            ][(instruments_df['segment'] == 'NSE_EQ') & (instruments_df['instrument_type'] == 'EQ')]
+            ][(instruments_df['segment'] == 'NSE_EQ') & (instruments_df['instrument_type'] == 'EQ') &
+              (~instruments_df['name'].str.contains('TEST', case=False, na=False))]
 
             await db.execute(text("DELETE FROM instruments"))
             for _, row in instruments_df.iterrows():
@@ -1257,7 +1340,7 @@ async def fetch_instruments(db: AsyncSession, refresh: bool = False) -> List[Ins
                 )
                 db.add(instrument)
             await db.commit()
-            logger.info(f"Refreshed {len(instruments_df)} instruments in NSEDATA database")
+            logger.info(f"Refreshed {len(instruments_df)} instruments in database")
 
         query = select(Instrument)
         result = await db.execute(query)
@@ -1492,12 +1575,13 @@ async def stop_strategy_execution(strategy: str, instrument_token: str, user_id:
         logger.error(f"Error stopping strategy {strategy} for {instrument_token}, user {user_id}: {str(e)}")
         return {"status": "error", "message": str(e)}
 
-async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str, params: Dict, start_date: str, end_date: str):
+async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str, params: Dict, start_date: str, end_date: str, ws_callback=None, db: AsyncSession = None):
     try:
-        data = await get_historical_data(upstox_api=None, kite_api=None, instrument=instrument_token,
-                                   from_date=start_date, to_date=end_date, interval=timeframe)
+        data = await get_historical_data(upstox_api=None, upstox_access_token=None, instrument=instrument_token,
+                                         from_date=start_date, to_date=end_date, unit="days", interval=timeframe, db=db)
         if not data.data:
-            return {"error": "Failed to fetch historical data"}
+            return {"error": {"code": "NO_DATA", "message": "Failed to fetch historical data"}}
+
         df = pd.DataFrame([{
             "timestamp": point.timestamp,
             "open": point.open,
@@ -1506,34 +1590,47 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
             "close": point.close,
             "volume": point.volume
         } for point in data.data])
-        if strategy == "Short Sell Optimization":
+
+        if isinstance(strategy, str) and strategy.startswith("{"):
+            strategy_data = json.loads(strategy)
+            strategy_name = strategy_data.get("name", "Custom Strategy")
+        else:
+            strategy_name = strategy
+
+        if strategy_name == "Short Sell Optimization":
             initial_investment = params.get("initial_investment", 50000)
-            stop_loss_atr_mult_range = params.get("stop_loss_atr_mult_range", [1.5, 2.5])
-            target_atr_mult_range = params.get("target_atr_mult_range", [4.0, 6.0])
-            stop_loss_atr_mult_values = [x for x in np.arange(stop_loss_atr_mult_range[0], stop_loss_atr_mult_range[1] + 0.5, 0.5)]
-            target_atr_mult_values = [x for x in np.arange(target_atr_mult_range[0], target_atr_mult_range[1] + 0.5, 0.5)]
+            stop_loss_range = params.get("stop_loss_range", [1.5, 2.5])
+            target_range = params.get("target_range", [4.0, 6.0])
+            stop_loss_values = [x for x in np.arange(stop_loss_range[0], stop_loss_range[1] + 0.5, 0.5)]
+            target_values = [x for x in np.arange(target_range[0], target_range[1] + 0.5, 0.5)]
             best_result = None
             best_profit = float('-inf')
-            for stop_loss_mult in stop_loss_atr_mult_values:
-                for target_mult in target_atr_mult_values:
-                    result = await backtest_short_sell(df, initial_investment, stop_loss_mult, target_mult)
-                    if result["TotalProfit"] > best_profit:
-                        best_profit = result["TotalProfit"]
-                        best_result = result
+            total_iterations = len(stop_loss_values) * len(target_values)
+            for i, (stop_loss_mult, target_mult) in enumerate([(sl, tg) for sl in stop_loss_values for tg in target_values]):
+                result = await backtest_short_sell(df, initial_investment, stop_loss_mult, target_mult)
+                result["StrategyName"] = strategy_name
+                if result["TotalProfit"] > best_profit:
+                    best_profit = result["TotalProfit"]
+                    best_result = result
+                if ws_callback:
+                    await ws_callback({"progress": (i + 1) / total_iterations, "partial_result": result})
             return best_result
         else:
             strategy_func = {
                 "MACD Crossover": macd_strategy,
                 "Bollinger Bands": bollinger_band_strategy,
                 "RSI Oversold/Overbought": rsi_strategy
-            }.get(strategy)
+            }.get(strategy_name)
             if not strategy_func:
-                return {"error": f"Unsupported strategy: {strategy}"}
+                return {"error": {"code": "INVALID_STRATEGY", "message": f"Unsupported strategy: {strategy_name}"}}
             result = await backtest_strategy_generic(df, strategy_func, **params)
+            result["StrategyName"] = strategy_name
+            if ws_callback:
+                await ws_callback({"progress": 1.0, "partial_result": result})
             return result
     except Exception as e:
         logger.error(f"Error backtesting strategy {strategy}: {str(e)}")
-        return {"error": str(e)}
+        return {"error": {"code": "BACKTEST_FAILED", "message": str(e)}}
 
 async def backtest_short_sell(df, initial_investment: float, stop_loss_atr_mult: float, target_atr_mult: float):
     portfolio_value = initial_investment
@@ -1628,12 +1725,13 @@ async def backtest_strategy_generic(df, strategy_func, **params):
         "total_pnl": df_copy['cumulative_pnl'].iloc[-1]
     }
 
-async def get_analytics_data(upstox_api, instrument_token: str, timeframe: str, ema_period: int,
-                             rsi_period: int, lr_period: int, stochastic_k: int, stochastic_d: int) -> dict:
+async def get_analytics_data(upstox_api, instrument_token: str, upstox_access_token: str, unit: str, interval: str,
+                             ema_period: int, rsi_period: int, lr_period: int, stochastic_k: int, stochastic_d: int) -> dict:
     try:
         from_date = (datetime.now() - timedelta(days=100)).strftime("%Y-%m-%d")
         to_date = datetime.now().strftime("%Y-%m-%d")
-        data = await get_historical_data(upstox_api, None, instrument_token, from_date, to_date, timeframe)
+        data = await get_historical_data(upstox_api, upstox_access_token, instrument_token,
+                                         from_date, to_date, unit, interval)
         # Convert HistoricalDataResponse to DataFrame
         df = pd.DataFrame([
             {
@@ -1647,15 +1745,17 @@ async def get_analytics_data(upstox_api, instrument_token: str, timeframe: str, 
             for point in data.data
         ])
         df["close"] = pd.to_numeric(df["close"], errors="coerce")
-        ema = calculate_ema(df["close"], ema_period)
-        rsi = calculate_rsi(df["close"], rsi_period)
-        lr = calculate_linear_regression(df["close"], lr_period)
-        macd_line, signal_line, _ = calculate_macd(df["close"])  # Fixed: Unpack all three values
-        bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(df["close"])
-        stochastic_k_val, stochastic_d_val = calculate_stochastic_oscillator(df["high"], df["low"], df["close"], stochastic_k, stochastic_d)
-        atr = calculate_atr(df["high"], df["low"], df["close"])
+        sma = calculate_sma(df, ema_period)
+        ema = calculate_ema(df, ema_period)
+        rsi = calculate_rsi(df, rsi_period)
+        lr = calculate_linear_regression(df, lr_period)
+        macd_line, signal_line, _ = calculate_macd(df)  # Fixed: Unpack all three values
+        bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(df)
+        stochastic_k_val, stochastic_d_val = calculate_stochastic_oscillator(df, stochastic_k, stochastic_d)
+        atr = calculate_atr(df)
         # Replace NaN/inf with None
         result = {
+            "sma": [None if pd.isna(x) or not np.isfinite(x) else x for x in sma],
             "ema": [None if pd.isna(x) or not np.isfinite(x) else x for x in ema],
             "rsi": [None if pd.isna(x) or not np.isfinite(x) else x for x in rsi],
             "lr": [None if pd.isna(x) or not np.isfinite(x) else x for x in lr],
@@ -1759,6 +1859,39 @@ async def cancel_mf_sip(api, sip_id: str, db: AsyncSession, user_id: str) -> dic
 
 
 if __name__ == "__main__":
-    # Example usage
-    data = fetch_and_load_index_data("NIFTY 50")
-    print(data)
+    import asyncio
+    from backend.app.database import get_db
+    from datetime import datetime, timedelta
+
+
+    async def main():
+            try:
+                # Example parameters - replace with actual test values
+                instrument_key = "NSE_EQ|INE002A01018"  # Example: Reliance Industries
+                to_date_str = datetime.now().strftime("%Y-%m-%d")
+                from_date_str = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+
+                print(f"Fetching historical data for {instrument_key} from {from_date_str} to {to_date_str}")
+
+                historical_data_response = await get_historical_data(
+                    upstox_api=None,  # Provide a mock or real API object if needed
+                    upstox_access_token=None,  # Provide a token if testing Upstox API path
+                    instrument="RELIANCE",
+                    from_date=from_date_str,
+                    to_date=to_date_str,
+                    unit="days",  # or "minutes"
+                    interval="1",  # "1" for 1Day or "1" for 1minute etc.
+                    db=get_db()
+                )
+                if historical_data_response and historical_data_response.data:
+                    print(f"Fetched {len(historical_data_response.data)} data points.")
+                    for point in historical_data_response.data[:5]:  # Print first 5 points
+                        print(f"Timestamp: {point.timestamp}, Close: {point.close}")
+                else:
+                    print("No historical data found or an error occurred.")
+
+            except Exception as e:
+                print(f"An error occurred in main: {e}")
+
+
+    asyncio.run(main())
