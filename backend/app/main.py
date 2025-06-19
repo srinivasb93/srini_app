@@ -1,3 +1,4 @@
+import aiohttp
 from fastapi import FastAPI, Depends, HTTPException, Request, WebSocket
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import List, Optional
@@ -1008,7 +1009,7 @@ async def stop_strategy(strategy: str, instrument_token: str, user_id: str = Dep
         logger.error(f"Error stopping strategy {strategy} for {instrument_token}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/strategies/{broker}", response_model=List[StrategyResponse], tags=["algo-trading"])
+@app.get("/strategies/broker/{broker}", response_model=List[StrategyResponse], tags=["algo-trading"])
 async def get_strategies(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail={"error": {"code": "INVALID_BROKER", "message": "Invalid broker"}})
@@ -1068,12 +1069,27 @@ async def websocket_backtest(websocket: WebSocket, user_id: str):
     await websocket.accept()
     try:
         while True:
-            data = await websocket.receive_json()
-            await websocket.send_json({"progress": data.get("progress", 0), "partial_result": data.get("partial_result")})
+            try:
+                data = await websocket.receive_json()
+                logger.debug(f"WebSocket received data for user {user_id}: {data}")
+                await websocket.send_json(data)
+            except aiohttp.WSServerHandshakeError as e:
+                logger.warning(f"WebSocket handshake error for user {user_id}: {str(e)}")
+                break
+            except aiohttp.WebSocketError as e:
+                logger.error(f"WebSocket error for user {user_id}: {str(e)}")
+                break
     except Exception as e:
-        logger.error(f"WebSocket error for user {user_id}: {str(e)}")
+        logger.error(f"Unexpected WebSocket error for user {user_id}: {str(e)}")
     finally:
-        await websocket.close()
+        try:
+            if websocket.closed:
+                logger.info(f"WebSocket already closed for user {user_id}")
+            else:
+                await websocket.close(code=1000, reason="Normal closure")
+                logger.info(f"WebSocket closed for user {user_id}")
+        except Exception as e:
+            logger.error(f"Error closing WebSocket for user {user_id}: {str(e)}")
 
 @app.get("/analytics/{broker}", tags=["analytics"])
 async def get_analytics(
@@ -1179,4 +1195,20 @@ async def get_auto_orders(broker: str, user_id: str = Depends(get_current_user),
     except Exception as e:
         logger.error(f"Error fetching auto orders for {broker}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/strategies/{broker}/performance", tags=["algo-trading"])
+async def get_strategy_performance(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    query = """
+        SELECT s.strategy_id, s.name, t.pnl, t.entry_time, t.exit_time
+        FROM strategies s
+        LEFT JOIN trade_history t ON s.user_id = t.user_id AND t.broker = s.broker
+        WHERE s.user_id = :user_id AND s.broker = :broker AND s.status = 'active'
+    """
+    trades = pd.DataFrame(await async_fetch_query(db, text(query), {"user_id": user_id, "broker": broker}))
+    performance = trades.groupby("strategy_id").agg({
+        "pnl": ["sum", "count"],
+        "entry_time": "min",
+        "exit_time": "max"
+    }).to_dict()
+    return performance
 

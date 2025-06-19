@@ -24,7 +24,7 @@ from watchlist import render_watchlist_page
 from settings import render_settings_page
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 BASE_URL = "http://localhost:8000"
@@ -439,7 +439,7 @@ async def strategies_page(client: Client):
     apply_theme_from_storage()
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
-    await render_strategies_page(fetch_api, app.storage.user)
+    await render_strategies_page(fetch_api, app.storage.user, await get_cached_instruments(broker))
 
 
 @ui.page('/backtesting')
@@ -536,6 +536,27 @@ async def settings_page(client: Client):
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_settings_page(fetch_api, app.storage.user, apply_theme_from_storage)
+
+@ui.page('/strategy-performance')
+async def strategy_performance_page(client: Client):
+    await client.connected()
+    if not app.storage.user.get(STORAGE_TOKEN_KEY):
+        ui.navigate.to('/')
+        return
+    apply_theme_from_storage()
+    render_header()
+    broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
+    ui.label("Strategy Performance Dashboard").classes("text-h5 q-pa-md")
+    performance_data = await fetch_api(f"/strategies/{broker}/performance")
+    if performance_data:
+        with ui.grid(columns=3).classes("w-full gap-4"):
+            for strategy_id, metrics in performance_data.items():
+                with ui.card().classes("p-4"):
+                    ui.label(strategy_id).classes("text-subtitle1")
+                    ui.label(f"Total PnL: ₹{metrics['pnl']['sum']:.2f}")
+                    ui.label(f"Trade Count: {metrics['pnl']['count']}")
+    else:
+        ui.label("No performance data available.").classes("text-warning")
 
 
 @app.on_connect

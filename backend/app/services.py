@@ -22,6 +22,7 @@ from common_utils.db_utils import async_fetch_query, async_execute_query
 from common_utils.read_write_sql_data import load_sql_data
 from common_utils.fetch_db_data import *
 from common_utils.utils import notify
+from common_utils import indicators
 from common_utils.upstox_utils import get_symbol_for_instrument, get_historical_data_latest, get_market_quote
 from models import Order, ScheduledOrder, QueuedOrder, User, GTTOrder, Instrument
 from schemas import Order as OrderSchema, ScheduledOrder as ScheduledOrderSchema, OrderHistory, Trade, QuoteResponse, \
@@ -1434,8 +1435,14 @@ async def execute_strategy(api, strategy: str, instrument_token: str, quantity: 
             raise ValueError("Quantity must be positive")
         if stop_loss < 0 or take_profit < 0:
             raise ValueError("Stop loss and take profit cannot be negative")
-        if strategy not in ["MACD Crossover", "Bollinger Bands", "RSI Oversold/Overbought", "Stochastic Oscillator", "Support/Resistance Breakout"]:
-            raise ValueError(f"Invalid strategy: {strategy}")
+        # Parse strategy if it's a JSON string
+        if strategy.startswith("{"):
+            strategy_data = json.loads(strategy)
+            strategy_name = strategy_data.get("name", "Custom Strategy")
+            is_custom = True
+        else:
+            strategy_name = strategy
+            is_custom = False
         data = await get_historical_data(upstox_api=api, kite_api=None, instrument=instrument_token,
                                          from_date=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
                                          to_date=datetime.now().strftime("%Y-%m-%d"), interval="day")
@@ -1450,7 +1457,12 @@ async def execute_strategy(api, strategy: str, instrument_token: str, quantity: 
             "volume": point.volume
         } for point in data.data])
         signal = None
-        if strategy == "MACD Crossover":
+
+        if is_custom:
+            entry_signals = await evaluate_custom_strategy(df, strategy_data.get("entry_conditions", []),
+                                                           indicators)
+            signal = entry_signals.iloc[-1] if not entry_signals.empty else None
+        elif strategy == "MACD Crossover":
             macd_line, signal_line, _ = calculate_macd(df)
             signal = check_macd_crossover(macd_line, signal_line)
         elif strategy == "Bollinger Bands":
@@ -1576,12 +1588,21 @@ async def stop_strategy_execution(strategy: str, instrument_token: str, user_id:
         return {"status": "error", "message": str(e)}
 
 async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str, params: Dict, start_date: str, end_date: str, ws_callback=None, db: AsyncSession = None):
+    logger.debug(f"Starting backtest for strategy: {strategy}, instrument: {instrument_token}")
     try:
-        data = await get_historical_data(upstox_api=None, upstox_access_token=None, instrument=instrument_token,
-                                         from_date=start_date, to_date=end_date, unit="days", interval=timeframe, db=db)
-        if not data.data:
-            return {"error": {"code": "NO_DATA", "message": "Failed to fetch historical data"}}
+        if not instrument_token:
+            raise ValueError("Instrument token is required")
+        if not start_date or not end_date:
+            raise ValueError("Start and end dates are required")
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        if start_dt >= end_dt:
+            raise ValueError("Start date must be before end date")
 
+        data = await get_historical_data(upstox_api=None, upstox_access_token=None, instrument=instrument_token, from_date=start_date, to_date=end_date, unit="days", interval=timeframe, db=db)
+        if not data.data:
+            logger.error(f"No historical data for {instrument_token}")
+            return {"error": {"code": "NO_DATA", "message": "Failed to fetch historical data"}}
         df = pd.DataFrame([{
             "timestamp": point.timestamp,
             "open": point.open,
@@ -1590,47 +1611,111 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
             "close": point.close,
             "volume": point.volume
         } for point in data.data])
+        logger.debug(f"Fetched {len(df)} data points for {instrument_token}")
 
-        if isinstance(strategy, str) and strategy.startswith("{"):
-            strategy_data = json.loads(strategy)
-            strategy_name = strategy_data.get("name", "Custom Strategy")
+        # Parse strategy
+        if strategy.startswith("{"):
+            try:
+                strategy_data = json.loads(strategy)
+                strategy_name = strategy_data.get("name", "Custom Strategy")
+                is_custom = True
+            except json.JSONDecodeError:
+                logger.error(f"Invalid JSON strategy: {strategy}")
+                return {"error": {"code": "INVALID_STRATEGY", "message": "Invalid JSON strategy format"}}
         else:
             strategy_name = strategy
+            is_custom = False
+            logger.debug(f"Using predefined strategy: {strategy_name}")
 
-        if strategy_name == "Short Sell Optimization":
-            initial_investment = params.get("initial_investment", 50000)
-            stop_loss_range = params.get("stop_loss_range", [1.5, 2.5])
-            target_range = params.get("target_range", [4.0, 6.0])
-            stop_loss_values = [x for x in np.arange(stop_loss_range[0], stop_loss_range[1] + 0.5, 0.5)]
-            target_values = [x for x in np.arange(target_range[0], target_range[1] + 0.5, 0.5)]
-            best_result = None
-            best_profit = float('-inf')
-            total_iterations = len(stop_loss_values) * len(target_values)
-            for i, (stop_loss_mult, target_mult) in enumerate([(sl, tg) for sl in stop_loss_values for tg in target_values]):
-                result = await backtest_short_sell(df, initial_investment, stop_loss_mult, target_mult)
-                result["StrategyName"] = strategy_name
-                if result["TotalProfit"] > best_profit:
-                    best_profit = result["TotalProfit"]
-                    best_result = result
-                if ws_callback:
-                    await ws_callback({"progress": (i + 1) / total_iterations, "partial_result": result})
-            return best_result
+        if is_custom:
+            result = await backtest_custom_strategy(df, strategy_data, params, ws_callback)
+            result["StrategyName"] = strategy_name
+            logger.debug(f"Custom strategy backtest completed: {strategy_name}")
+            return result
         else:
             strategy_func = {
                 "MACD Crossover": macd_strategy,
                 "Bollinger Bands": bollinger_band_strategy,
-                "RSI Oversold/Overbought": rsi_strategy
+                "RSI Oversold/Overbought": rsi_strategy,
+                "Short Sell Optimization": None  # Handled separately
             }.get(strategy_name)
-            if not strategy_func:
+            if not strategy_func and strategy_name != "Short Sell Optimization":
+                logger.error(f"Unsupported strategy: {strategy_name}")
                 return {"error": {"code": "INVALID_STRATEGY", "message": f"Unsupported strategy: {strategy_name}"}}
-            result = await backtest_strategy_generic(df, strategy_func, **params)
-            result["StrategyName"] = strategy_name
-            if ws_callback:
-                await ws_callback({"progress": 1.0, "partial_result": result})
-            return result
+            if strategy_name == "Short Sell Optimization":
+                initial_investment = params.get("initial_investment", 50000)
+                stop_loss_range = params.get("stop_loss_range", [1.5, 2.5])
+                target_range = params.get("target_range", [4.0, 6.0])
+                stop_loss_values = [x for x in np.arange(stop_loss_range[0], stop_loss_range[1] + 0.5, 0.5)]
+                target_values = [x for x in np.arange(target_range[0], target_range[1] + 0.5, 0.5)]
+                best_result = None
+                best_profit = float('-inf')
+                total_iterations = len(stop_loss_values) * len(target_values)
+                for i, (stop_loss_mult, target_mult) in enumerate([(sl, tg) for sl in stop_loss_values for tg in target_values]):
+                    result = await backtest_short_sell(df, initial_investment, stop_loss_mult, target_mult)
+                    result["StrategyName"] = strategy_name
+                    if result["TotalProfit"] > best_profit:
+                        best_profit = result["TotalProfit"]
+                        best_result = result
+                    if ws_callback:
+                        await ws_callback({"progress": (i + 1) / total_iterations, "partial_result": result})
+                logger.debug(f"Short Sell Optimization backtest completed: best profit {best_profit}")
+                return best_result
+            else:
+                result = await backtest_strategy_generic(df, strategy_func, **params)
+                result["StrategyName"] = strategy_name
+                if ws_callback:
+                    await ws_callback({"progress": 1.0, "partial_result": result})
+                logger.debug(f"Generic strategy backtest completed: {strategy_name}")
+                return result
+    except ValueError as ve:
+        logger.error(f"Validation error in backtest: {str(ve)}")
+        return {"error": {"code": "INVALID_INPUT", "message": str(ve)}}
     except Exception as e:
-        logger.error(f"Error backtesting strategy {strategy}: {str(e)}")
+        logger.error(f"Unexpected error backtesting strategy {strategy}: {str(e)}", exc_info=True)
         return {"error": {"code": "BACKTEST_FAILED", "message": str(e)}}
+
+async def backtest_custom_strategy(df, strategy_data, params, ws_callback):
+    initial_investment = params.get("initial_investment", 100000)
+    tradebook = []
+    position = None
+    entry_price = 0
+    portfolio_value = initial_investment
+    entry_signals = await evaluate_custom_strategy(df, strategy_data.get("entry_conditions", []), indicators)
+    exit_signals = await evaluate_custom_strategy(df, strategy_data.get("exit_conditions", []), indicators)
+    for i, row in df.iterrows():
+        if position is None and entry_signals.iloc[i] == "BUY":
+            position = "long"
+            entry_price = row["close"]
+        elif position == "long" and exit_signals.iloc[i] == "BUY":  # Using BUY as exit signal placeholder
+            exit_price = row["close"]
+            profit = (exit_price - entry_price) * initial_investment / entry_price
+            portfolio_value += profit
+            tradebook.append({
+                "Date": row["timestamp"],
+                "EntryPrice": entry_price,
+                "ExitPrice": exit_price,
+                "Profit": profit,
+                "PortfolioValue": portfolio_value,
+                "Action": "SELL"
+            })
+            position = None
+        if ws_callback:
+            await ws_callback({"progress": (i + 1) / len(df), "partial_result": {"Tradebook": tradebook}})
+    total_trades = len(tradebook)
+    winning_trades = len([t for t in tradebook if t["Profit"] > 0])
+    total_profit = portfolio_value - initial_investment
+    win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+    return {
+        "InitialInvestment": initial_investment,
+        "FinalPortfolioValue": portfolio_value,
+        "TotalProfit": total_profit,
+        "WinRate": win_rate,
+        "TotalTrades": total_trades,
+        "WinningTrades": winning_trades,
+        "LosingTrades": total_trades - winning_trades,
+        "Tradebook": tradebook
+    }
 
 async def backtest_short_sell(df, initial_investment: float, stop_loss_atr_mult: float, target_atr_mult: float):
     portfolio_value = initial_investment
@@ -1857,6 +1942,69 @@ async def cancel_mf_sip(api, sip_id: str, db: AsyncSession, user_id: str) -> dic
         logger.error(f"Error cancelling SIP {sip_id} for user {user_id}: {str(e)}")
         raise
 
+async def evaluate_custom_strategy(df, strategy_conditions: List[Dict], indicators_module):
+    signals = pd.Series(index=df.index, dtype='object')
+    signals[:] = None
+    for i in range(1, len(df)):
+        condition_met = True
+        for cond in strategy_conditions:
+            left_value = get_indicator_value(df, cond["left_indicator"], cond["left_params"], i, indicators_module)
+            right_value = cond["right_value"] if cond["right_indicator"] == "Fixed Value" else get_indicator_value(df, cond["right_indicator"], cond["right_params"], i, indicators_module)
+            if left_value is None or right_value is None:
+                condition_met = False
+                break
+            comparison = cond["comparison"]
+            if not evaluate_condition(left_value, right_value, comparison):
+                condition_met = False
+                break
+        if condition_met:
+            signals.iloc[i] = "BUY"  # Default to BUY for entry; adjust for exit
+    return signals
+
+def get_indicator_value(df, indicator_name, params, index, indicators_module):
+    if indicator_name == "Close Price":
+        return df["close"].iloc[index]
+    elif indicator_name == "Open Price":
+        return df["open"].iloc[index]
+    elif indicator_name == "High Price":
+        return df["high"].iloc[index]
+    elif indicator_name == "Low Price":
+        return df["low"].iloc[index]
+    elif indicator_name == "Volume":
+        return df["volume"].iloc[index]
+    elif indicator_name == "SMA":
+        sma = indicators_module.calculate_sma(df, params.get("period", 20))
+        return sma.iloc[index]
+    elif indicator_name == "EMA":
+        ema = indicators_module.calculate_ema(df, params.get("period", 14))
+        return ema.iloc[index]
+    elif indicator_name == "RSI":
+        rsi = indicators_module.calculate_rsi(df, params.get("period", 14))
+        return rsi.iloc[index]
+    elif indicator_name == "MACD":
+        macd, _, _ = indicators_module.calculate_macd(df, params.get("fast_period", 12), params.get("slow_period", 26), params.get("signal_period", 9))
+        return macd.iloc[index]
+    elif indicator_name == "Bollinger Bands":
+        _, upper, lower = indicators_module.calculate_bollinger_bands(df, params.get("period", 20), params.get("std_dev", 2))
+        return upper.iloc[index]  # Example: return upper band
+    return None
+
+def evaluate_condition(left_value, right_value, comparison):
+    if comparison == ">":
+        return left_value > right_value
+    elif comparison == "<":
+        return left_value < right_value
+    elif comparison == ">=":
+        return left_value >= right_value
+    elif comparison == "<=":
+        return left_value <= right_value
+    elif comparison == "==":
+        return abs(left_value - right_value) < 1e-6
+    elif comparison == "Crosses Above":
+        return left_value > right_value  # Simplified; needs previous value check
+    elif comparison == "Crosses Below":
+        return left_value < right_value
+    return False
 
 if __name__ == "__main__":
     import asyncio

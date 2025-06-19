@@ -285,9 +285,25 @@ class BacktestRequest(BaseModel):
     instrument_token: str
     timeframe: str
     strategy: str
-    params: Dict[str, float]
+    params: Dict[str, Any]
     start_date: str
     end_date: str
+
+    @validator("params")
+    def validate_params(cls, v):
+        if "initial_investment" in v and v["initial_investment"] <= 0:
+            raise ValueError("Initial investment must be positive")
+        if "stop_loss_range" in v:
+            if not isinstance(v["stop_loss_range"], list) or len(v["stop_loss_range"]) != 2:
+                raise ValueError("Stop loss range must be a list of [min, max]")
+            if v["stop_loss_range"][0] >= v["stop_loss_range"][1]:
+                raise ValueError("Stop loss min must be less than max")
+        if "target_range" in v:
+            if not isinstance(v["target_range"], list) or len(v["target_range"]) != 2:
+                raise ValueError("Target range must be a list of [min, max]")
+            if v["target_range"][0] >= v["target_range"][1]:
+                raise ValueError("Target min must be less than max")
+        return v
 
 class MFSIPRequest(BaseModel):
     scheme_code: str
