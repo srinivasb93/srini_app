@@ -570,7 +570,7 @@ async def on_client_connect(client: Client):
 if __name__ in {"__main__", "__mp_main__"}:
     storage_secret_key = "my_super_secret_key_for_testing_123_please_change_for_prod"
     ui.run(title="Algo Trader",
-           port=8080,
+           port=8081,
            reload=True,
            uvicorn_reload_dirs='.',
            uvicorn_reload_includes='*.py',

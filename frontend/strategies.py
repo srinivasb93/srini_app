@@ -144,6 +144,12 @@ def extract_conditions(conditions, indicators):
 
         logger.debug(f"Extracting condition: left_indicator={left_indicator}, left_params={left_params}, right_indicator={right_indicator}, right_params={right_params}")
 
+        # Validate Crosses Above/Below conditions
+        if cond["comparison"].value in ["Crosses Above", "Crosses Below"]:
+            if left_indicator == right_indicator and json.dumps(left_params) == json.dumps(right_params):
+                ui.notify(f"Invalid condition: {left_indicator} cannot cross itself with identical parameters.", type="negative")
+                return []
+
         if left_indicator in required_params:
             for param in required_params[left_indicator]:
                 if param not in left_params or left_params[param] is None:

@@ -1599,7 +1599,8 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
         if start_dt >= end_dt:
             raise ValueError("Start date must be before end date")
 
-        data = await get_historical_data(upstox_api=None, upstox_access_token=None, instrument=instrument_token, from_date=start_date, to_date=end_date, unit="days", interval=timeframe, db=db)
+        data = await get_historical_data(upstox_api=None, upstox_access_token=None, instrument=instrument_token,
+                                         from_date=start_date, to_date=end_date, unit="days", interval=timeframe, db=db)
         if not data.data:
             logger.error(f"No historical data for {instrument_token}")
             return {"error": {"code": "NO_DATA", "message": "Failed to fetch historical data"}}
@@ -1627,10 +1628,15 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
             is_custom = False
             logger.debug(f"Using predefined strategy: {strategy_name}")
 
+        if ws_callback:
+            await ws_callback({"progress": 0.1, "partial_result": {"message": "Starting backtest"}})
+
         if is_custom:
             result = await backtest_custom_strategy(df, strategy_data, params, ws_callback)
             result["StrategyName"] = strategy_name
             logger.debug(f"Custom strategy backtest completed: {strategy_name}")
+            if ws_callback:
+                await ws_callback({"progress": 1.0, "partial_result": result})
             return result
         else:
             strategy_func = {
@@ -1687,23 +1693,31 @@ async def backtest_custom_strategy(df, strategy_data, params, ws_callback):
         if position is None and entry_signals.iloc[i] == "BUY":
             position = "long"
             entry_price = row["close"]
+            tradebook.append({
+                "Date": row["timestamp"].isoformat() if isinstance(row["timestamp"], pd.Timestamp) else row["timestamp"],
+                "EntryPrice": entry_price,
+                "Action": "BUY",
+                "PortfolioValue": portfolio_value,
+                "Quantity": initial_investment / entry_price
+            })
         elif position == "long" and exit_signals.iloc[i] == "BUY":  # Using BUY as exit signal placeholder
             exit_price = row["close"]
-            profit = (exit_price - entry_price) * initial_investment / entry_price
+            profit = (exit_price - entry_price) * (initial_investment / entry_price)
             portfolio_value += profit
             tradebook.append({
-                "Date": row["timestamp"],
+                "Date": row["timestamp"].isoformat() if isinstance(row["timestamp"], pd.Timestamp) else row["timestamp"],
                 "EntryPrice": entry_price,
                 "ExitPrice": exit_price,
                 "Profit": profit,
                 "PortfolioValue": portfolio_value,
-                "Action": "SELL"
+                "Action": "SELL",
+                "Quantity": initial_investment / entry_price
             })
             position = None
         if ws_callback:
             await ws_callback({"progress": (i + 1) / len(df), "partial_result": {"Tradebook": tradebook}})
     total_trades = len(tradebook)
-    winning_trades = len([t for t in tradebook if t["Profit"] > 0])
+    winning_trades = len([t for t in tradebook if t.get("Profit", 0) > 0])
     total_profit = portfolio_value - initial_investment
     win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
     return {
@@ -1789,25 +1803,47 @@ async def backtest_strategy_generic(df, strategy_func, **params):
     df_copy['pnl'] = 0
     position = 0
     buy_price = 0
+    tradebook = []
+    initial_investment = params.get("initial_investment", 100000)
+    portfolio_value = initial_investment
     for i, row in df_copy.iterrows():
         if row['signal'] == "BUY" and position == 0:
             position = 1
             buy_price = row['close']
             df_copy.at[i, 'position'] = position
+            tradebook.append({
+                "Date": row["timestamp"].isoformat() if isinstance(row["timestamp"], (pd.Timestamp, datetime)) else str(row["timestamp"]),
+                "EntryPrice": float(buy_price),
+                "Action": "BUY",
+                "PortfolioValue": float(portfolio_value),
+                "Quantity": float(initial_investment / buy_price)
+            })
         elif row['signal'] == "SELL" and position == 1:
             position = 0
             sell_price = row['close']
             df_copy.at[i, 'position'] = position
-            df_copy.at[i, 'pnl'] = sell_price - buy_price
+            profit = (sell_price - buy_price) * (initial_investment / buy_price)
+            portfolio_value += profit
+            df_copy.at[i, 'pnl'] = profit
+            tradebook.append({
+                "Date": row["timestamp"].isoformat() if isinstance(row["timestamp"], (pd.Timestamp, datetime)) else str(row["timestamp"]),
+                "EntryPrice": float(buy_price),
+                "ExitPrice": float(sell_price),
+                "Profit": float(profit),
+                "PortfolioValue": float(portfolio_value),
+                "Action": "SELL",
+                "Quantity": float(initial_investment / buy_price)
+            })
     df_copy['cumulative_pnl'] = df_copy['pnl'].cumsum()
     total_trades = df_copy['signal'].value_counts().sum()
     profitable_trades = len(df_copy[df_copy['pnl'] > 0])
-    win_rate = profitable_trades / total_trades * 100 if total_trades > 0 else 0
+    win_rate = (profitable_trades / total_trades * 100) if total_trades > 0 else 0
     return {
         "data": df_copy.to_dict(orient="records"),
         "total_trades": total_trades,
-        "win_rate": win_rate,
-        "total_pnl": df_copy['cumulative_pnl'].iloc[-1]
+        "win_rate": float(win_rate),
+        "total_pnl": float(df_copy['cumulative_pnl'].iloc[-1]),
+        "Tradebook": tradebook
     }
 
 async def get_analytics_data(upstox_api, instrument_token: str, upstox_access_token: str, unit: str, interval: str,
@@ -1959,6 +1995,8 @@ async def evaluate_custom_strategy(df, strategy_conditions: List[Dict], indicato
                 break
         if condition_met:
             signals.iloc[i] = "BUY"  # Default to BUY for entry; adjust for exit
+    if signals.dropna().empty:
+        logger.warning(f"No signals generated for strategy conditions: {strategy_conditions}")
     return signals
 
 def get_indicator_value(df, indicator_name, params, index, indicators_module):

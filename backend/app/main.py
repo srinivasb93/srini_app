@@ -791,8 +791,6 @@ async def get_historical(broker: str, instrument: str, from_date: str, to_date: 
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail="Invalid broker")
     user_apis_dict = await initialize_user_apis(user_id, db)
-    # upstox_api = user_apis_dict["upstox"]["history"] if broker == "Upstox" else None
-    # kite_api = user_apis_dict["zerodha"]["kite"] if broker == "Zerodha" else None
     upstox_api = user_apis_dict["upstox"]["history"]
     if not upstox_api:
         raise HTTPException(status_code=400, detail="Upstox API not initialized")
