@@ -16,10 +16,18 @@ from plotly.subplots import make_subplots
 import aiohttp
 import time
 from functools import lru_cache
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://localhost:8000"  # Update with your API base URL
+BASE_URL = "http://localhost:8000"
+
+PREDEFINED_STRATEGIES = {
+    "MACD Crossover": "MACD Crossover",
+    "Bollinger Bands": "Bollinger Bands",
+    "RSI Oversold/Overbought": "RSI Oversold/Overbought",
+    "Short Sell Optimization": "Short Sell Optimization"
+}
 
 class BacktestMetrics:
     """Calculates comprehensive performance metrics from tradebook."""
@@ -36,95 +44,78 @@ class BacktestMetrics:
             return {}
 
         df = pd.DataFrame(tradebook)
-        try:
-            df["timestamp"] = pd.to_datetime(df["Date"])
-        except Exception as e:
-            logger.warning(f"Error converting dates: {str(e)}")
-            # Create a default timestamp column if conversion fails
-            df["timestamp"] = pd.Series([pd.Timestamp.now()] * len(df))
-        df["returns"] = df["Profit"] / df["PortfolioValue"].shift(1)
+        if df.empty:
+            return {}
 
-        total_trades = len(df)
-        winning_trades = len(df[df["Profit"] > 0])
+        # Correctly convert 'Date' column to datetime objects for calculations
+        df["timestamp"] = pd.to_datetime(df["Date"])
+        df.sort_values(by="timestamp", inplace=True)
+        df["returns"] = df["Profit"].fillna(0) / df["PortfolioValue"].shift(1).fillna(initial_capital)
 
-        metrics = {
-            "TotalProfit": float(df["Profit"].sum()),
+        # --- Trade Cycle Analysis for Accurate Metrics ---
+        buy_indices = df.index[df['Action'] == 'BUY'].tolist()
+        trade_cycles = []
+        if not buy_indices:
+            return {"TotalProfit": 0, "WinRate": 0, "TotalTrades": 0}
+
+        for i, buy_index in enumerate(buy_indices):
+            start_index = buy_index
+            end_index = buy_indices[i + 1] if i + 1 < len(buy_indices) else len(df)
+            cycle_df = df.iloc[start_index:end_index]
+            total_profit = cycle_df[cycle_df['Action'] == 'SELL']['Profit'].sum()
+            trade_cycles.append({"profit": total_profit, "win": total_profit > 0})
+
+        cycle_df = pd.DataFrame(trade_cycles)
+        total_trades = len(cycle_df)
+        winning_trades = cycle_df['win'].sum()
+
+        # --- Equity Curve and Drawdown ---
+        df['CumulativeProfit'] = df['Profit'].fillna(0).cumsum()
+        df['PortfolioValue'] = initial_capital + df['CumulativeProfit']
+
+        rolling_max = df['PortfolioValue'].cummax()
+        drawdown = (df['PortfolioValue'] - rolling_max) / rolling_max
+        max_drawdown = abs(drawdown.min()) * 100
+
+        # --- Sharpe Ratio ---
+        sharpe_ratio = 0
+        if not df['returns'].empty and df['returns'].std() != 0:
+            excess_returns = df['returns'] - (0.05 / 252)  # Assuming 5% risk-free rate
+            sharpe_ratio = np.sqrt(252) * excess_returns.mean() / df['returns'].std()
+
+        # --- Streaks ---
+        streaks = (cycle_df['win'] != cycle_df['win'].shift()).cumsum()
+        winning_streak = streaks[cycle_df['win']].value_counts().max() if winning_trades > 0 else 0
+        losing_streak = streaks[~cycle_df['win']].value_counts().max() if total_trades > winning_trades else 0
+
+        # --- CAGR and Calmar ---
+        years = (df["timestamp"].iloc[-1] - df["timestamp"].iloc[0]).days / 365.25 if len(df["timestamp"]) > 1 else 0
+        cagr = 0
+        if years > 0:
+            cagr = ((df['PortfolioValue'].iloc[-1] / initial_capital) ** (1 / years)) - 1
+        calmar_ratio = (cagr * 100) / max_drawdown if max_drawdown > 0 else 0
+
+        # --- Final Metrics Dictionary ---
+        return {
+            "TotalProfit": float(cycle_df["profit"].sum()),
             "WinRate": (winning_trades / total_trades * 100) if total_trades > 0 else 0,
             "TotalTrades": total_trades,
-            "FinalPortfolioValue": float(df["PortfolioValue"].iloc[-1]) if not df.empty else initial_capital,
-            "MaxDrawdown": float(BacktestMetrics._calculate_max_drawdown(df["PortfolioValue"])),
-            "SharpeRatio": float(BacktestMetrics._calculate_sharpe_ratio(df["returns"])),
-            "ProfitFactor": float(BacktestMetrics._calculate_profit_factor(df["Profit"])),
-            "AverageWin": float(df[df["Profit"] > 0]["Profit"].mean()) if winning_trades > 0 else 0,
-            "AverageLoss": float(df[df["Profit"] < 0]["Profit"].mean()) if len(df[df["Profit"] < 0]) > 0 else 0,
-            "LargestWin": float(df["Profit"].max()),
-            "LargestLoss": float(df["Profit"].min()),
-            "WinningStreak": int(BacktestMetrics._calculate_max_streak(df["Profit"] > 0)),
-            "LosingStreak": int(BacktestMetrics._calculate_max_streak(df["Profit"] < 0)),
-            # Additional metrics
-            "CAGR": float(BacktestMetrics._calculate_cagr(df["PortfolioValue"].iloc[0],
-                                                         df["PortfolioValue"].iloc[-1],
-                                                         (df["timestamp"].iloc[-1] - df["timestamp"].iloc[0]).days / 365)),
-            "AnnualizedVolatility": float(BacktestMetrics._calculate_annualized_volatility(df["returns"])),
-            "CalmarRatio": float(BacktestMetrics._calculate_calmar_ratio(df))
+            "FinalPortfolioValue": float(df["PortfolioValue"].iloc[-1]),
+            "MaxDrawdown": float(max_drawdown),
+            "SharpeRatio": float(sharpe_ratio),
+            "ProfitFactor": float(cycle_df[cycle_df['profit'] > 0]['profit'].sum() / abs(
+                cycle_df[cycle_df['profit'] < 0]['profit'].sum()) if abs(
+                cycle_df[cycle_df['profit'] < 0]['profit'].sum()) > 0 else float('inf')),
+            "AverageWin": float(cycle_df[cycle_df['win']]['profit'].mean()) if winning_trades > 0 else 0,
+            "AverageLoss": float(cycle_df[~cycle_df['win']]['profit'].mean()) if total_trades > winning_trades else 0,
+            "LargestWin": float(cycle_df["profit"].max()) if not cycle_df.empty else 0,
+            "LargestLoss": float(cycle_df["profit"].min()) if not cycle_df.empty else 0,
+            "WinningStreak": int(winning_streak),
+            "LosingStreak": int(losing_streak),
+            "CAGR": float(cagr),
+            "AnnualizedVolatility": float(df['returns'].std() * np.sqrt(252) if not df['returns'].empty else 0),
+            "CalmarRatio": float(calmar_ratio)
         }
-        return metrics
-
-    @staticmethod
-    def _calculate_max_drawdown(equity_curve: pd.Series) -> float:
-        rolling_max = equity_curve.expanding().max()
-        drawdowns = equity_curve / rolling_max - 1
-        return abs(drawdowns.min()) * 100
-
-    @staticmethod
-    def _calculate_sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.05) -> float:
-        if returns.empty:
-            return 0
-        excess_returns = returns - risk_free_rate / 252
-        return np.sqrt(252) * excess_returns.mean() / returns.std() if returns.std() != 0 else 0
-
-    @staticmethod
-    def _calculate_profit_factor(profits: pd.Series) -> float:
-        gains = profits[profits > 0].sum()
-        losses = abs(profits[profits < 0].sum())
-        return gains / losses if losses != 0 else float('inf')
-
-    @staticmethod
-    def _calculate_max_streak(series: pd.Series) -> int:
-        return max((series != series.shift()).cumsum().value_counts())
-
-    @staticmethod
-    def _calculate_cagr(initial_value: float, final_value: float, years: float) -> float:
-        """Calculate Compound Annual Growth Rate"""
-        if years <= 0 or initial_value <= 0:
-            return 0
-        return (final_value / initial_value) ** (1 / years) - 1
-
-    @staticmethod
-    def _calculate_annualized_volatility(returns: pd.Series) -> float:
-        """Calculate annualized volatility"""
-        if returns.empty:
-            return 0
-        return returns.std() * np.sqrt(252)
-
-    @staticmethod
-    def _calculate_calmar_ratio(df: pd.DataFrame) -> float:
-        """Calculate Calmar Ratio (CAGR / Max Drawdown)"""
-        if df.empty or len(df) < 2:
-            return 0
-
-        years = (df["timestamp"].iloc[-1] - df["timestamp"].iloc[0]).days / 365
-        if years <= 0:
-            return 0
-
-        cagr = BacktestMetrics._calculate_cagr(
-            df["PortfolioValue"].iloc[0],
-            df["PortfolioValue"].iloc[-1],
-            years
-        )
-        max_dd = BacktestMetrics._calculate_max_drawdown(df["PortfolioValue"]) / 100  # Convert to decimal
-
-        return cagr / max_dd if max_dd > 0 else 0
 
 def convert_timestamps_to_iso(data):
     """Recursively convert pandas Timestamps and datetime objects to ISO strings"""
@@ -432,6 +423,7 @@ async def connect_backtest_websocket(user_id: str, progress_bar, progress_label,
                 ui.timer(0, lambda: setattr(progress_label, 'text', "Progress: N/A"), once=True)
                 break
 
+
 def create_performance_charts(df, metrics, theme_mode="Dark"):
     """Create performance charts from processed tradebook data"""
     if df.empty:
@@ -560,376 +552,193 @@ def create_performance_charts(df, metrics, theme_mode="Dark"):
 
     return fig
 
+
 async def render_backtesting_page(fetch_api, user_storage, instruments):
-    """Renders the backtesting UI with configuration, results, and comparison sections."""
-    logger.debug("Running backtesting.py version 2025-06-19 v6 for NiceGUI 2.19.0")
+    """Renders the backtesting UI with a modern two-column layout."""
     broker = user_storage.get("default_broker", "Zerodha")
-
-    with ui.card().classes("w-full mb-4"):
-        with ui.row().classes("items-center justify-between"):
-            ui.label("Strategy Backtesting").classes("text-h5")
-            ui.button(icon="help_outline").props("flat round").tooltip(
-                "Run simulations of trading strategies on historical data")
-
-    # Manual state for strategy options
     strategy_options = {}
+    partial_exit_rows = []
 
-    with ui.row().classes("w-full gap-4 items-start"):
+    with ui.row().classes("w-full h-full gap-8 p-4"):
         with ui.column().classes("w-1/3"):
-            with ui.card().classes("w-full p-4 sticky top-0"):
-                ui.label("Backtest Configuration").classes("text-h6")
+            with ui.card().classes("w-full p-4 sticky top-4"):
+                ui.label("Backtest Configuration").classes("text-h6 mb-4")
 
-                with ui.expansion("Instrument & Strategy", icon="tune", value=True).classes("w-full mb-2"):
-                    # Instrument Selection
-                    ui.label("Instrument").classes("text-subtitle2 mt-2")
-                    instrument_select = ui.select(
-                        options=sorted(list(instruments.keys())),
-                        label="Select Instrument",
-                        with_input=True,
-                        value=None
-                    ).props("clearable filter filled hint='Choose the stock or index to backtest'").classes("w-full")
+                with ui.expansion("Instrument & Strategy", icon="tune", value=True).classes("w-full"):
+                    instrument_select = ui.select(options=sorted(list(instruments.keys())), label="Select Instrument",
+                                                  with_input=True).props("clearable filter filled dense").classes(
+                        "w-full")
+                    strategies_select = ui.select(options=strategy_options, label="Select Strategy").props(
+                        "filled dense disabled").classes("w-full")
 
-                    # Strategy Selection
-                    ui.label("Strategy").classes("text-subtitle2 mt-2")
-                    strategies_select = ui.select(
-                        options=strategy_options,
-                        label="Select Strategy",
-                        value=None
-                    ).props("hint='Select a strategy to backtest' filled disabled").classes("w-full")
+                with ui.expansion("Date Range & Capital", icon="date_range", value=True).classes("w-full"):
+                    with ui.row().classes("w-full"):
+                        start_date = ui.input("Start Date",
+                                              value=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")).props(
+                            "filled dense type=date").classes("flex-1")
+                        end_date = ui.input("End Date", value=datetime.now().strftime("%Y-%m-%d")).props(
+                            "filled dense type=date").classes("flex-1")
+                    initial_capital = ui.number(label="Initial Capital", value=100000, format="%.0f").props(
+                        "filled dense").classes("w-full")
 
-                with ui.expansion("Date Range & Capital", icon="date_range", value=False).classes("w-full mb-2"):
-                    # Parameters
-                    with ui.row().classes("w-full items-center gap-2"):
-                        with ui.column().classes("flex-grow"):
-                            ui.label("Start Date").classes("text-subtitle2")
-                            start_date = ui.input(
-                                "Start Date", value=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
-                            ).props("filled type=date")
-                        with ui.column().classes("flex-grow"):
-                            ui.label("End Date").classes("text-subtitle2")
-                            end_date = ui.input(
-                                "End Date", value=datetime.now().strftime("%Y-%m-%d")
-                            ).props("filled type=date")
+                with ui.expansion("Risk Management", icon="shield", value=True).classes("w-full"):
+                    stop_loss_percent = ui.number("Stop Loss (%)", value=2.0, format="%.1f", min=0).props(
+                        "filled dense hint='0 to disable'").classes("w-full")
+                    trailing_stop_loss_percent = ui.number("Trailing Stop (%)", value=1.5, format="%.1f", min=0).props(
+                        "filled dense hint='0 to disable'").classes("w-full")
+                    position_sizing_percent = ui.number("Position Sizing (% of Capital)", value=10.0,
+                                                        format="%.1f").props("filled dense").classes("w-full")
+                    ui.separator().classes("my-2")
+                    ui.label("Partial Exits").classes("text-subtitle2")
+                    partial_exits_container = ui.column().classes("w-full gap-2")
 
-                    ui.label("Capital & Costs").classes("text-subtitle2 mt-2")
-                    initial_capital = ui.number(label="Initial Capital", value=100000, format="%.0f", step=10000).props("filled hint='Starting capital for the backtest'").classes("w-full")
+                    def add_partial_exit_row():
+                        row_id = str(uuid4())
+                        with partial_exits_container:
+                            with ui.row().classes("w-full items-center gap-2") as pe_row:
+                                target = ui.number("Target (%)", value=5.0, min=0.1).props("dense filled").classes(
+                                    "flex-grow")
+                                qty_percent = ui.number("Quantity (%)", value=50.0, min=1, max=100).props(
+                                    "dense filled").classes("flex-grow")
+                                ui.button(icon="delete", on_click=lambda: remove_partial_exit(row_id)).props(
+                                    "flat round dense color=negative")
+                        partial_exit_rows.append(
+                            {"id": row_id, "row": pe_row, "target": target, "qty_percent": qty_percent})
 
-                    with ui.row().classes("w-full gap-2"):
-                        slippage = ui.number(label="Slippage (%)", value=0.01, format="%.2f", step=0.01).props("filled hint='Price impact'").classes("w-1/2")
-                        commission = ui.number(label="Commission (₹)", value=0.0, format="%.2f", step=0.1).props("filled hint='Brokerage fee'").classes("w-1/2")
+                    def remove_partial_exit(row_id):
+                        row_to_remove = next((r for r in partial_exit_rows if r["id"] == row_id), None)
+                        if row_to_remove:
+                            partial_exits_container.remove(row_to_remove["row"])
+                            partial_exit_rows.remove(row_to_remove)
 
-                with ui.expansion("Optimization Settings", icon="settings").classes("w-full mb-2"):
-                    enable_optimization = ui.switch("Enable Parameter Optimization").bind_value(user_storage, "enable_optimization")
-                    with ui.column().classes("w-full").bind_visibility_from(user_storage, "enable_optimization"):
-                        optimization_iterations = ui.number("Optimization Iterations", value=user_storage.get("optimization_iterations", 10), min=1).bind_value(user_storage, "optimization_iterations").classes("w-full")
-                        ui.label("Parameter Ranges").classes("text-caption")
+                    ui.button("Add Partial Exit", icon="add", on_click=add_partial_exit_row).props(
+                        "outline size=sm").classes("w-full")
+
+                with ui.expansion("Optimization Settings", icon="settings").classes("w-full"):
+                    enable_optimization = ui.switch("Enable Parameter Optimization")
+                    with ui.column().classes("w-full").bind_visibility_from(enable_optimization, 'value'):
+                        optimization_iterations = ui.number("Iterations", value=20, min=5, max=200).props(
+                            "filled dense").classes("w-full")
+                        ui.label("Stop Loss Range (%)").classes("text-subtitle2 mt-2")
                         with ui.row().classes("w-full gap-2"):
-                            stop_loss_min = ui.number("Stop Loss Min (%)", value=user_storage.get("stop_loss_min", 1.0), step=0.5).bind_value(user_storage, "stop_loss_min").classes("w-1/4")
-                            stop_loss_max = ui.number("Stop Loss Max (%)", value=user_storage.get("stop_loss_max", 3.0), step=0.5).bind_value(user_storage, "stop_loss_max").classes("w-1/4")
-                            target_min = ui.number("Target Min (%)", value=user_storage.get("target_min", 2.0), step=0.5).bind_value(user_storage, "target_min").classes("w-1/4")
-                            target_max = ui.number("Target Max (%)", value=user_storage.get("target_max", 6.0), step=0.5).bind_value(user_storage, "target_max").classes("w-1/4")
+                            stop_loss_min = ui.number("Min", value=1.0, min=0.1, format="%.1f").props("dense").classes(
+                                "flex-1")
+                            stop_loss_max = ui.number("Max", value=5.0, min=0.1, format="%.1f").props("dense").classes(
+                                "flex-1")
 
-                with ui.expansion("Backtest Presets", icon="save").classes("w-full mb-2"):
-                    preset_name = ui.input("Preset Name").props("filled").classes("w-full")
-                    async def save_preset():
-                        if not preset_name.value:
-                            ui.notify("Please enter a preset name", type="warning")
-                            return
-
-                        user_storage["backtest_presets"] = user_storage.get("backtest_presets", {})
-                        user_storage["backtest_presets"][preset_name.value] = {
-                            "start_date": start_date.value,
-                            "end_date": end_date.value,
-                            "initial_capital": initial_capital.value,
-                            "slippage": slippage.value,
-                            "commission": commission.value
-                        }
-                        preset_select.options = list(user_storage["backtest_presets"].keys())
-                        preset_select.update()
-                        ui.notify("Preset saved!", type="positive")
-                        logger.debug(f"Saved preset: {preset_name.value}")
-                    ui.button("Save Preset", on_click=save_preset).props("outline").classes("w-full")
-                    preset_select = ui.select(
-                        options=list(user_storage.get("backtest_presets", {}).keys()),
-                        label="Load Preset"
-                    ).props("clearable filled").classes("w-full mt-2")
-                    def load_preset():
-                        if preset_select.value:
-                            preset = user_storage["backtest_presets"][preset_select.value]
-                            start_date.value = preset["start_date"]
-                            end_date.value = preset["end_date"]
-                            initial_capital.value = preset["initial_capital"]
-                            slippage.value = preset["slippage"]
-                            commission.value = preset["commission"]
-                            logger.debug(f"Loaded preset: {preset_select.value}")
-                    preset_select.on("update:model-value", load_preset)
-
-                with ui.expansion("Risk Management", icon="shield", value=True).classes("w-full mb-2"):
-                    ui.label("Stop Loss & Position Sizing").classes("text-subtitle2")
-                    stop_loss_percent = ui.number("Stop Loss (%)", value=2.0, format="%.1f").props(
-                        "filled hint='Automatic stop loss percentage'").classes("w-full")
-                    max_risk_per_trade = ui.number("Max Risk Per Trade (%)", value=1.0, format="%.1f").props(
-                        "filled hint='Maximum capital to risk per trade'").classes("w-full")
-
-                # Confirm Buttons
-                ui.separator().classes("my-4")
-                with ui.row().classes("w-full gap-2 justify-center"):
-                    run_button = ui.button("Run Backtest", on_click=lambda: run_backtest()).props("color=primary").classes("w-full")
-                    export_button = ui.button(icon="download", on_click=lambda: export_results()).props("color=secondary outline disabled").tooltip("Export Results").classes("")
+                run_button = ui.button("Run Backtest", on_click=lambda: run_backtest()).props(
+                    "color=primary icon=play_arrow").classes("w-full mt-4")
 
         with ui.column().classes("w-2/3"):
             progress_container = ui.row().classes("w-full p-4").bind_visibility_from(run_button, "loading")
             with progress_container:
                 progress_bar = ui.linear_progress(value=0).classes("w-full")
-                progress_label = ui.label("Progress: 0%").classes("ml-2")
+                progress_label = ui.label("Progress: 0%").classes("ml-2 text-xs")
 
-            # Create tabbed result area
             results_tabs = ui.tabs().classes("w-full")
             with results_tabs:
                 performance_tab = ui.tab("Performance", icon="trending_up")
-                trades_tab = ui.tab("Trades", icon="list")
+                trades_tab = ui.tab("Trades", icon="list_alt")
                 metrics_tab = ui.tab("Metrics", icon="analytics")
-                comparison_tab = ui.tab("Comparison", icon="compare")
+                optimization_tab = ui.tab("Optimization", icon="auto_awesome")
 
-            results_panels = ui.tab_panels(results_tabs, value="Performance").classes("w-full")
-
-            with results_panels:
-                performance_panel = ui.tab_panel(performance_tab)
-                trades_panel = ui.tab_panel(trades_tab)
-                metrics_panel = ui.tab_panel(metrics_tab)
-                comparison_panel = ui.tab_panel(comparison_tab)
+            with ui.tab_panels(results_tabs, value=performance_tab).classes("w-full mt-2"):
+                with ui.tab_panel(performance_tab) as performance_panel:
+                    ui.label("Run a backtest to see performance charts.").classes("text-center text-gray-500 mt-8")
+                with ui.tab_panel(trades_tab) as trades_panel:
+                    ui.label("Run a backtest to see the trade log.").classes("text-center text-gray-500 mt-8")
+                with ui.tab_panel(metrics_tab) as metrics_panel:
+                    ui.label("Run a backtest to see performance metrics.").classes("text-center text-gray-500 mt-8")
+                with ui.tab_panel(optimization_tab) as optimization_panel:
+                    ui.label("Run an optimization to see comparison results.").classes("text-center text-gray-500 mt-8")
 
     async def fetch_strategies_for_backtest():
         nonlocal strategy_options
-        cache_key = f"strategies_cache_{broker}"
-        cache_ttl = 3600  # 1 hour
-        cached = user_storage.get(cache_key, {})
-        if cached.get("data") and cached.get("timestamp", 0) + cache_ttl > time.time():
-            strategy_options = cached["data"]
+        try:
+            custom_strategies_list = await fetch_api(f"/strategies/broker/{broker}")
+            custom_strategies = {s["strategy_id"]: s["name"] for s in
+                                 custom_strategies_list} if custom_strategies_list else {}
+            strategy_options.clear()
+            strategy_options.update(PREDEFINED_STRATEGIES)
+            strategy_options.update(custom_strategies)
             strategies_select.options = strategy_options
-            if strategy_options and not strategies_select.value:
-                strategies_select.value = list(strategy_options.keys())[0]
             strategies_select.props("disabled=false")
             strategies_select.update()
-            logger.debug(f"Loaded {len(strategy_options)} strategies from cache")
-            return
-
-        try:
-            strategies = await fetch_api(f"/strategies/broker/{broker}")
-            await asyncio.sleep(0.5)
-            if strategies and isinstance(strategies, list):
-                strategy_options.clear()
-                strategy_options.update({s["strategy_id"]: s["name"] for s in strategies})
-                strategies_select.options = strategy_options
-                strategies_select.props("disabled=false")
-                if strategy_options and not strategies_select.value:
-                    strategies_select.value = list(strategy_options.keys())[0]
-                strategies_select.update()
-                user_storage[cache_key] = {"data": strategy_options, "timestamp": time.time()}
-                logger.debug(f"Fetched {len(strategy_options)} strategies: {list(strategy_options.keys())}")
-            else:
-                strategy_options.clear()
-                strategies_select.options = {}
-                strategies_select.value = None
-                strategies_select.props("disabled")
-                strategies_select.update()
-                ui.notify("No strategies found.", type="warning")
-                logger.warning("No strategies found or invalid response")
         except Exception as e:
-            strategy_options.clear()
-            strategies_select.options = {}
-            strategies_select.value = None
-            strategies_select.props("disabled")
-            strategies_select.update()
-            ui.notify(f"Error fetching strategies: {str(e)}", type="negative")
-            logger.error(f"Error fetching strategies: {str(e)}")
+            ui.notify(f"Error fetching strategies: {e}", type="negative")
 
-    # Bind fetch_strategies to instrument selection
-    async def on_instrument_change(e):
-        logger.debug(f"Instrument changed to: {instrument_select.value}")
-        if instrument_select.value:
-            await fetch_strategies_for_backtest()
-        else:
-            strategy_options.clear()
-            strategies_select.options = {}
-            strategies_select.value = None
-            strategies_select.props("disabled")
-            strategies_select.update()
-            logger.debug("No instrument selected, cleared strategy options")
-    instrument_select.on("update:model-value", on_instrument_change)
-
-
+    instrument_select.on("update:model-value", fetch_strategies_for_backtest)
 
     async def run_backtest():
-        """Executes the backtest with validation and progress updates."""
         try:
             if not strategies_select.value or not instrument_select.value:
-                ui.notify("Please select both a strategy and instrument.", type="negative")
+                ui.notify("Please select a strategy and instrument.", type="negative");
                 return
 
-            try:
-                start_dt = datetime.strptime(start_date.value, "%Y-%m-%d")
-                end_dt = datetime.strptime(end_date.value, "%Y-%m-%d")
-                if start_dt >= end_dt:
-                    ui.notify("Start date must be before end date.", type="negative")
-                    return
-            except ValueError:
-                ui.notify("Invalid date format.", type="negative")
-                return
-
-            # Validate optimization parameters
-            enable_opt = user_storage.get("enable_optimization", False)
-            if enable_opt:
-                if stop_loss_min.value >= stop_loss_max.value:
-                    ui.notify("Stop Loss Min must be less than Stop Loss Max.", type="negative")
-                    return
-                if target_min.value >= target_max.value:
-                    ui.notify("Target Min must be less than Target Max.", type="negative")
-                    return
-
-            # Clear previous results and show loading state
-            performance_panel.clear()
-            trades_panel.clear()
-            metrics_panel.clear()
-            comparison_panel.clear()
-
+            performance_panel.clear();
+            trades_panel.clear();
+            metrics_panel.clear();
+            optimization_panel.clear()
             with performance_panel:
-                ui.skeleton(height="400px").classes("w-full")
-            with trades_panel:
-                ui.skeleton(height="300px").classes("w-full")
-            with metrics_panel:
-                with ui.grid(columns=4).classes("gap-4"):
-                    for _ in range(8):
-                        ui.skeleton(height="80px").classes("w-full")
-
+                ui.spinner(size='lg').classes('absolute-center')
             run_button.props("loading=true disabled=true")
-            export_button.props("disabled=true")
 
-            user_id = user_storage.get("user_id", "default_user_id")
-            asyncio.create_task(connect_backtest_websocket(user_id, progress_bar, progress_label))
+            params = {
+                "initial_investment": float(initial_capital.value),
+                "stop_loss_percent": float(stop_loss_percent.value),
+                "trailing_stop_loss_percent": float(trailing_stop_loss_percent.value),
+                "position_sizing_percent": float(position_sizing_percent.value),
+                "enable_optimization": enable_optimization.value,
+                "partial_exits": [{"target": r["target"].value, "qty_percent": r["qty_percent"].value} for r in
+                                  partial_exit_rows]
+            }
+            if enable_optimization.value:
+                if stop_loss_min.value >= stop_loss_max.value:
+                    ui.notify("Stop Loss Min must be less than Max.", type="negative");
+                    return
+                params["optimization_iterations"] = int(optimization_iterations.value)
+                params["stop_loss_range"] = [float(stop_loss_min.value), float(stop_loss_max.value)]
 
-            all_results = []
-            strategies = [strategies_select.value] if isinstance(strategies_select.value, str) else strategies_select.value
-            for strategy_id in strategies:
-                # Fetch strategy details
+            strategy_id = strategies_select.value
+            strategy_value = strategy_id
+            if strategy_id not in PREDEFINED_STRATEGIES:
                 strategy_response = await fetch_api(f"/strategies/{strategy_id}")
-                if strategy_response and not strategy_response.get("error"):
-                    strategy_name = strategy_response.get("name")
-                    # For custom strategies, pass the JSON string
-                    strategy_value = json.dumps(strategy_response) if strategy_response.get(
-                        "entry_conditions") else strategy_name
-                else:
-                    ui.notify(
-                        f"Failed to fetch strategy {strategy_id}: {strategy_response.get('error', {}).get('message', 'Unknown error')}",
-                        type="negative")
-                    logger.error(f"Failed to fetch strategy {strategy_id}")
-                    continue
+                if not (strategy_response and not strategy_response.get("error")):
+                    ui.notify("Failed to fetch custom strategy definition.", type="negative");
+                    return
+                strategy_value = json.dumps(strategy_response)
 
-                backtest_params = {
-                    "instrument_token": instrument_select.value,
-                    "timeframe": "day",
-                    "strategy": strategy_value,
-                    "params": {
-                        "initial_investment": float(initial_capital.value),
-                        "slippage_percent": float(slippage.value),
-                        "commission_per_trade": float(commission.value),
-                        "optimization_iterations": float(optimization_iterations.value) if enable_opt else 1.0,
-                        "stop_loss_range": [float(stop_loss_min.value), float(stop_loss_max.value)] if enable_opt else [1.0, 3.0],
-                        "target_range": [float(target_min.value), float(target_max.value)] if enable_opt else [2.0, 6.0]
-                    },
-                    "start_date": start_date.value,
-                    "end_date": end_date.value
-                }
-                logger.debug(f"Backtest params for strategy {strategy_name}: {json.dumps(backtest_params, indent=2)}")
+            backtest_payload = {
+                "instrument_token": instrument_select.value, "timeframe": "day", "strategy": strategy_value,
+                "params": params, "start_date": start_date.value, "end_date": end_date.value
+            }
 
-                response = await fetch_api("/algo-trading/backtest", method="POST", data=backtest_params)
-                logger.debug(f"Backtest response for strategy {strategy_name}: {response}")
-                if response and not response.get("error"):
-                    all_results.append(response)
-                else:
-                    error_msg = response.get("error", {}).get("message", "Unknown error")
-                    ui.notify(f"Backtest failed for strategy {strategy_name}: {error_msg}", type="negative")
-                    logger.error(f"Backtest failed for strategy {strategy_name}: {error_msg}")
-
-            # Clear skeleton loaders
+            response = await fetch_api("/algo-trading/backtest", method="POST", data=backtest_payload)
             performance_panel.clear()
-            trades_panel.clear()
-            metrics_panel.clear()
-            comparison_panel.clear()
 
-            if all_results:
-                # Store results for export
-                user_storage["backtest_results"] = all_results
-
-                # Display results
-                display_backtest_results(
-                    performance_panel=performance_panel,
-                    trades_panel=trades_panel,
-                    metrics_panel=metrics_panel,
-                    results=all_results[0],
-                    user_storage=user_storage,
-                    fetch_api=fetch_api
-                )
-
-                if len(all_results) > 1:
-                    display_strategy_comparison(comparison_panel, all_results, user_storage)
-                    results_tabs.value = "Comparison"
+            if response and not response.get("error"):
+                if response.get("optimization_enabled"):
+                    ui.notify("Optimization complete! Displaying best result.", type="positive")
+                    display_backtest_results(performance_panel, trades_panel, metrics_panel,
+                                             response.get("best_result", {}), user_storage)
+                    display_optimization_runs(optimization_panel, response.get("all_runs", []))
+                    results_tabs.set_value(optimization_tab)
                 else:
-                    results_tabs.value = "Performance"
-
-                export_button.props("disabled=false")
-                ui.notify("Backtest completed successfully!", type="positive")
+                    ui.notify("Backtest complete!", type="positive")
+                    display_backtest_results(performance_panel, trades_panel, metrics_panel, response, user_storage, fetch_api)
+                    results_tabs.set_value(performance_tab)
             else:
+                error_msg = response.get("error", {}).get("message", "Unknown error")
                 with performance_panel:
-                    ui.label("No successful backtest results to display.").classes("text-negative")
-                results_tabs.value = "Performance"
-
-        except Exception as e:
-            performance_panel.clear()
-            with performance_panel:
-                ui.label(f"An error occurred during backtest: {str(e)}").classes("text-negative")
-            logger.exception(f"Error during backtest execution: {str(e)}")
-            ui.notify(f"Backtest failed: {str(e)}", type="negative")
-            results_tabs.value = "Performance"
-        # In run_backtest function, update the finally block:
+                    ui.label(f"Backtest failed: {error_msg}").classes("text-negative")
         finally:
             run_button.props("loading=false disabled=false")
             run_button._props["loading"] = False
             run_button._props["disabled"] = False
             run_button.update()
-
-            export_button.props("disabled=" + str(len(user_storage.get("backtest_results", [])) == 0).lower())
             progress_container.visible = False
             ui.update()
 
-    async def export_results():
-        """Exports backtest results to CSV."""
-        try:
-            results = user_storage.get("backtest_results", [])
-            if not results:
-                ui.notify("No results to export.", type="warning")
-                return
-
-            tradebook = results[0].get("Tradebook", [])
-            if tradebook:
-                df = pd.DataFrame(tradebook)
-                csv_data = df.to_csv(index=False)
-
-                # Add download button for CSV
-                ui.download(csv_data.encode(), f"backtest_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-
-                # Also create a JSON version with all data
-                json_data = json.dumps(convert_timestamps_to_iso(results), indent=2)
-                ui.download(json_data.encode(), f"backtest_complete_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-
-                ui.notify("Results exported successfully!", type="positive")
-                logger.debug("Backtest results exported")
-            else:
-                ui.notify("No tradebook data to export.", type="warning")
-                logger.warning("No tradebook data for export")
-        except Exception as e:
-            ui.notify(f"Error exporting results: {str(e)}", type="negative")
-            logger.error(f"Error exporting results: {str(e)}")
 
 def display_backtest_results(performance_panel, trades_panel, metrics_panel, results, user_storage, fetch_api):
     """Displays backtest results with metrics and charts in a tabbed interface."""
@@ -1208,6 +1017,30 @@ def display_backtest_results(performance_panel, trades_panel, metrics_panel, res
         else:
             ui.label("No trades executed in this backtest.").classes("text-warning")
 
+
+def display_optimization_runs(container, all_runs):
+    with container:
+        if not all_runs: ui.label("No optimization data available.").classes("text-center text-gray-500 mt-8"); return
+
+        ui.label("Optimization Run Summary").classes("text-h6 mb-2")
+
+        rowData = [{"sl_percent": r['parameters'].get('stop_loss_percent', 0),
+                    "pnl": r.get('TotalPNL', 0),
+                    "win_rate": r.get('WinRate', 0),
+                    "trades": r.get('TotalTrades', 0)} for r in all_runs]
+
+        ui.aggrid({
+            "columnDefs": [
+                {"headerName": "Stop Loss (%)", "field": "sl_percent", "valueFormatter": "params.value.toFixed(2)"},
+                {"headerName": "Total PNL", "field": "pnl", "valueFormatter": "'₹' + params.value.toFixed(2)",
+                 "sort": "desc"},
+                {"headerName": "Win Rate (%)", "field": "win_rate", "valueFormatter": "params.value.toFixed(2)"},
+                {"headerName": "Total Trades", "field": "trades"},
+            ],
+            "rowData": rowData,
+            "domLayout": 'autoHeight'
+        }).classes("w-full")
+
 def display_strategy_comparison(container, all_results, user_storage):
     """Displays a comparison of multiple strategy backtests with enhanced visuals."""
     theme_mode = "Dark" if user_storage.get("dark_mode", True) else "Light"
@@ -1385,7 +1218,7 @@ def display_strategy_comparison(container, all_results, user_storage):
             for metric in metrics_to_compare:
                 values = [d[metric] for d in comparison_data]
                 max_val = max(values) if values else 1
-                normalized = [v/max_val*100 for v in values]
+                normalized = [int(v)/max_val*100 for v in values]
                 radar_data.append(normalized)
 
             # Create radar chart for metrics comparison
