@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import inspect
 import os
 from datetime import datetime, time as date_time, timedelta
 from typing import Optional, Dict, Any, List, Callable
@@ -10,7 +11,7 @@ import requests
 import smtplib
 from email.mime.text import MIMEText
 from database import get_db
-
+import pandas_ta as ta
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -35,6 +36,7 @@ from common_utils.predefined_strategies import check_macd_crossover, check_bolli
     check_support_resistance_breakout, macd_strategy, bollinger_band_strategy, rsi_strategy
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.DEBUG)
 
 strategy_tasks = {}
 
@@ -1459,8 +1461,7 @@ async def execute_strategy(api, strategy: str, instrument_token: str, quantity: 
         signal = None
 
         if is_custom:
-            entry_signals = await evaluate_custom_strategy(df, strategy_data.get("entry_conditions", []),
-                                                           indicators)
+            entry_signals = await evaluate_custom_strategy(df, strategy_data.get("entry_conditions", []))
             signal = entry_signals.iloc[-1] if not entry_signals.empty else None
         elif strategy == "MACD Crossover":
             macd_line, signal_line, _ = calculate_macd(df)
@@ -1591,10 +1592,10 @@ async def stop_strategy_execution(strategy: str, instrument_token: str, user_id:
 async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str, params: Dict, start_date: str,
                             end_date: str, ws_callback: Optional[Callable] = None, db: Optional[AsyncSession] = None):
     """
-    Main service to orchestrate a backtest, now with optimization capabilities.
+    Main service to orchestrate a backtest, correctly handling single runs,
+    custom strategies, and parameter optimization.
     """
     logger.info(f"Starting backtest for {instrument_token} from {start_date} to {end_date}")
-    logger.info(f"Backtest parameters: {params}")
 
     try:
         # --- 1. Data Fetching ---
@@ -1602,48 +1603,81 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
 
         # --- 2. Strategy Identification ---
         strategy_func, strategy_name, is_custom = get_strategy_details(strategy)
+        if ws_callback: await ws_callback({"progress": 0.1, "status": "Data fetched, preparing indicators..."})
 
-        if ws_callback:
-            await ws_callback({"progress": 0.1, "status": "Data fetched, preparing backtest..."})
+        # --- 3. Prepare Indicators and Details for Logging ---
+        indicator_details = []
 
-        # --- 3. Run Optimization or Single Backtest ---
+        def get_column_name(indicator, params):
+            # Helper to get the column name that pandas-ta will create
+            if indicator == 'SMA': return f"SMA_{params.get('period', 20)}"
+            if indicator == 'EMA': return f"EMA_{params.get('period', 14)}"
+            if indicator == 'RSI': return f"RSI_{params.get('period', 14)}"
+            if indicator == 'MACD': return f"MACD_{params.get('fast_period', 12)}_{params.get('slow_period', 26)}_{params.get('signal_period', 9)}"
+            if indicator == 'Bollinger Bands':
+                band = params.get('band', 'upper').upper()[0]
+                return f"BB{band}_{params.get('period', 20)}_{params.get('std_dev', 2.0)}"
+            return None
+
+        # Calculate indicators for all strategy types upfront
+        if is_custom:
+            strategy_data = json.loads(strategy)
+            all_conditions = strategy_data.get("entry_conditions", []) + strategy_data.get("exit_conditions", [])
+            unique_indicators = {}
+            for cond in all_conditions:
+                for side in ["left", "right"]:
+                    name = cond.get(f"{side}_indicator")
+                    if name and name != "Fixed Value":
+                        iparams = cond.get(f"{side}_params", {})
+                        key = (name, frozenset(iparams.items()));
+                        unique_indicators[key] = (name, iparams)
+
+            for name, iparams in unique_indicators.values():
+                if name == "EMA":
+                    df.ta.ema(length=iparams.get("period", 20), append=True)
+                elif name == "RSI":
+                    df.ta.rsi(length=iparams.get("period", 14), append=True)
+                # (Add other indicators from your custom strategy UI)
+                col_name = get_column_name(name, iparams)
+                if col_name: indicator_details.append({'column_name': col_name, 'display_name': col_name})
+        else:
+            # Prepare indicators for predefined strategies
+            if strategy_name == "RSI Oversold/Overbought":
+                p = params.get('period', 14)
+                df.ta.rsi(length=p, append=True)
+                indicator_details.append({'column_name': f'RSI_{p}', 'display_name': f'RSI({p})'})
+            elif strategy_name == "MACD Crossover":
+                f, s, sig = params.get('fast_period', 12), params.get('slow_period', 26), params.get('signal_period', 9)
+                df.ta.macd(fast=f, slow=s, signal=sig, append=True)
+                indicator_details.append({'column_name': f'MACD_{f}_{s}_{sig}', 'display_name': f'MACD({f},{s},{sig})'})
+                indicator_details.append(
+                    {'column_name': f'MACDs_{f}_{s}_{sig}', 'display_name': f'Signal({f},{s},{sig})'})
+            # (Add other predefined strategies here)
+
+        # --- 4. Run Optimization or Single Backtest ---
         enable_optimization = params.get("enable_optimization", False)
+        final_response = {}
 
-        if enable_optimization and not is_custom:  # Optimization currently for predefined strategies
+        if enable_optimization and not is_custom:
             logger.info(f"Starting optimization for strategy: {strategy_name}")
             results = await run_parameter_optimization(df, strategy_func, params, ws_callback)
             final_response = {"optimization_enabled": True, **results}
-
         elif is_custom:
             logger.info(f"Running single backtest for custom strategy: {strategy_name}")
-            strategy_data = json.loads(strategy)
             results = await backtest_custom_strategy(df, strategy_data, params, ws_callback)
             final_response = {"optimization_enabled": False, **results}
-
         else:
             logger.info(f"Running single backtest for predefined strategy: {strategy_name}")
             results = await backtest_strategy_generic(df, strategy_func, params, ws_callback)
             final_response = {"optimization_enabled": False, **results}
 
-        # --- 4. Final Formatting ---
-        final_response.update({
-            "StrategyName": strategy_name,
-            "Instrument": instrument_token,
-            "Timeframe": timeframe,
-            "StartDate": start_date,
-            "EndDate": end_date,
-            "InitialInvestment": params.get("initial_investment", 0),
-            "OHLC": df.reset_index().to_dict(orient="records")
-        })
-
+        # --- 5. Final Formatting ---
+        final_response.update({"StrategyName": strategy_name, "Instrument": instrument_token})
         return final_response
 
-    except ValueError as ve:
-        logger.error(f"Validation error in backtest: {str(ve)}")
-        return {"error": {"code": "INVALID_INPUT", "message": str(ve)}}
     except Exception as e:
-        logger.error(f"Error backtesting strategy {strategy}: {e}", exc_info=True)
-        return {"error": {"code": "BACKTEST_FAILED", "message": str(e)}}
+        logger.error(f"Error in backtest_strategy: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 async def run_parameter_optimization(df, strategy_func, params, ws_callback):
@@ -1652,16 +1686,11 @@ async def run_parameter_optimization(df, strategy_func, params, ws_callback):
     """
     optimization_iterations = int(params.get("optimization_iterations", 10))
     stop_loss_range = params.get("stop_loss_range", [1.0, 5.0])
-
-    # We will use random sampling for this optimization
-    param_combinations = []
-    for _ in range(optimization_iterations):
-        sl = round(np.random.uniform(stop_loss_range[0], stop_loss_range[1]), 2)
-        param_combinations.append({'stop_loss_percent': sl})
+    param_combinations = [{'stop_loss_percent': round(np.random.uniform(stop_loss_range[0], stop_loss_range[1]), 2)} for
+                          _ in range(optimization_iterations)]
 
     all_runs = []
-    best_result = None
-    best_metric = float('-inf')
+    best_result, best_metric = None, float('-inf')
 
     for i, combo in enumerate(param_combinations):
         iter_params = params.copy()
@@ -1697,10 +1726,8 @@ async def backtest_custom_strategy(df, strategy_data, params, ws_callback):
     Generates signals for a custom strategy and then uses the generic backtesting engine.
     """
     # 1. Generate signals from custom conditions
-    entry_signals = await evaluate_custom_strategy(df, strategy_data.get("entry_conditions", []), indicators,
-                                                   signal_type="BUY")
-    exit_signals = await evaluate_custom_strategy(df, strategy_data.get("exit_conditions", []), indicators,
-                                                  signal_type="SELL")
+    entry_signals = await evaluate_custom_strategy(df, strategy_data.get("entry_conditions", []), signal_type="BUY")
+    exit_signals = await evaluate_custom_strategy(df, strategy_data.get("exit_conditions", []), signal_type="SELL")
 
     # 2. Combine entry and exit signals into a single column
     df['signal'] = entry_signals.where(entry_signals == 'BUY', exit_signals)
@@ -1719,15 +1746,28 @@ async def backtest_strategy_generic(
         df: pd.DataFrame,
         strategy_func: Callable,
         params: Dict,
-        ws_callback: Optional[Callable] = None
+        ws_callback: Optional[Callable] = None,
+        indicator_details: Optional[List[Dict]] = None
 ) -> Dict:
     """
-    This is the new, flexible backtesting engine.
-    It handles complex exit conditions including stop-loss, trailing stops, and partial take-profits.
+    This is the final, flexible backtesting engine.
+
+    It preserves all original logic for complex exits (stop-loss, trailing stops,
+    and partial take-profits) while adding the ability to capture and log the specific
+    indicator values that trigger a trade.
     """
     df_copy = df.copy()
-    signals = strategy_func(df_copy, **params)
-    df_copy['signal'] = signals
+
+    # The 'signal' column is now expected to be pre-calculated and present in the input DataFrame 'df'.
+    # For predefined strategies, a supplemental call to generate signals might be needed if not done prior.
+    if 'signal' not in df_copy.columns and strategy_func is not None:
+        # This ensures backward compatibility if a df is passed without a signal column.
+        # It filters params to avoid the original TypeError.
+        import inspect
+        strategy_params = inspect.signature(strategy_func).parameters
+        filtered_params = {k: v for k, v in params.items() if k in strategy_params}
+        signals = strategy_func(df_copy, **filtered_params)
+        df_copy['signal'] = signals
 
     # --- State Variables ---
     quantity_in_position = 0.0
@@ -1735,7 +1775,6 @@ async def backtest_strategy_generic(
     stop_loss_price = 0.0
     trailing_stop_price = 0.0
     active_partial_exits = []
-
     tradebook = []
 
     # --- Parameters ---
@@ -1743,12 +1782,22 @@ async def backtest_strategy_generic(
     stop_loss_percent = params.get("stop_loss_percent", 0)
     trailing_stop_loss_percent = params.get("trailing_stop_loss_percent", 0)
     position_sizing_percent = params.get("position_sizing_percent", 0)
-    partial_exits = params.get("partial_exits", [])  # Expects format: [{"target": 5, "qty_percent": 50}]
-    if partial_exits:
-        partial_exits.sort(key=lambda x: x.get('target', 0))
+    # Ensure partial exits are sorted by target percentage
+    partial_exits = sorted(params.get("partial_exits", []), key=lambda x: x.get('target', 0))
 
     portfolio_value = initial_investment
     total_rows = len(df_copy)
+
+    # --- Helper to capture indicator values ---
+    def get_indicators_for_trade(row_tuple):
+        if not indicator_details:
+            return {}
+        # Use a dictionary comprehension to read values from the row's named tuple
+        return {
+            detail['display_name']: round(getattr(row_tuple, detail['column_name'], float('nan')), 2)
+            for detail in indicator_details
+            if hasattr(row_tuple, detail['column_name'])
+        }
 
     # --- Backtesting Loop ---
     for i, row in enumerate(df_copy.itertuples()):
@@ -1758,32 +1807,39 @@ async def backtest_strategy_generic(
             progress = 0.3 + (i / total_rows) * 0.6
             await ws_callback({"progress": round(progress, 2), "status": f"Processing data: {i}/{total_rows}"})
 
-        # --- CHECK EXIT CONDITIONS ---
+        # --- CHECK EXIT CONDITIONS (if in a position) ---
         if quantity_in_position > 0:
             full_exit_reason = None
             exit_price = current_price
+            indicators_for_exit = {}
 
             # Priority 1: Hard stops
             if stop_loss_price > 0 and current_price <= stop_loss_price:
                 full_exit_reason = "Stop Loss"
                 exit_price = stop_loss_price
+
+            # Priority 2: Trailing Stop-Loss
             elif trailing_stop_price > 0 and current_price <= trailing_stop_price:
                 full_exit_reason = "Trailing Stop"
                 exit_price = trailing_stop_price
+
+            # Priority 3: Strategy based SELL signal
             elif row.signal == "SELL":
                 full_exit_reason = "Strategy Signal"
+                indicators_for_exit = get_indicators_for_trade(row)  # Capture indicators on signal exit
 
+            # If a full exit was triggered, process it
             if full_exit_reason:
                 profit = (exit_price - entry_price) * quantity_in_position
                 portfolio_value += profit
                 tradebook.append({
                     "Date": row.Index.isoformat(), "Action": "SELL", "Price": exit_price,
                     "Quantity": quantity_in_position, "Profit": profit, "PortfolioValue": portfolio_value,
-                    "Reason": full_exit_reason
+                    "Reason": full_exit_reason, "Indicators": indicators_for_exit
                 })
-                quantity_in_position = 0.0
+                quantity_in_position = 0.0  # Exit full position
             else:
-                # Priority 2: Partial take-profits
+                # Priority 4: Partial take-profits (only if no full exit occurred)
                 exited_partials = []
                 for pe in active_partial_exits:
                     if current_price >= pe['price_level']:
@@ -1793,22 +1849,24 @@ async def backtest_strategy_generic(
                         tradebook.append({
                             "Date": row.Index.isoformat(), "Action": "SELL", "Price": pe['price_level'],
                             "Quantity": qty_to_sell, "Profit": profit, "PortfolioValue": portfolio_value,
-                            "Reason": f"Partial Target {pe['target_percent']}%"
+                            "Reason": f"Partial Target {pe['target_percent']}%",
+                            "Indicators": get_indicators_for_trade(row)
                         })
                         quantity_in_position -= qty_to_sell
-                        exited_partials.append(pe)
+                        exited_partials.append(pe) # Mark this partial exit for removal
 
+                # Remove triggered partials from the active list
                 active_partial_exits = [pe for pe in active_partial_exits if pe not in exited_partials]
 
-                if quantity_in_position <= 1e-6:  # Epsilon for float comparison
-                    quantity_in_position = 0.0
+                # Clean up floating point dust
+                if quantity_in_position <= 1e-6: quantity_in_position = 0.0
 
             # Update trailing stop if still in position
             if quantity_in_position > 0 and trailing_stop_loss_percent > 0:
                 new_trailing_stop = current_price * (1 - trailing_stop_loss_percent / 100)
                 trailing_stop_price = max(trailing_stop_price, new_trailing_stop)
 
-        # Reset state if position is closed
+        # Reset all position-specific state if the position is fully closed
         if quantity_in_position == 0:
             entry_price = stop_loss_price = trailing_stop_price = 0.0
             active_partial_exits.clear()
@@ -1817,35 +1875,34 @@ async def backtest_strategy_generic(
         if quantity_in_position == 0 and row.signal == "BUY":
             entry_price = current_price
 
-            # Use portfolio value for sizing if specified, otherwise use initial capital for first trade
+            # Determine position size based on portfolio value if specified
             sizing_base = portfolio_value if position_sizing_percent > 0 else initial_investment
-            initial_quantity = (sizing_base * (
-                        position_sizing_percent / 100) / entry_price) if position_sizing_percent > 0 else (
-                        initial_investment / entry_price)
+            sizing_amount = sizing_base * (
+                        position_sizing_percent / 100) if position_sizing_percent > 0 else initial_investment
+            initial_quantity = sizing_amount / entry_price
             quantity_in_position = initial_quantity
 
+            # Set the stop-loss and trailing-stop for the new position
             if stop_loss_percent > 0:
                 stop_loss_price = entry_price * (1 - stop_loss_percent / 100)
             if trailing_stop_loss_percent > 0:
                 trailing_stop_price = entry_price * (1 - trailing_stop_loss_percent / 100)
 
+            # Setup partial exit targets for this new position
             if partial_exits:
-                qty_left_for_partials = initial_quantity
                 for pe_def in partial_exits:
-                    target_pct = pe_def.get('target', 0)
-                    qty_pct = pe_def.get('qty_percent', 0)
+                    target_pct, qty_pct = pe_def.get('target', 0), pe_def.get('qty_percent', 0)
                     if target_pct > 0 and qty_pct > 0:
-                        qty_for_this_target = initial_quantity * (qty_pct / 100)
                         active_partial_exits.append({
                             "price_level": entry_price * (1 + target_pct / 100),
-                            "quantity": qty_for_this_target,
+                            "quantity": initial_quantity * (qty_pct / 100),
                             "target_percent": target_pct
                         })
 
             tradebook.append({
                 "Date": row.Index.isoformat(), "Action": "BUY", "Price": entry_price,
                 "Quantity": initial_quantity, "Profit": 0, "PortfolioValue": portfolio_value,
-                "Reason": "Strategy Signal"
+                "Reason": "Strategy Signal", "Indicators": get_indicators_for_trade(row)
             })
 
     # --- Post-processing: Close any open position at the end ---
@@ -1856,26 +1913,27 @@ async def backtest_strategy_generic(
         tradebook.append({
             "Date": df_copy.index[-1].isoformat(), "Action": "SELL", "Price": last_price,
             "Quantity": quantity_in_position, "Profit": profit, "PortfolioValue": portfolio_value,
-            "Reason": "End of Backtest"
+            "Reason": "End of Backtest", "Indicators": {}
         })
 
     # --- Calculate Final Metrics ---
     buys = [t for t in tradebook if t['Action'] == 'BUY']
     total_trades = len(buys)
-
-    pnl_per_buy = {}
+    pnl_per_trade_cycle = []
     if buys:
         buy_indices = [i for i, t in enumerate(tradebook) if t['Action'] == 'BUY']
         for i, buy_index in enumerate(buy_indices):
-            start = buy_index
-            end = buy_indices[i + 1] if i + 1 < len(buy_indices) else len(tradebook)
-            trade_cycle = tradebook[start:end]
-            total_pnl_cycle = sum(t['Profit'] for t in trade_cycle if t['Action'] == 'SELL')
-            pnl_per_buy[trade_cycle[0]['Date']] = total_pnl_cycle
+            start_index = buy_index
+            # The trade cycle ends at the next BUY signal or at the end of the book
+            end_index = buy_indices[i + 1] if i + 1 < len(buy_indices) else len(tradebook)
+            trade_cycle = tradebook[start_index:end_index]
+            # Sum up PnL from all SELLs within that cycle
+            total_pnl_for_cycle = sum(t['Profit'] for t in trade_cycle if t['Action'] == 'SELL')
+            pnl_per_trade_cycle.append(total_pnl_for_cycle)
 
-    winning_cycles = len([pnl for pnl in pnl_per_buy.values() if pnl > 0])
-    win_rate = (winning_cycles / total_trades * 100) if total_trades > 0 else 0
-    total_pnl = sum(pnl for pnl in pnl_per_buy.values())
+    winning_trades = len([pnl for pnl in pnl_per_trade_cycle if pnl > 0])
+    win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+    total_pnl = sum(pnl_per_trade_cycle)
 
     return {
         "TotalTrades": total_trades,
@@ -1886,29 +1944,114 @@ async def backtest_strategy_generic(
     }
 
 
-async def evaluate_custom_strategy(df, strategy_conditions: List[Dict], indicators_module, signal_type: str = "BUY"):
+async def evaluate_custom_strategy(df: pd.DataFrame, strategy_conditions: List[Dict],
+                                   signal_type: str = "BUY") -> pd.Series:
     """
-    Evaluates custom strategy conditions and returns a Series of signals (BUY or SELL).
+    Evaluates custom strategy conditions using the 'pandas-ta' library.
+
+    This version dynamically calculates all required indicators and appends them
+    as columns to the DataFrame before evaluation, which is both efficient and clean.
     """
+    # Create a copy to avoid modifying the original DataFrame
+    df_with_indicators = df.copy()
+
+    # --- Step 1: Dynamically calculate and append all required indicators ---
+    unique_indicators = {}
+    for cond in strategy_conditions:
+        for side in ["left", "right"]:
+            indicator_name = cond.get(f"{side}_indicator")
+            if indicator_name and indicator_name != "Fixed Value":
+                params = cond.get(f"{side}_params", {})
+                # Create a unique key to avoid redundant calculations
+                key = (indicator_name, frozenset(params.items()))
+                unique_indicators[key] = (indicator_name, params)
+
+    for (indicator_name, params) in unique_indicators.values():
+        try:
+            # Map user-friendly names to pandas-ta function names and parameters
+            if indicator_name == "SMA":
+                df_with_indicators.ta.sma(length=params.get("period", 20), append=True)
+            elif indicator_name == "EMA":
+                df_with_indicators.ta.ema(length=params.get("period", 14), append=True)
+            elif indicator_name == "RSI":
+                df_with_indicators.ta.rsi(length=params.get("period", 14), append=True)
+            elif indicator_name == "MACD":
+                # pandas-ta appends multiple columns for MACD (e.g., MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9)
+                df_with_indicators.ta.macd(fast=params.get("fast_period", 12), slow=params.get("slow_period", 26),
+                                           signal=params.get("signal_period", 9), append=True)
+            elif indicator_name == "Bollinger Bands":
+                # Appends BBL_20_2.0, BBM_20_2.0, BBU_20_2.0, etc.
+                df_with_indicators.ta.bbands(length=params.get("period", 20), std=params.get("std_dev", 2), append=True)
+        except Exception as e:
+            logger.error(f"Error calculating indicator '{indicator_name}' with pandas-ta: {e}")
+
+    # --- Step 2: Evaluate conditions using the new indicator columns ---
     signals = pd.Series(index=df.index, dtype='object')
-    signals[:] = None
-    for i in range(1, len(df)):
-        condition_met = True
+
+    for i in range(1, len(df_with_indicators)):
+        all_conditions_met = True
         for cond in strategy_conditions:
-            left_value = get_indicator_value(df, cond["left_indicator"], cond["left_params"], i, indicators_module)
-            right_value = cond["right_value"] if cond["right_indicator"] == "Fixed Value" else get_indicator_value(
-                df, cond["right_indicator"], cond["right_params"], i, indicators_module)
-            if left_value is None or right_value is None:
-                condition_met = False
+            try:
+                # --- Get Column Names from pandas-ta conventions ---
+                # This helper function constructs the column name pandas-ta creates
+                def get_column_name(indicator, params):
+                    if indicator == 'SMA': return f"SMA_{params.get('period', 20)}"
+                    if indicator == 'EMA': return f"EMA_{params.get('period', 14)}"
+                    if indicator == 'RSI': return f"RSI_{params.get('period', 14)}"
+                    if indicator == 'MACD': return f"MACD_{params.get('fast_period', 12)}_{params.get('slow_period', 26)}_{params.get('signal_period', 9)}"
+                    if indicator == 'Bollinger Bands':
+                        band = params.get('band', 'upper').upper()[0]  # BBU, BBM, BBL
+                        return f"BB{band}_{params.get('period', 20)}_{params.get('std_dev', 2.0)}"
+                    # For Close, Open, High, Low, Volume, the column name is just the indicator name in lowercase
+                    if indicator in ["Close Price", "Open Price", "High Price", "Low Price", "Volume"]:
+                        return indicator.split(" ")[0].lower()
+                    return None
+
+                # --- Get Current Values ---
+                left_col = get_column_name(cond["left_indicator"], cond.get("left_params", {}))
+                right_col = get_column_name(cond["right_indicator"], cond.get("right_params", {}))
+
+                left_current = float(cond["left_value"]) if cond["left_indicator"] == "Fixed Value" else \
+                df_with_indicators[left_col].iloc[i]
+                right_current = float(cond["right_value"]) if cond["right_indicator"] == "Fixed Value" else \
+                df_with_indicators[right_col].iloc[i]
+
+                if pd.isna(left_current) or pd.isna(right_current):
+                    all_conditions_met = False
+                    break
+
+                # --- Evaluate Condition ---
+                comparison = cond["comparison"]
+                condition_result = False
+                if comparison in ["Crosses Above", "Crosses Below"]:
+                    left_prev = float(cond["left_value"]) if cond["left_indicator"] == "Fixed Value" else \
+                    df_with_indicators[left_col].iloc[i - 1]
+                    right_prev = float(cond["right_value"]) if cond["right_indicator"] == "Fixed Value" else \
+                    df_with_indicators[right_col].iloc[i - 1]
+
+                    if pd.isna(left_prev) or pd.isna(right_prev):
+                        all_conditions_met = False;
+                        break
+
+                    if comparison == "Crosses Above" and left_prev <= right_prev and left_current > right_current:
+                        condition_result = True
+                    elif comparison == "Crosses Below" and left_prev >= right_prev and left_current < right_current:
+                        condition_result = True
+                else:
+                    condition_result = evaluate_condition(left_current, right_current, comparison)
+
+                if not condition_result:
+                    all_conditions_met = False;
+                    break
+            except (KeyError, IndexError) as e:
+                # This can happen if a column name is wrong or data is missing
+                logger.error(f"Error accessing data for condition at index {i}: {cond}. Error: {e}")
+                all_conditions_met = False;
                 break
-            comparison = cond["comparison"]
-            if not evaluate_condition(left_value, right_value, comparison):
-                condition_met = False
-                break
-        if condition_met:
+
+        if all_conditions_met:
             signals.iloc[i] = signal_type
-    if signals.dropna().empty:
-        logger.warning(f"No signals generated for strategy conditions: {strategy_conditions}")
+
     return signals
 
 async def backtest_short_sell(df, initial_investment: float, stop_loss_atr_mult: float, target_atr_mult: float):
@@ -1994,7 +2137,7 @@ def get_strategy_details(strategy: str) -> (Optional[Callable], str, bool):
     if strategy.startswith("{"):
         try:
             strategy_data = json.loads(strategy)
-            return strategy_data, strategy_data.get("name", "Custom Strategy"), True
+            return None, strategy_data.get("name", "Custom Strategy"), True
         except json.JSONDecodeError:
             raise ValueError(f"Invalid JSON for custom strategy: {strategy}")
     else:
@@ -2178,11 +2321,8 @@ def evaluate_condition(left_value, right_value, comparison):
     elif comparison == "<=":
         return left_value <= right_value
     elif comparison == "==":
-        return abs(left_value - right_value) < 1e-6
-    elif comparison == "Crosses Above":
-        return left_value > right_value  # Simplified; needs previous value check
-    elif comparison == "Crosses Below":
-        return left_value < right_value
+        # Use a small epsilon for float comparison
+        return abs(left_value - right_value) < 1e-9
     return False
 
 if __name__ == "__main__":

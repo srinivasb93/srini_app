@@ -920,6 +920,30 @@ def display_backtest_results(performance_panel, trades_panel, metrics_panel, res
                     expectancy = (metrics["WinRate"] / 100 * metrics["AverageWin"]) + (
                                 (1 - metrics["WinRate"] / 100) * abs(metrics["AverageLoss"]))
                     display_metric("Expectancy (₹)", expectancy, help_text="Expected PNL per trade.")
+
+            with ui.scroll_area().classes('w-full h-full border p-2 rounded-lg'):
+                ui.label("Trade Execution Log").classes("text-h6 p-2")
+                for trade in tradebook:
+                    # Each trade event gets its own card
+                    with ui.card().classes('w-full mb-2 p-3'):
+                        # Display primary trade info in a row
+                        with ui.row().classes('w-full items-center justify-between text-sm'):
+                            action_color = "text-positive" if trade['Action'] == "BUY" else "text-negative"
+                            ui.label(f"{trade['Action']}").classes(f'text-md font-bold {action_color}')
+                            ui.label(f"On: {trade['Date']}")
+                            ui.label(f"Price: ₹{trade['Price']:.2f}")
+                            ui.label(f"Reason: {trade['Reason']}")
+                            ui.label(f"PnL: ₹{trade['Profit']:.2f}").classes('font-mono')
+
+                        # Check for and display indicators in an expandable section
+                        indicators = trade.get("Indicators")
+                        if indicators and isinstance(indicators, dict) and any(indicators.values()):
+                            with ui.expansion('View Indicators', icon='insights').classes('w-full text-xs mt-2'):
+                                with ui.grid(columns=3).classes('w-full gap-2 p-2'):
+                                    for key, value in indicators.items():
+                                        with ui.card().classes('items-center p-1 bg-blue-grey-1 dark:bg-blue-grey-8'):
+                                            ui.label(key).classes('text-xs text-gray-500')
+                                            ui.label(f"{value}").classes('font-bold')
         else:
             ui.label("No completed trades in this backtest.").classes("text-warning")
 
