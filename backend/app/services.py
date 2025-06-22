@@ -9,6 +9,7 @@ import numpy as np
 import requests
 import smtplib
 from email.mime.text import MIMEText
+from database import get_db
 
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1593,7 +1594,7 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
     Main service to orchestrate a backtest, now with optimization capabilities.
     """
     logger.info(f"Starting backtest for {instrument_token} from {start_date} to {end_date}")
-    logger.debug(f"Backtest parameters: {params}")
+    logger.info(f"Backtest parameters: {params}")
 
     try:
         # --- 1. Data Fetching ---

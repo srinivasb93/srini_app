@@ -3,7 +3,7 @@ import numpy as np
 
 
 def calculate_ema(df, period=20):
-    return df["close"].ewm(span=period, adjust=False).mean()
+    return df["close"].ewm(span=period).mean()
 
 def calculate_sma(df, period=20):
     return df["close"].rolling(window=period).mean()

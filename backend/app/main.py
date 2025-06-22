@@ -1089,7 +1089,7 @@ async def websocket_backtest(websocket: WebSocket, user_id: str):
         except Exception as e:
             logger.error(f"Error closing WebSocket for user {user_id}: {str(e)}")
 
-@app.get("/analytics/{broker}", tags=["analytics"])
+@app.get("/analytics/data", tags=["analytics"])
 async def get_analytics(
     instrument_token: str,
     unit: str = "days",
@@ -1104,8 +1104,6 @@ async def get_analytics(
 ):
     user_apis_dict = await initialize_user_apis(user_id, db)
     upstox_api = user_apis_dict["upstox"]["history"]
-    if not upstox_api:
-        raise HTTPException(status_code=400, detail="Upstox API not initialized")
     try:
         result = await db.execute(select(User).filter(User.user_id == user_id))
         user = result.scalars().first()
@@ -1126,6 +1124,8 @@ async def get_analytics(
         )
         return data
     except Exception as e:
+        if not upstox_api:
+            raise HTTPException(status_code=400, detail="Upstox API not initialized")
         logger.error(f"Error fetching analytics data: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 

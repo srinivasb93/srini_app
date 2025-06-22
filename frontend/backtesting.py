@@ -165,18 +165,6 @@ async def fetch_ohlc_data(fetch_api, instrument, from_date, to_date, interval="1
             # Convert to DataFrame
             df = pd.DataFrame(candles)
 
-            # Ensure column names are standardized
-            column_mapping = {
-                "timestamp": "timestamp",
-                "open": "Open",
-                "high": "High",
-                "low": "Low",
-                "close": "Close",
-                "volume": "Volume"
-            }
-
-            df = df.rename(columns={k: v for k, v in column_mapping.items() if k in df.columns})
-
             # Convert timestamp to datetime
             if "timestamp" in df.columns:
                 df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -203,12 +191,12 @@ def create_candlestick_chart(df, tradebook, theme_mode="Dark"):
     # Format candlestick data
     for index, row in df.iterrows():
         candlestick_data.append([
-            row['Open'],
-            row['Close'],
-            row['Low'],
-            row['High']
+            row['open'],
+            row['close'],
+            row['low'],
+            row['high']
         ])
-        dates.append(row['timestamp'].strftime('%Y-%m-%d'))
+        dates.append(row['timestamp'])
 
     # Extract buy/sell points from tradebook
     for trade in tradebook:
@@ -357,24 +345,40 @@ def process_tradebook(tradebook):
     df = df.sort_values("timestamp")
     return df
 
-def prepare_tradebook_for_display(tradebook):
-    """Prepare tradebook for UI display with proper formatting"""
-    serializable_tradebook = []
-    for trade in tradebook:
-        trade_copy = trade.copy()
-        if isinstance(trade_copy.get("Date"), (pd.Timestamp, datetime)):
-            trade_copy["Date"] = trade_copy["Date"].isoformat()
-        elif isinstance(trade_copy.get("Date"), str):
-            try:
-                trade_copy["Date"] = pd.to_datetime(trade_copy["Date"]).isoformat()
-            except ValueError:
-                logger.warning(f"Invalid date format in tradebook: {trade_copy['Date']}")
-                trade_copy["Date"] = datetime.now().isoformat()
-        for key in ["EntryPrice", "ExitPrice", "Profit", "PortfolioValue", "Quantity"]:
-            if key in trade_copy and trade_copy[key] is not None:
-                trade_copy[key] = float(trade_copy[key])
-        serializable_tradebook.append(trade_copy)
-    return serializable_tradebook
+def process_tradebook_for_display(tradebook: List[Dict]) -> List[Dict]:
+    if not tradebook: return []
+    df = pd.DataFrame(tradebook)
+    df['timestamp'] = pd.to_datetime(df['Date'])
+
+    buy_indices = df.index[df['Action'] == 'BUY'].tolist()
+    completed_trades = []
+
+    for i, buy_index in enumerate(buy_indices):
+        start_index = buy_index
+        end_index = buy_indices[i+1] if i+1 < len(buy_indices) else len(df)
+        trade_cycle = df.iloc[start_index:end_index]
+
+        entry_trade = trade_cycle.iloc[0]
+        exit_trades = trade_cycle[trade_cycle['Action'] == 'SELL']
+
+        if not exit_trades.empty:
+            exit_price = (exit_trades['Price'] * exit_trades['Quantity']).sum() / exit_trades['Quantity'].sum()
+            exit_reason = ", ".join(exit_trades['Reason'].unique())
+            exit_date = exit_trades['timestamp'].max()
+            pnl = exit_trades['Profit'].sum()
+        else:
+            exit_price, exit_reason, exit_date, pnl = None, "Open", None, 0
+
+        holding_period = (exit_date - entry_trade['timestamp']) if exit_date else "N/A"
+
+        completed_trades.append({
+            "EntryDate": entry_trade['timestamp'].isoformat(),
+            "ExitDate": exit_date.isoformat() if exit_date else "N/A",
+            "EntryPrice": entry_trade['Price'], "ExitPrice": exit_price,
+            "Quantity": entry_trade['Quantity'], "PNL": pnl,
+            "ExitReason": exit_reason, "HoldingPeriod": str(holding_period)
+        })
+    return completed_trades
 
 async def connect_backtest_websocket(user_id: str, progress_bar, progress_label, max_retries=5, initial_backoff=2, timeout=30):
     ws_url = f"{BASE_URL.replace('http', 'ws')}/ws/backtest/{user_id}"
@@ -559,51 +563,37 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
     strategy_options = {}
     partial_exit_rows = []
 
-    with ui.row().classes("w-full h-full gap-8 p-4"):
-        with ui.column().classes("w-1/3"):
-            with ui.card().classes("w-full p-4 sticky top-4"):
+    with ui.splitter(value=30).classes("w-full h-screen") as splitter:
+        with splitter.before:
+            with ui.card().classes("w-full h-full p-4 overflow-auto"):
                 ui.label("Backtest Configuration").classes("text-h6 mb-4")
+                # ... Rest of the configuration UI elements from the original file ...
+                with ui.expansion("Instrument & Strategy", icon="tune", value=True):
+                    instrument_select = ui.select(options=sorted(list(instruments.keys())), label="Select Instrument", with_input=True).props("clearable dense").classes("w-full")
+                    strategies_select = ui.select(options=strategy_options, label="Select Strategy").props("dense disabled").classes("w-full")
 
-                with ui.expansion("Instrument & Strategy", icon="tune", value=True).classes("w-full"):
-                    instrument_select = ui.select(options=sorted(list(instruments.keys())), label="Select Instrument",
-                                                  with_input=True).props("clearable filter filled dense").classes(
-                        "w-full")
-                    strategies_select = ui.select(options=strategy_options, label="Select Strategy").props(
-                        "filled dense disabled").classes("w-full")
+                with ui.expansion("Date Range & Capital", icon="date_range", value=True):
+                    with ui.row():
+                        start_date = ui.input("Start Date", value=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")).props("dense type=date").classes("flex-1")
+                        end_date = ui.input("End Date", value=datetime.now().strftime("%Y-%m-%d")).props("dense type=date").classes("flex-1")
+                    initial_capital = ui.number(label="Initial Capital", value=100000, format="%.0f").props("dense").classes("w-full")
 
-                with ui.expansion("Date Range & Capital", icon="date_range", value=True).classes("w-full"):
-                    with ui.row().classes("w-full"):
-                        start_date = ui.input("Start Date",
-                                              value=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")).props(
-                            "filled dense type=date").classes("flex-1")
-                        end_date = ui.input("End Date", value=datetime.now().strftime("%Y-%m-%d")).props(
-                            "filled dense type=date").classes("flex-1")
-                    initial_capital = ui.number(label="Initial Capital", value=100000, format="%.0f").props(
-                        "filled dense").classes("w-full")
-
-                with ui.expansion("Risk Management", icon="shield", value=True).classes("w-full"):
-                    stop_loss_percent = ui.number("Stop Loss (%)", value=2.0, format="%.1f", min=0).props(
-                        "filled dense hint='0 to disable'").classes("w-full")
-                    trailing_stop_loss_percent = ui.number("Trailing Stop (%)", value=1.5, format="%.1f", min=0).props(
-                        "filled dense hint='0 to disable'").classes("w-full")
-                    position_sizing_percent = ui.number("Position Sizing (% of Capital)", value=10.0,
-                                                        format="%.1f").props("filled dense").classes("w-full")
+                with ui.expansion("Risk Management", icon="shield", value=True):
+                    stop_loss_percent = ui.number("Stop Loss (%)", value=2.0, format="%.1f", min=0).props("dense")
+                    trailing_stop_loss_percent = ui.number("Trailing Stop (%)", value=1.5, format="%.1f", min=0).props("dense")
+                    position_sizing_percent = ui.number("Position Sizing (% of Capital)", value=10.0, format="%.1f").props("dense")
                     ui.separator().classes("my-2")
                     ui.label("Partial Exits").classes("text-subtitle2")
-                    partial_exits_container = ui.column().classes("w-full gap-2")
+                    partial_exits_container = ui.column().classes("w-full gap-1")
 
                     def add_partial_exit_row():
                         row_id = str(uuid4())
                         with partial_exits_container:
                             with ui.row().classes("w-full items-center gap-2") as pe_row:
-                                target = ui.number("Target (%)", value=5.0, min=0.1).props("dense filled").classes(
-                                    "flex-grow")
-                                qty_percent = ui.number("Quantity (%)", value=50.0, min=1, max=100).props(
-                                    "dense filled").classes("flex-grow")
-                                ui.button(icon="delete", on_click=lambda: remove_partial_exit(row_id)).props(
-                                    "flat round dense color=negative")
-                        partial_exit_rows.append(
-                            {"id": row_id, "row": pe_row, "target": target, "qty_percent": qty_percent})
+                                target = ui.number("Target (%)", value=5.0, min=0.1).props("dense").classes("flex-grow")
+                                qty_percent = ui.number("Qty (%)", value=50.0, min=1, max=100).props("dense").classes("flex-grow")
+                                ui.button(icon="delete", on_click=lambda: remove_partial_exit(row_id)).props("flat round dense color=negative text-xs")
+                        partial_exit_rows.append({"id": row_id, "row": pe_row, "target": target, "qty_percent": qty_percent})
 
                     def remove_partial_exit(row_id):
                         row_to_remove = next((r for r in partial_exit_rows if r["id"] == row_id), None)
@@ -611,46 +601,36 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
                             partial_exits_container.remove(row_to_remove["row"])
                             partial_exit_rows.remove(row_to_remove)
 
-                    ui.button("Add Partial Exit", icon="add", on_click=add_partial_exit_row).props(
-                        "outline size=sm").classes("w-full")
+                    ui.button("Add Partial Exit", icon="add", on_click=add_partial_exit_row).props("outline size=sm").classes("w-full mt-1")
 
-                with ui.expansion("Optimization Settings", icon="settings").classes("w-full"):
+                with ui.expansion("Optimization Settings", icon="settings"):
                     enable_optimization = ui.switch("Enable Parameter Optimization")
                     with ui.column().classes("w-full").bind_visibility_from(enable_optimization, 'value'):
-                        optimization_iterations = ui.number("Iterations", value=20, min=5, max=200).props(
-                            "filled dense").classes("w-full")
-                        ui.label("Stop Loss Range (%)").classes("text-subtitle2 mt-2")
-                        with ui.row().classes("w-full gap-2"):
-                            stop_loss_min = ui.number("Min", value=1.0, min=0.1, format="%.1f").props("dense").classes(
-                                "flex-1")
-                            stop_loss_max = ui.number("Max", value=5.0, min=0.1, format="%.1f").props("dense").classes(
-                                "flex-1")
+                        optimization_iterations = ui.number("Iterations", value=20, min=5, max=200).props("dense")
+                        with ui.row():
+                            stop_loss_min = ui.number("SL Min (%)", value=1.0, min=0.1, format="%.1f").props("dense")
+                            stop_loss_max = ui.number("SL Max (%)", value=5.0, min=0.1, format="%.1f").props("dense")
 
-                run_button = ui.button("Run Backtest", on_click=lambda: run_backtest()).props(
-                    "color=primary icon=play_arrow").classes("w-full mt-4")
+                run_button = ui.button("Run Backtest", on_click=lambda: run_backtest()).props("color=primary icon=play_arrow").classes("w-full mt-4")
 
-        with ui.column().classes("w-2/3"):
-            progress_container = ui.row().classes("w-full p-4").bind_visibility_from(run_button, "loading")
-            with progress_container:
-                progress_bar = ui.linear_progress(value=0).classes("w-full")
-                progress_label = ui.label("Progress: 0%").classes("ml-2 text-xs")
+        with splitter.after:
+            with ui.card().classes("w-full h-full p-2"):
+                results_tabs = ui.tabs().classes("w-full")
+                with results_tabs:
+                    performance_tab = ui.tab("Performance", icon="trending_up")
+                    trades_tab = ui.tab("Trades", icon="list_alt")
+                    metrics_tab = ui.tab("Metrics", icon="analytics")
+                    optimization_tab = ui.tab("Optimization", icon="auto_awesome")
 
-            results_tabs = ui.tabs().classes("w-full")
-            with results_tabs:
-                performance_tab = ui.tab("Performance", icon="trending_up")
-                trades_tab = ui.tab("Trades", icon="list_alt")
-                metrics_tab = ui.tab("Metrics", icon="analytics")
-                optimization_tab = ui.tab("Optimization", icon="auto_awesome")
-
-            with ui.tab_panels(results_tabs, value=performance_tab).classes("w-full mt-2"):
-                with ui.tab_panel(performance_tab) as performance_panel:
-                    ui.label("Run a backtest to see performance charts.").classes("text-center text-gray-500 mt-8")
-                with ui.tab_panel(trades_tab) as trades_panel:
-                    ui.label("Run a backtest to see the trade log.").classes("text-center text-gray-500 mt-8")
-                with ui.tab_panel(metrics_tab) as metrics_panel:
-                    ui.label("Run a backtest to see performance metrics.").classes("text-center text-gray-500 mt-8")
-                with ui.tab_panel(optimization_tab) as optimization_panel:
-                    ui.label("Run an optimization to see comparison results.").classes("text-center text-gray-500 mt-8")
+                with ui.tab_panels(results_tabs, value=performance_tab).classes("w-full mt-2 h-full overflow-auto"):
+                    with ui.tab_panel(performance_tab) as performance_panel:
+                        ui.label("Run a backtest to see performance charts.").classes("absolute-center text-gray-500")
+                    with ui.tab_panel(trades_tab) as trades_panel:
+                        ui.label("Run a backtest to see the trade log.").classes("absolute-center text-gray-500")
+                    with ui.tab_panel(metrics_tab) as metrics_panel:
+                        ui.label("Run a backtest to see performance metrics.").classes("absolute-center text-gray-500")
+                    with ui.tab_panel(optimization_tab) as optimization_panel:
+                        ui.label("Run an optimization to see comparison results.")
 
     async def fetch_strategies_for_backtest():
         nonlocal strategy_options
@@ -675,12 +655,9 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
                 ui.notify("Please select a strategy and instrument.", type="negative");
                 return
 
-            performance_panel.clear();
-            trades_panel.clear();
-            metrics_panel.clear();
-            optimization_panel.clear()
-            with performance_panel:
-                ui.spinner(size='lg').classes('absolute-center')
+            for panel in [performance_panel, trades_panel, metrics_panel, optimization_panel]:
+                panel.clear()
+                with panel: ui.spinner(size='lg').classes('absolute-center')
             run_button.props("loading=true disabled=true")
 
             params = {
@@ -694,7 +671,7 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
             }
             if enable_optimization.value:
                 if stop_loss_min.value >= stop_loss_max.value:
-                    ui.notify("Stop Loss Min must be less than Max.", type="negative");
+                    ui.notify("Stop Loss Min must be less than Max.", type="negative")
                     return
                 params["optimization_iterations"] = int(optimization_iterations.value)
                 params["stop_loss_range"] = [float(stop_loss_min.value), float(stop_loss_max.value)]
@@ -714,13 +691,14 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
             }
 
             response = await fetch_api("/algo-trading/backtest", method="POST", data=backtest_payload)
-            performance_panel.clear()
+            logger.debug(f"ALGO RESPONSE: {json.dumps(response)}")
+            for panel in [performance_panel, trades_panel, metrics_panel, optimization_panel]: panel.clear()
 
             if response and not response.get("error"):
                 if response.get("optimization_enabled"):
                     ui.notify("Optimization complete! Displaying best result.", type="positive")
                     display_backtest_results(performance_panel, trades_panel, metrics_panel,
-                                             response.get("best_result", {}), user_storage)
+                                             response.get("best_result", {}), user_storage, fetch_api)
                     display_optimization_runs(optimization_panel, response.get("all_runs", []))
                     results_tabs.set_value(optimization_tab)
                 else:
@@ -736,7 +714,6 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
             run_button._props["loading"] = False
             run_button._props["disabled"] = False
             run_button.update()
-            progress_container.visible = False
             ui.update()
 
 
@@ -905,140 +882,66 @@ def display_backtest_results(performance_panel, trades_panel, metrics_panel, res
 
     # 3. Trades Panel - Show detailed trade list
     with trades_panel:
-        if tradebook:
-            # Create a more user-friendly trade table
-            serializable_tradebook = prepare_tradebook_for_display(tradebook)
+        completed_trades = process_tradebook_for_display(tradebook)
+        if completed_trades:
+            ui.aggrid({
+                "columnDefs": [
+                    {"headerName": "Entry Date", "field": "EntryDate",
+                     "valueFormatter": "value ? new Date(value).toLocaleString() : ''"},
+                    {"headerName": "Exit Date", "field": "ExitDate",
+                     "valueFormatter": "value ? new Date(value).toLocaleString() : ''"},
+                    {"headerName": "Entry Price", "field": "EntryPrice",
+                     "valueFormatter": "'₹' + params.value.toFixed(2)"},
+                    {"headerName": "Exit Price", "field": "ExitPrice",
+                     "valueFormatter": "params.value ? '₹' + params.value.toFixed(2) : 'N/A'"},
+                    {"headerName": "PNL", "field": "PNL", "valueFormatter": "'₹' + params.value.toFixed(2)",
+                     "cellStyle": "params.value >= 0 ? {'color': '#4caf50'} : {'color': '#f44336'}"},
+                    {"headerName": "Exit Reason", "field": "ExitReason"},
+                    {"headerName": "Holding Period", "field": "HoldingPeriod"},
+                ],
+                "rowData": completed_trades, "domLayout": 'autoHeight'
+            }).classes("w-full")
 
-            # Add trade filters
-            with ui.card().classes("w-full p-4 mb-4"):
-                with ui.row().classes("items-center justify-between"):
-                    ui.label("Trade Analysis").classes("text-h6")
-                    with ui.row().classes("gap-2"):
-                        trade_filter = ui.select(
-                            options=["All Trades", "Winning Trades", "Losing Trades"],
-                            value="All Trades",
-                            label="Filter"
-                        ).props("outlined dense")
-
-                        def filter_trades(e):
-                            filter_type = trade_filter.value
-                            filtered_data = serializable_tradebook
-
-                            if filter_type == "Winning Trades":
-                                filtered_data = [trade for trade in serializable_tradebook if
-                                                 trade.get("Profit", 0) > 0]
-                            elif filter_type == "Losing Trades":
-                                filtered_data = [trade for trade in serializable_tradebook if
-                                                 trade.get("Profit", 0) < 0]
-
-                            trade_grid.options["rowData"] = filtered_data
-                            trade_grid.update()
-
-                        trade_filter.on("update:model-value", filter_trades)
-
-                        async def export_results():
-                            """Exports backtest results to CSV."""
-                            try:
-                                results = user_storage.get("backtest_results", [])
-                                if not results:
-                                    ui.notify("No results to export.", type="warning")
-                                    return
-
-                                tradebook = results[0].get("Tradebook", [])
-                                if tradebook:
-                                    df = pd.DataFrame(tradebook)
-                                    csv_data = df.to_csv(index=False)
-
-                                    # Add download button for CSV
-                                    ui.download(csv_data.encode(),
-                                                f"backtest_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-
-                                    # Also create a JSON version with all data
-                                    json_data = json.dumps(convert_timestamps_to_iso(results), indent=2)
-                                    ui.download(json_data.encode(),
-                                                f"backtest_complete_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-
-                                    ui.notify("Results exported successfully!", type="positive")
-                                    logger.debug("Backtest results exported")
-                                else:
-                                    ui.notify("No tradebook data to export.", type="warning")
-                                    logger.warning("No tradebook data for export")
-                            except Exception as e:
-                                ui.notify(f"Error exporting results: {str(e)}", type="negative")
-                                logger.error(f"Error exporting results: {str(e)}")
-                        ui.button("Export", icon="download", on_click=lambda: export_results()).props("outline")
-
-            try:
-                # Fix the column definition in trades_panel
-                trade_grid = ui.aggrid({
-                    "defaultColDef": {
-                        "resizable": True,
-                        "sortable": True,
-                        "filter": True
-                    },
-                    "columnDefs": [
-                        {"headerName": "Date", "field": "Date", "valueFormatter": "value ? new Date(value).toLocaleString() : ''", "width": 180},
-                        {"headerName": "Action", "field": "Action", "cellStyle": "params.value === 'BUY' ? {'color': '#4caf50'} : {'color': '#f44336'}", "width": 100},
-                        {"headerName": "Entry Price", "field": "EntryPrice", "valueFormatter": "value ? '₹' + value.toFixed(2) : ''", "width": 120},
-                        {"headerName": "Exit Price", "field": "ExitPrice", "valueFormatter": "value ? '₹' + value.toFixed(2) : ''", "width": 120},
-                        {"headerName": "Quantity", "field": "Quantity", "valueFormatter": "value ? value.toFixed(2) : ''", "width": 100},
-                        {"headerName": "Profit", "field": "Profit",
-                            "valueFormatter": "value ? '₹' + value.toFixed(2) : ''",
-                            "cellStyle": "params.value > 0 ? {'color': '#4caf50'} : params.value < 0 ? {'color': '#f44336'} : {}",
-                            "width": 120
-                        },
-                        {"headerName": "Portfolio Value", "field": "PortfolioValue", "valueFormatter": "value ? '₹' + value.toFixed(2) : ''", "width": 150}
-                    ],
-                    "rowData": serializable_tradebook,
-                    "pagination": True,
-                    "paginationPageSize": 15,
-                    "domLayout": 'autoHeight'
-                }).classes("w-full")
-
-                # Add trade statistics below the grid
-                with ui.row().classes("mt-4 gap-4"):
-                    with ui.card().classes("w-1/4 p-4"):
-                        ui.label("Avg. Holding Period").classes("text-subtitle2")
-                        ui.label("2.5 days").classes("text-h6")  # Would need calculation
-                    with ui.card().classes("w-1/4 p-4"):
-                        ui.label("Avg. Profit per Trade").classes("text-subtitle2")
-                        ui.label(f"₹{metrics['TotalProfit']/metrics['TotalTrades'] if metrics['TotalTrades'] > 0 else 0:,.2f}").classes("text-h6")
-                    with ui.card().classes("w-1/4 p-4"):
-                        ui.label("Win/Loss Ratio").classes("text-subtitle2")
-                        win_loss = abs(metrics["AverageWin"]/metrics["AverageLoss"]) if metrics["AverageLoss"] != 0 else 0
-                        ui.label(f"{win_loss:.2f}").classes("text-h6")
-                    with ui.card().classes("w-1/4 p-4"):
-                        ui.label("Expectancy").classes("text-subtitle2")
-                        expectancy = (metrics["WinRate"]/100 * metrics["AverageWin"]) + ((1-metrics["WinRate"]/100) * metrics["AverageLoss"])
-                        ui.label(f"₹{expectancy:,.2f}").classes("text-h6")
-            except Exception as e:
-                logger.error(f"Error rendering trade grid: {str(e)}")
-                ui.label(f"Failed to display trade analysis: {str(e)}").classes("text-negative")
+            # Display metrics *below* the table
+            with ui.card().classes("w-full mt-4 p-4"):
+                ui.label("Trade Statistics").classes("text-h6 mb-2")
+                with ui.grid(columns=4).classes("gap-4"):
+                    avg_holding_period = pd.to_timedelta(
+                        [t['HoldingPeriod'] for t in completed_trades if t['HoldingPeriod'] != "N/A"]).mean()
+                    display_metric("Avg. Holding Period", str(avg_holding_period).split('.')[0], format_spec="s",
+                                   help_text="Average time a position is held.")
+                    display_metric("Avg. Profit per Trade",
+                                   metrics['TotalProfit'] / metrics['TotalTrades'] if metrics['TotalTrades'] > 0 else 0,
+                                   help_text="Average PNL across all trades.")
+                    win_loss_ratio = abs(metrics["AverageWin"] / metrics["AverageLoss"]) if metrics[
+                                                                                                "AverageLoss"] != 0 else 0
+                    display_metric("Win/Loss Ratio", win_loss_ratio,
+                                   help_text="Average win amount divided by average loss amount.")
+                    expectancy = (metrics["WinRate"] / 100 * metrics["AverageWin"]) + (
+                                (1 - metrics["WinRate"] / 100) * abs(metrics["AverageLoss"]))
+                    display_metric("Expectancy (₹)", expectancy, help_text="Expected PNL per trade.")
         else:
-            ui.label("No trades executed in this backtest.").classes("text-warning")
+            ui.label("No completed trades in this backtest.").classes("text-warning")
 
 
 def display_optimization_runs(container, all_runs):
     with container:
-        if not all_runs: ui.label("No optimization data available.").classes("text-center text-gray-500 mt-8"); return
+        if not all_runs:
+            ui.label("No optimization data available.").classes("absolute-center text-gray-500")
+            return
 
         ui.label("Optimization Run Summary").classes("text-h6 mb-2")
-
         rowData = [{"sl_percent": r['parameters'].get('stop_loss_percent', 0),
-                    "pnl": r.get('TotalPNL', 0),
-                    "win_rate": r.get('WinRate', 0),
+                    "pnl": r.get('TotalPNL', 0), "win_rate": r.get('WinRate', 0),
                     "trades": r.get('TotalTrades', 0)} for r in all_runs]
-
         ui.aggrid({
             "columnDefs": [
                 {"headerName": "Stop Loss (%)", "field": "sl_percent", "valueFormatter": "params.value.toFixed(2)"},
-                {"headerName": "Total PNL", "field": "pnl", "valueFormatter": "'₹' + params.value.toFixed(2)",
-                 "sort": "desc"},
+                {"headerName": "Total PNL (₹)", "field": "pnl", "valueFormatter": "params.value.toFixed(2)", "sort": "desc"},
                 {"headerName": "Win Rate (%)", "field": "win_rate", "valueFormatter": "params.value.toFixed(2)"},
                 {"headerName": "Total Trades", "field": "trades"},
             ],
-            "rowData": rowData,
-            "domLayout": 'autoHeight'
+            "rowData": rowData, "domLayout": 'autoHeight'
         }).classes("w-full")
 
 def display_strategy_comparison(container, all_results, user_storage):
