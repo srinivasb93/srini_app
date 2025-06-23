@@ -1,5 +1,5 @@
 import pandas as pd
-import common_utils
+from common_utils.indicators import *
 
 
 def check_macd_crossover(macd_line, signal_line):
@@ -69,7 +69,7 @@ def backtest_strategy(df, strategy_func, **kwargs):
 
 
 def macd_strategy(df, fast_period=12, slow_period=26, signal_period=9):
-    macd_line, signal_line, _ = common_utils.calculate_macd(df, fast_period, slow_period, signal_period)
+    macd_line, signal_line, _ = calculate_macd(df, fast_period, slow_period, signal_period)
     signals = pd.Series(index=df.index, dtype='object')
     signals[:] = None
     for i in range(1, len(df)):
@@ -82,7 +82,7 @@ def macd_strategy(df, fast_period=12, slow_period=26, signal_period=9):
 
 
 def bollinger_band_strategy(df, period=20, num_std=2):
-    _, upper_band, lower_band = common_utils.calculate_bollinger_bands(df, period, num_std)
+    _, upper_band, lower_band = calculate_bollinger_bands(df, period, num_std)
     signals = pd.Series(index=df.index, dtype='object')
     signals[:] = None
     for i in range(1, len(df)):
@@ -95,7 +95,7 @@ def bollinger_band_strategy(df, period=20, num_std=2):
 
 
 def rsi_strategy(df, period=14, overbought=70, oversold=30):
-    rsi = common_utils.calculate_rsi(df, period)
+    rsi = calculate_rsi(df, period)
     signals = pd.Series(index=df.index, dtype='object')
     signals[:] = None
     for i in range(1, len(df)):

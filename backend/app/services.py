@@ -2328,37 +2328,26 @@ def evaluate_condition(left_value, right_value, comparison):
 if __name__ == "__main__":
     import asyncio
     from backend.app.database import get_db
-    from datetime import datetime, timedelta
 
+    if __name__ == "__main__":
+        async def main():
+            # Example parameters (replace with real values as needed)
+            instrument_token = "SBIN"
+            timeframe = "day"
+            strategy = "RSI Oversold/Overbought"
+            params = {
+                "initial_investment": 100000,
+                "stop_loss_percent": 2,
+                "trailing_stop_loss_percent": 0,
+                "position_sizing_percent": 100,
+                "enable_optimization": False
+            }
+            start_date = "2024-06-20"
+            end_date = "2025-06-20"
 
-    async def main():
-            try:
-                # Example parameters - replace with actual test values
-                instrument_key = "NSE_EQ|INE002A01018"  # Example: Reliance Industries
-                to_date_str = datetime.now().strftime("%Y-%m-%d")
-                from_date_str = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            result = await backtest_strategy(
+                instrument_token, timeframe, strategy, params, start_date, end_date, db=get_db()
+            )
+            print(result)
 
-                print(f"Fetching historical data for {instrument_key} from {from_date_str} to {to_date_str}")
-
-                historical_data_response = await get_historical_data(
-                    upstox_api=None,  # Provide a mock or real API object if needed
-                    upstox_access_token=None,  # Provide a token if testing Upstox API path
-                    instrument="RELIANCE",
-                    from_date=from_date_str,
-                    to_date=to_date_str,
-                    unit="days",  # or "minutes"
-                    interval="1",  # "1" for 1Day or "1" for 1minute etc.
-                    db=get_db()
-                )
-                if historical_data_response and historical_data_response.data:
-                    print(f"Fetched {len(historical_data_response.data)} data points.")
-                    for point in historical_data_response.data[:5]:  # Print first 5 points
-                        print(f"Timestamp: {point.timestamp}, Close: {point.close}")
-                else:
-                    print("No historical data found or an error occurred.")
-
-            except Exception as e:
-                print(f"An error occurred in main: {e}")
-
-
-    asyncio.run(main())
+        asyncio.run(main())
