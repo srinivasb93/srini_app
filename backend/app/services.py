@@ -1616,9 +1616,12 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
             if indicator == 'RSI': return f"RSI_{params.get('period', 14)}"
             if indicator == 'MACD': return f"MACD_{params.get('fast_period', 12)}_{params.get('slow_period', 26)}_{params.get('signal_period', 9)}"
             if indicator == 'Bollinger Bands':
+                # pandas-ta creates multiple columns for bbands, let's create a representative name.
+                # The actual column names used later will be specific (e.g., BBU_20_2.0).
+                # This is primarily for the display name.
                 band = params.get('band', 'upper').upper()[0]
-                return f"BB{band}_{params.get('period', 20)}_{params.get('std_dev', 2.0)}"
-            return None
+                return f"BBands_{params.get('period', 20)}_{params.get('std_dev', 2.0)}"
+            return indicator # Fallback for price columns
 
         # Calculate indicators for all strategy types upfront
         if is_custom:
@@ -1634,13 +1637,33 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
                         unique_indicators[key] = (name, iparams)
 
             for name, iparams in unique_indicators.values():
+                col_name = None
+                display_name = f"{name}({', '.join(f'{v}' for v in iparams.values())})" if iparams else name
                 if name == "EMA":
                     df.ta.ema(length=iparams.get("period", 20), append=True)
+                    col_name = f"EMA_{iparams.get('period', 20)}"
                 elif name == "RSI":
                     df.ta.rsi(length=iparams.get("period", 14), append=True)
-                # (Add other indicators from your custom strategy UI)
-                col_name = get_column_name(name, iparams)
-                if col_name: indicator_details.append({'column_name': col_name, 'display_name': col_name})
+                    col_name = f"RSI_{iparams.get('period', 14)}"
+                elif name == "MACD":
+                    df.ta.macd(fast=iparams.get("fast_period", 12), slow=iparams.get("slow_period", 26), signal=iparams.get("signal_period", 9), append=True)
+                    # We need to add multiple columns for MACD
+                    f, s, sig = iparams.get('fast_period', 12), iparams.get('slow_period', 26), iparams.get('signal_period', 9)
+                    indicator_details.append({'column_name': f'MACD_{f}_{s}_{sig}', 'display_name': f'MACD({f},{s},{sig})'})
+                    indicator_details.append({'column_name': f'MACDh_{f}_{s}_{sig}', 'display_name': f'Hist({f},{s},{sig})'})
+                    indicator_details.append({'column_name': f'MACDs_{f}_{s}_{sig}', 'display_name': f'Signal({f},{s},{sig})'})
+                elif name == "Bollinger Bands":
+                    df.ta.bbands(length=iparams.get("period", 20), std=iparams.get("std_dev", 2), append=True)
+                    p, std = iparams.get('period', 20), iparams.get('std_dev', 2.0)
+                    indicator_details.append({'column_name': f'BBU_{p}_{std}', 'display_name': f'BBU({p},{std})'})
+                    indicator_details.append({'column_name': f'BBM_{p}_{std}', 'display_name': f'BBM({p},{std})'})
+                    indicator_details.append({'column_name': f'BBL_{p}_{std}', 'display_name': f'BBL({p},{std})'})
+                elif name in ["Close Price", "Open Price", "High Price", "Low Price", "Volume"]:
+                    col_name = name.split(' ')[0].lower()
+                    display_name = name
+
+                if col_name:
+                    indicator_details.append({'column_name': col_name, 'display_name': display_name})
         else:
             # Prepare indicators for predefined strategies
             if strategy_name == "RSI Oversold/Overbought":
@@ -1653,7 +1676,12 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
                 indicator_details.append({'column_name': f'MACD_{f}_{s}_{sig}', 'display_name': f'MACD({f},{s},{sig})'})
                 indicator_details.append(
                     {'column_name': f'MACDs_{f}_{s}_{sig}', 'display_name': f'Signal({f},{s},{sig})'})
-            # (Add other predefined strategies here)
+            elif strategy_name == "Bollinger Bands":
+                 p, std = params.get('period', 20), params.get('num_std', 2.0)
+                 df.ta.bbands(length=p, std=std, append=True)
+                 indicator_details.append({'column_name': f'BBU_{p}_{float(std)}', 'display_name': f'BBU({p},{std})'})
+                 indicator_details.append({'column_name': f'BBL_{p}_{float(std)}', 'display_name': f'BBL({p},{std})'})
+
 
         # --- 4. Run Optimization or Single Backtest ---
         enable_optimization = params.get("enable_optimization", False)
@@ -1661,19 +1689,25 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
 
         if enable_optimization and not is_custom:
             logger.info(f"Starting optimization for strategy: {strategy_name}")
-            results = await run_parameter_optimization(df, strategy_func, params, ws_callback)
+            results = await run_parameter_optimization(df, strategy_func, params, ws_callback, indicator_details=indicator_details)
             final_response = {"optimization_enabled": True, **results}
         elif is_custom:
             logger.info(f"Running single backtest for custom strategy: {strategy_name}")
-            results = await backtest_custom_strategy(df, strategy_data, params, ws_callback)
+            results = await backtest_custom_strategy(df, strategy_data, params, ws_callback, indicator_details=indicator_details)
             final_response = {"optimization_enabled": False, **results}
         else:
             logger.info(f"Running single backtest for predefined strategy: {strategy_name}")
-            results = await backtest_strategy_generic(df, strategy_func, params, ws_callback)
+            results = await backtest_strategy_generic(df, strategy_func, params, ws_callback, indicator_details=indicator_details)
             final_response = {"optimization_enabled": False, **results}
 
         # --- 5. Final Formatting ---
         final_response.update({"StrategyName": strategy_name, "Instrument": instrument_token})
+        # Add indicator data for charting, ensuring it's JSON serializable
+        chart_data = df.reset_index()
+        chart_data['timestamp'] = chart_data['timestamp'].dt.strftime('%Y-%m-%dT%H:%M:%S')
+        final_response["ChartData"] = chart_data.to_dict(orient='records')
+        final_response["IndicatorDetails"] = indicator_details
+
         return final_response
 
     except Exception as e:
@@ -1681,7 +1715,7 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def run_parameter_optimization(df, strategy_func, params, ws_callback):
+async def run_parameter_optimization(df, strategy_func, params, ws_callback, indicator_details: Optional[List[Dict]] = None):
     """
     Runs multiple backtests with varying parameters to find the optimal set.
     """
@@ -1698,7 +1732,7 @@ async def run_parameter_optimization(df, strategy_func, params, ws_callback):
         iter_params.update(combo)
 
         # Run a full backtest for this parameter combination
-        iter_result = await backtest_strategy_generic(df.copy(), strategy_func, iter_params)
+        iter_result = await backtest_strategy_generic(df.copy(), strategy_func, iter_params, indicator_details=indicator_details)
 
         # Store results for comparison
         run_summary = {
@@ -1722,7 +1756,7 @@ async def run_parameter_optimization(df, strategy_func, params, ws_callback):
     return {"best_result": best_result, "all_runs": all_runs}
 
 
-async def backtest_custom_strategy(df, strategy_data, params, ws_callback):
+async def backtest_custom_strategy(df, strategy_data, params, ws_callback, indicator_details: Optional[List[Dict]] = None):
     """
     Generates signals for a custom strategy and then uses the generic backtesting engine.
     """
@@ -1738,7 +1772,7 @@ async def backtest_custom_strategy(df, strategy_data, params, ws_callback):
         return df['signal']
 
     # 4. Call the generic backtesting engine with the custom signals
-    result = await backtest_strategy_generic(df, custom_strategy_func, params, ws_callback)
+    result = await backtest_strategy_generic(df, custom_strategy_func, params, ws_callback, indicator_details=indicator_details)
 
     return result
 
@@ -1794,11 +1828,15 @@ async def backtest_strategy_generic(
         if not indicator_details:
             return {}
         # Use a dictionary comprehension to read values from the row's named tuple
-        return {
-            detail['display_name']: round(getattr(row_tuple, detail['column_name'], float('nan')), 2)
-            for detail in indicator_details
-            if hasattr(row_tuple, detail['column_name'])
-        }
+        indicators_data = {}
+        for detail in indicator_details:
+            col_name = detail['column_name']
+            display_name = detail['display_name']
+            if hasattr(row_tuple, col_name):
+                 value = getattr(row_tuple, col_name)
+                 if pd.notna(value):
+                    indicators_data[display_name] = round(value, 2)
+        return indicators_data
 
     # --- Backtesting Loop ---
     for i, row in enumerate(df_copy.itertuples()):
@@ -1949,9 +1987,8 @@ async def evaluate_custom_strategy(df: pd.DataFrame, strategy_conditions: List[D
                                    signal_type: str = "BUY") -> pd.Series:
     """
     Evaluates custom strategy conditions using the 'pandas-ta' library.
-
     This version dynamically calculates all required indicators and appends them
-    as columns to the DataFrame before evaluation, which is both efficient and clean.
+    as columns to the DataFrame, which is both efficient and clean.
     """
     # Create a copy to avoid modifying the original DataFrame
     df_with_indicators = df.copy()
@@ -1967,8 +2004,26 @@ async def evaluate_custom_strategy(df: pd.DataFrame, strategy_conditions: List[D
                 key = (indicator_name, frozenset(params.items()))
                 unique_indicators[key] = (indicator_name, params)
 
+    def get_column_name_for_check(indicator, params):
+        """Helper to construct the expected column name from pandas-ta."""
+        if indicator == 'SMA': return f"SMA_{params.get('period', 20)}"
+        if indicator == 'EMA': return f"EMA_{params.get('period', 14)}"
+        if indicator == 'RSI': return f"RSI_{params.get('period', 14)}"
+        if indicator == 'MACD': return f"MACD_{params.get('fast_period', 12)}_{params.get('slow_period', 26)}_{params.get('signal_period', 9)}"
+        if indicator == 'Bollinger Bands':
+            # Check for one of the bands, e.g., the middle one.
+            return f"BBM_{params.get('period', 20)}_{params.get('std_dev', 2.0)}"
+        return None
+
     for (indicator_name, params) in unique_indicators.values():
         try:
+            # --- FIX: Check if the indicator column already exists ---
+            expected_col = get_column_name_for_check(indicator_name, params)
+            if expected_col and expected_col in df_with_indicators.columns:
+                logger.debug(f"Indicator '{indicator_name}' with params {params} already found. Skipping calculation.")
+                continue
+            # --- END FIX ---
+
             # Map user-friendly names to pandas-ta function names and parameters
             if indicator_name == "SMA":
                 df_with_indicators.ta.sma(length=params.get("period", 20), append=True)
@@ -1977,11 +2032,9 @@ async def evaluate_custom_strategy(df: pd.DataFrame, strategy_conditions: List[D
             elif indicator_name == "RSI":
                 df_with_indicators.ta.rsi(length=params.get("period", 14), append=True)
             elif indicator_name == "MACD":
-                # pandas-ta appends multiple columns for MACD (e.g., MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9)
                 df_with_indicators.ta.macd(fast=params.get("fast_period", 12), slow=params.get("slow_period", 26),
                                            signal=params.get("signal_period", 9), append=True)
             elif indicator_name == "Bollinger Bands":
-                # Appends BBL_20_2.0, BBM_20_2.0, BBU_20_2.0, etc.
                 df_with_indicators.ta.bbands(length=params.get("period", 20), std=params.get("std_dev", 2), append=True)
         except Exception as e:
             logger.error(f"Error calculating indicator '{indicator_name}' with pandas-ta: {e}")
@@ -1994,7 +2047,6 @@ async def evaluate_custom_strategy(df: pd.DataFrame, strategy_conditions: List[D
         for cond in strategy_conditions:
             try:
                 # --- Get Column Names from pandas-ta conventions ---
-                # This helper function constructs the column name pandas-ta creates
                 def get_column_name(indicator, params):
                     if indicator == 'SMA': return f"SMA_{params.get('period', 20)}"
                     if indicator == 'EMA': return f"EMA_{params.get('period', 14)}"
@@ -2003,7 +2055,6 @@ async def evaluate_custom_strategy(df: pd.DataFrame, strategy_conditions: List[D
                     if indicator == 'Bollinger Bands':
                         band = params.get('band', 'upper').upper()[0]  # BBU, BBM, BBL
                         return f"BB{band}_{params.get('period', 20)}_{params.get('std_dev', 2.0)}"
-                    # For Close, Open, High, Low, Volume, the column name is just the indicator name in lowercase
                     if indicator in ["Close Price", "Open Price", "High Price", "Low Price", "Volume"]:
                         return indicator.split(" ")[0].lower()
                     return None
@@ -2045,7 +2096,6 @@ async def evaluate_custom_strategy(df: pd.DataFrame, strategy_conditions: List[D
                     all_conditions_met = False
                     break
             except (KeyError, IndexError) as e:
-                # This can happen if a column name is wrong or data is missing
                 logger.error(f"Error accessing data for condition at index {i}: {cond}. Error: {e}")
                 all_conditions_met = False
                 break
@@ -2127,7 +2177,7 @@ async def get_historical_dataframe(instrument_token, timeframe, start_date, end_
     if not data.data:
         raise ValueError(f"No historical data for {instrument_token}")
 
-    df = pd.DataFrame([p.dict() for p in data.data])
+    df = pd.DataFrame([p.model_dump() for p in data.data])
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df.set_index('timestamp', inplace=True)
     df.sort_index(inplace=True)
@@ -2335,33 +2385,34 @@ if __name__ == "__main__":
             # Example parameters (replace with real values as needed)
             instrument_token = "SBIN"
             timeframe = "day"
-            strategy = {"strategy_id": "1fe9328e-f8cd-405c-9db2-68353fdcb2c3",
-                        "user_id": "4fbba468-6a86-4516-8236-2f8abcbfd2ef",
-                        "broker": "Zerodha",
-                        "name": "RSI",
-                        "description": "",
-                        "entry_conditions": [{"left_indicator": "RSI",
-                                              "left_params": {"period": 14},
-                                              "left_value": "",
-                                              "comparison": "<=",
-                                              "right_indicator": "Fixed Value",
-                                              "right_params": "",
-                                              "right_value": 30.0}],
-                        "exit_conditions": [{"left_indicator": "RSI",
-                                             "left_params": {"period": 14},
-                                             "left_value": "",
-                                             "comparison": ">=",
-                                             "right_indicator": "Fixed Value",
-                                             "right_params": "",
-                                             "right_value": 75.0}],
-                        "parameters": {"timeframe": "day",
-                                       "position_sizing": 100},
-                        "status": "inactive",
-                        "created_at": "2025-06-21T17:59:00.011814",
-                        "updated_at": "2025-06-21T18:02:08.444443"}
+            strategy = "RSI Oversold/Overbought"  # or a custom strategy JSON string
+            # strategy = {"strategy_id": "1fe9328e-f8cd-405c-9db2-68353fdcb2c3",
+            #             "user_id": "4fbba468-6a86-4516-8236-2f8abcbfd2ef",
+            #             "broker": "Zerodha",
+            #             "name": "RSI",
+            #             "description": "",
+            #             "entry_conditions": [{"left_indicator": "RSI",
+            #                                   "left_params": {"period": 14},
+            #                                   "left_value": "",
+            #                                   "comparison": "<=",
+            #                                   "right_indicator": "Fixed Value",
+            #                                   "right_params": "",
+            #                                   "right_value": 30.0}],
+            #             "exit_conditions": [{"left_indicator": "RSI",
+            #                                  "left_params": {"period": 14},
+            #                                  "left_value": "",
+            #                                  "comparison": ">=",
+            #                                  "right_indicator": "Fixed Value",
+            #                                  "right_params": "",
+            #                                  "right_value": 75.0}],
+            #             "parameters": {"timeframe": "day",
+            #                            "position_sizing": 100},
+            #             "status": "inactive",
+            #             "created_at": "2025-06-21T17:59:00.011814",
+            #             "updated_at": "2025-06-21T18:02:08.444443"}
             params = {
                 "initial_investment": 100000,
-                "stop_loss_percent": 2,
+                "stop_loss_percent": 1,
                 "trailing_stop_loss_percent": 0,
                 "position_sizing_percent": 100,
                 "enable_optimization": False,
@@ -2371,7 +2422,7 @@ if __name__ == "__main__":
             end_date = "2025-06-20"
 
             result = await backtest_strategy(
-                instrument_token, timeframe, json.dumps(strategy), params, start_date, end_date, db=get_db()
+                instrument_token, timeframe, json.dumps(strategy) if not isinstance(strategy, str) else strategy, params, start_date, end_date, db=get_db()
             )
             print(result)
 

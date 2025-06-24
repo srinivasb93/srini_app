@@ -1,5 +1,4 @@
 import pandas as pd
-from common_utils.indicators import *
 
 
 def check_macd_crossover(macd_line, signal_line):
@@ -69,39 +68,60 @@ def backtest_strategy(df, strategy_func, **kwargs):
 
 
 def macd_strategy(df, fast_period=12, slow_period=26, signal_period=9):
-    macd_line, signal_line, _ = calculate_macd(df, fast_period, slow_period, signal_period)
+    # Construct column names based on pandas-ta naming conventions
+    macd_col = f'MACD_{fast_period}_{slow_period}_{signal_period}'
+    signal_col = f'MACDs_{fast_period}_{slow_period}_{signal_period}'
+
+    # Ensure required columns from pre-calculation exist
+    if macd_col not in df.columns or signal_col not in df.columns:
+        raise ValueError(f"Required MACD columns not found in DataFrame: {macd_col}, {signal_col}")
+
+    # Use existing indicator columns
+    macd_line = df[macd_col]
+    signal_line = df[signal_col]
+
+    # Generate signals using efficient vectorized operations
     signals = pd.Series(index=df.index, dtype='object')
-    signals[:] = None
-    for i in range(1, len(df)):
-        if i > signal_period:
-            if macd_line.iloc[i - 1] < signal_line.iloc[i - 1] and macd_line.iloc[i] > signal_line.iloc[i]:
-                signals.iloc[i] = "BUY"
-            elif macd_line.iloc[i - 1] > signal_line.iloc[i - 1] and macd_line.iloc[i] < signal_line.iloc[i]:
-                signals.iloc[i] = "SELL"
+    buy_signals = (macd_line.shift(1) < signal_line.shift(1)) & (macd_line > signal_line)
+    sell_signals = (macd_line.shift(1) > signal_line.shift(1)) & (macd_line < signal_line)
+
+    signals[buy_signals] = "BUY"
+    signals[sell_signals] = "SELL"
+
     return signals
 
 
 def bollinger_band_strategy(df, period=20, num_std=2):
-    _, upper_band, lower_band = calculate_bollinger_bands(df, period, num_std)
+    # Construct column names based on pandas-ta naming conventions
+    upper_band_col = f'BBU_{period}_{float(num_std)}'
+    lower_band_col = f'BBL_{period}_{float(num_std)}'
+
+    # Ensure required columns exist
+    if upper_band_col not in df.columns or lower_band_col not in df.columns:
+        raise ValueError(f"Required Bollinger Bands columns not found: {upper_band_col}, {lower_band_col}")
+
+    # Generate signals using vectorized operations
     signals = pd.Series(index=df.index, dtype='object')
-    signals[:] = None
-    for i in range(1, len(df)):
-        if i > period:
-            if df['close'].iloc[i] < lower_band.iloc[i]:
-                signals.iloc[i] = "BUY"
-            elif df['close'].iloc[i] > upper_band.iloc[i]:
-                signals.iloc[i] = "SELL"
+    signals[df['close'] < df[lower_band_col]] = "BUY"
+    signals[df['close'] > df[upper_band_col]] = "SELL"
+
     return signals
 
 
 def rsi_strategy(df, period=14, overbought=70, oversold=30):
-    rsi = calculate_rsi(df, period)
+    # Construct column name based on pandas-ta naming conventions
+    rsi_col = f'RSI_{period}'
+    if rsi_col not in df.columns:
+        raise ValueError(f"Required RSI column not found: {rsi_col}")
+
+    rsi = df[rsi_col]
     signals = pd.Series(index=df.index, dtype='object')
-    signals[:] = None
-    for i in range(1, len(df)):
-        if i > period:
-            if rsi.iloc[i - 1] > overbought and rsi.iloc[i] <= overbought:
-                signals.iloc[i] = "SELL"
-            elif rsi.iloc[i - 1] < oversold and rsi.iloc[i] >= oversold:
-                signals.iloc[i] = "BUY"
+
+    # Generate signals for crossover events using vectorized operations
+    buy_signals = (rsi.shift(1) < oversold) & (rsi >= oversold)
+    sell_signals = (rsi.shift(1) > overbought) & (rsi <= overbought)
+
+    signals[buy_signals] = "BUY"
+    signals[sell_signals] = "SELL"
+
     return signals
