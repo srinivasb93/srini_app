@@ -1596,6 +1596,7 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
     custom strategies, and parameter optimization.
     """
     logger.info(f"Starting backtest for {instrument_token} from {start_date} to {end_date}")
+    logger.info(f"Strategy: {strategy}, Timeframe: {timeframe}, Params: {params}")
 
     try:
         # --- 1. Data Fetching ---
@@ -2030,7 +2031,7 @@ async def evaluate_custom_strategy(df: pd.DataFrame, strategy_conditions: List[D
                     df_with_indicators[right_col].iloc[i - 1]
 
                     if pd.isna(left_prev) or pd.isna(right_prev):
-                        all_conditions_met = False;
+                        all_conditions_met = False
                         break
 
                     if comparison == "Crosses Above" and left_prev <= right_prev and left_current > right_current:
@@ -2041,12 +2042,12 @@ async def evaluate_custom_strategy(df: pd.DataFrame, strategy_conditions: List[D
                     condition_result = evaluate_condition(left_current, right_current, comparison)
 
                 if not condition_result:
-                    all_conditions_met = False;
+                    all_conditions_met = False
                     break
             except (KeyError, IndexError) as e:
                 # This can happen if a column name is wrong or data is missing
                 logger.error(f"Error accessing data for condition at index {i}: {cond}. Error: {e}")
-                all_conditions_met = False;
+                all_conditions_met = False
                 break
 
         if all_conditions_met:
@@ -2334,19 +2335,43 @@ if __name__ == "__main__":
             # Example parameters (replace with real values as needed)
             instrument_token = "SBIN"
             timeframe = "day"
-            strategy = "RSI Oversold/Overbought"
+            strategy = {"strategy_id": "1fe9328e-f8cd-405c-9db2-68353fdcb2c3",
+                        "user_id": "4fbba468-6a86-4516-8236-2f8abcbfd2ef",
+                        "broker": "Zerodha",
+                        "name": "RSI",
+                        "description": "",
+                        "entry_conditions": [{"left_indicator": "RSI",
+                                              "left_params": {"period": 14},
+                                              "left_value": "",
+                                              "comparison": "<=",
+                                              "right_indicator": "Fixed Value",
+                                              "right_params": "",
+                                              "right_value": 30.0}],
+                        "exit_conditions": [{"left_indicator": "RSI",
+                                             "left_params": {"period": 14},
+                                             "left_value": "",
+                                             "comparison": ">=",
+                                             "right_indicator": "Fixed Value",
+                                             "right_params": "",
+                                             "right_value": 75.0}],
+                        "parameters": {"timeframe": "day",
+                                       "position_sizing": 100},
+                        "status": "inactive",
+                        "created_at": "2025-06-21T17:59:00.011814",
+                        "updated_at": "2025-06-21T18:02:08.444443"}
             params = {
                 "initial_investment": 100000,
                 "stop_loss_percent": 2,
                 "trailing_stop_loss_percent": 0,
                 "position_sizing_percent": 100,
-                "enable_optimization": False
+                "enable_optimization": False,
+                'partial_exits': []
             }
-            start_date = "2024-06-20"
+            start_date = "2024-01-20"
             end_date = "2025-06-20"
 
             result = await backtest_strategy(
-                instrument_token, timeframe, strategy, params, start_date, end_date, db=get_db()
+                instrument_token, timeframe, json.dumps(strategy), params, start_date, end_date, db=get_db()
             )
             print(result)
 
