@@ -1726,8 +1726,25 @@ async def run_parameter_optimization(df, strategy_func, params, ws_callback, ind
     """
     optimization_iterations = int(params.get("optimization_iterations", 10))
     stop_loss_range = params.get("stop_loss_range", [1.0, 5.0])
-    param_combinations = [{'stop_loss_percent': round(np.random.uniform(stop_loss_range[0], stop_loss_range[1]), 2)} for
-                          _ in range(optimization_iterations)]
+    take_profit_range = params.get("take_profit_range", [2.0, 6.0])
+    trailing_stop_range = params.get("trailing_stop_range", [1.0, 3.0])
+
+    param_combinations = []
+    for _ in range(optimization_iterations):
+        combo = {
+            'stop_loss_percent': round(np.random.uniform(stop_loss_range[0], stop_loss_range[1]), 2)
+        }
+
+        # Add take profit optimization if specified
+        if params.get("take_profit_range") and take_profit_range[1] > take_profit_range[0]:
+            combo['take_profit_percent'] = round(np.random.uniform(take_profit_range[0], take_profit_range[1]), 2)
+
+        # Add trailing stop optimization if specified
+        if params.get("trailing_stop_range") and trailing_stop_range[1] > trailing_stop_range[0]:
+            combo['trailing_stop_loss_percent'] = round(
+                np.random.uniform(trailing_stop_range[0], trailing_stop_range[1]), 2)
+
+        param_combinations.append(combo)
 
     all_runs = []
     best_result, best_metric = None, float('-inf')
@@ -1742,15 +1759,17 @@ async def run_parameter_optimization(df, strategy_func, params, ws_callback, ind
         # Store results for comparison
         run_summary = {
             "parameters": combo,
-            "TotalPNL": iter_result.get("TotalPNL"),
-            "WinRate": iter_result.get("WinRate"),
-            "TotalTrades": iter_result.get("TotalTrades")
+            "TotalPNL": iter_result.get("TotalProfit", 0),
+            "WinRate": iter_result.get("WinRate", 0),
+            "TotalTrades": iter_result.get("TotalTrades", 0),
+            "SharpeRatio": iter_result.get("SharpeRatio", 0)
         }
         all_runs.append(run_summary)
 
         # Update best result based on Total PNL
-        if iter_result.get('TotalPNL', float('-inf')) > best_metric:
-            best_metric = iter_result['TotalPNL']
+        current_pnl = iter_result.get('TotalProfit', float('-inf'))
+        if current_pnl > best_metric:
+            best_metric = current_pnl
             best_result = iter_result
 
         if ws_callback:
@@ -1798,8 +1817,8 @@ async def run_parameter_optimization_for_custom_strategy(df, strategy_data, para
     """
     optimization_iterations = int(params.get("optimization_iterations", 10))
     stop_loss_range = params.get("stop_loss_range", [1.0, 5.0])
-    take_profit_range = params.get("take_profit_range", [0.0, 0.0])
-    trailing_stop_range = params.get("trailing_stop_range", [0.0, 0.0])
+    take_profit_range = params.get("take_profit_range", [2.0, 6.0])
+    trailing_stop_range = params.get("trailing_stop_range", [1.0, 3.0])
 
     # Generate parameter combinations for multiple variables
     param_combinations = []
@@ -1807,12 +1826,15 @@ async def run_parameter_optimization_for_custom_strategy(df, strategy_data, para
         combo = {
             'stop_loss_percent': round(np.random.uniform(stop_loss_range[0], stop_loss_range[1]), 2)
         }
-        if 'trailing_stop_loss_percent' in params:
-            combo['trailing_stop_loss_percent'] = round(np.random.uniform(trailing_stop_range[0],
-                                                                          trailing_stop_range[1]), 2)
-        # Add take profit if specified
-        if 'take_profit_range' in params:
+
+        # Add take profit optimization if specified
+        if params.get("take_profit_range") and take_profit_range[1] > take_profit_range[0]:
             combo['take_profit_percent'] = round(np.random.uniform(take_profit_range[0], take_profit_range[1]), 2)
+
+        # Add trailing stop optimization if specified
+        if params.get("trailing_stop_range") and trailing_stop_range[1] > trailing_stop_range[0]:
+            combo['trailing_stop_loss_percent'] = round(
+                np.random.uniform(trailing_stop_range[0], trailing_stop_range[1]), 2)
 
         param_combinations.append(combo)
 
@@ -1846,16 +1868,16 @@ async def run_parameter_optimization_for_custom_strategy(df, strategy_data, para
         # Store results for comparison
         run_summary = {
             "parameters": combo,
-            "TotalPNL": iter_result.get("TotalPNL", 0),  # Fix: Use TotalProfit instead of TotalPNL
+            "TotalPNL": iter_result.get("TotalProfit", 0),
             "WinRate": iter_result.get("WinRate", 0),
             "TotalTrades": iter_result.get("TotalTrades", 0),
-            "SharpeRatio": iter_result.get("SharpeRatio", 0),  # Add Sharpe ratio for better comparison
+            "SharpeRatio": iter_result.get("SharpeRatio", 0),
             "MaxDrawdown": iter_result.get("MaxDrawdown", 0)
         }
         all_runs.append(run_summary)
 
         # Update best result based on Total PNL
-        current_pnl = iter_result.get('TotalPNL', float('-inf'))
+        current_pnl = iter_result.get('TotalProfit', float('-inf'))
         if current_pnl > best_metric:
             best_metric = current_pnl
             best_result = iter_result
@@ -1876,16 +1898,13 @@ async def backtest_strategy_generic(
         indicator_details: Optional[List[Dict]] = None
 ) -> Dict:
     """
-    This is the final, flexible backtesting engine.
-
     It preserves all original logic for complex exits (stop-loss, trailing stops,
     and partial take-profits) while adding the ability to capture and log the specific
     indicator values that trigger a trade.
     """
     df_copy = df.copy()
 
-    # The 'signal' column is now expected to be pre-calculated and present in the input DataFrame 'df'.
-    # For predefined strategies, a supplemental call to generate signals might be needed if not done prior.
+    # Generate signals if not already present
     if 'signal' not in df_copy.columns and strategy_func is not None:
         # This ensures backward compatibility if a df is passed without a signal column.
         # It filters params to avoid the original TypeError.
@@ -1900,6 +1919,7 @@ async def backtest_strategy_generic(
     entry_price = 0.0
     stop_loss_price = 0.0
     trailing_stop_price = 0.0
+    take_profit_price = 0.0
     active_partial_exits = []
     tradebook = []
 
@@ -1908,6 +1928,8 @@ async def backtest_strategy_generic(
     stop_loss_percent = params.get("stop_loss_percent", 0)
     trailing_stop_loss_percent = params.get("trailing_stop_loss_percent", 0)
     position_sizing_percent = params.get("position_sizing_percent", 0)
+    take_profit_percent = params.get("take_profit_percent", 0)
+
     # Ensure partial exits are sorted by target percentage
     partial_exits = sorted(params.get("partial_exits", []), key=lambda x: x.get('target', 0))
 
@@ -1918,7 +1940,6 @@ async def backtest_strategy_generic(
     def get_indicators_for_trade(row_tuple):
         if not indicator_details:
             return {}
-        # Use a dictionary comprehension to read values from the row's named tuple
         indicators_data = {}
         for detail in indicator_details:
             col_name = detail['column_name']
@@ -1948,12 +1969,17 @@ async def backtest_strategy_generic(
                 full_exit_reason = "Stop Loss"
                 exit_price = stop_loss_price
 
-            # Priority 2: Trailing Stop-Loss
+            # Priority 2: Take profit (NEW - Higher priority than trailing stop)
+            elif take_profit_price > 0 and current_price >= take_profit_price:
+                full_exit_reason = "Take Profit"
+                exit_price = take_profit_price
+
+            # Priority 3: Trailing Stop-Loss
             elif trailing_stop_price > 0 and current_price <= trailing_stop_price:
                 full_exit_reason = "Trailing Stop"
                 exit_price = trailing_stop_price
 
-            # Priority 3: Strategy based SELL signal
+            # Priority 4: Strategy based SELL signal
             elif row.signal == "SELL":
                 full_exit_reason = "Strategy Signal"
                 indicators_for_exit = get_indicators_for_trade(row)  # Capture indicators on signal exit
@@ -1963,13 +1989,18 @@ async def backtest_strategy_generic(
                 profit = (exit_price - entry_price) * quantity_in_position
                 portfolio_value += profit
                 tradebook.append({
-                    "Date": row.Index.isoformat(), "Action": "SELL", "Price": exit_price,
-                    "Quantity": quantity_in_position, "Profit": profit, "PortfolioValue": portfolio_value,
-                    "Reason": full_exit_reason, "Indicators": indicators_for_exit
+                    "Date": row.Index.isoformat(),
+                    "Action": "SELL",
+                    "Price": exit_price,
+                    "Quantity": quantity_in_position,
+                    "Profit": profit,
+                    "PortfolioValue": portfolio_value,
+                    "Reason": full_exit_reason,
+                    "Indicators": indicators_for_exit
                 })
                 quantity_in_position = 0.0  # Exit full position
             else:
-                # Priority 4: Partial take-profits (only if no full exit occurred)
+                # Priority 5: Partial take-profits (only if no full exit occurred)
                 exited_partials = []
                 for pe in active_partial_exits:
                     if current_price >= pe['price_level']:
@@ -1989,7 +2020,8 @@ async def backtest_strategy_generic(
                 active_partial_exits = [pe for pe in active_partial_exits if pe not in exited_partials]
 
                 # Clean up floating point dust
-                if quantity_in_position <= 1e-6: quantity_in_position = 0.0
+                if quantity_in_position <= 1e-6:
+                    quantity_in_position = 0.0
 
             # Update trailing stop if still in position
             if quantity_in_position > 0 and trailing_stop_loss_percent > 0:
@@ -1998,7 +2030,7 @@ async def backtest_strategy_generic(
 
         # Reset all position-specific state if the position is fully closed
         if quantity_in_position == 0:
-            entry_price = stop_loss_price = trailing_stop_price = 0.0
+            entry_price = stop_loss_price = trailing_stop_price = take_profit_price = 0.0
             active_partial_exits.clear()
 
         # --- CHECK ENTRY CONDITION ---
@@ -2015,6 +2047,12 @@ async def backtest_strategy_generic(
             # Set the stop-loss and trailing-stop for the new position
             if stop_loss_percent > 0:
                 stop_loss_price = entry_price * (1 - stop_loss_percent / 100)
+
+            # Set take profit
+            if take_profit_percent > 0:
+                take_profit_price = entry_price * (1 + take_profit_percent / 100)
+
+            # Set trailing stop
             if trailing_stop_loss_percent > 0:
                 trailing_stop_price = entry_price * (1 - trailing_stop_loss_percent / 100)
 
@@ -2030,9 +2068,14 @@ async def backtest_strategy_generic(
                         })
 
             tradebook.append({
-                "Date": row.Index.isoformat(), "Action": "BUY", "Price": entry_price,
-                "Quantity": initial_quantity, "Profit": 0, "PortfolioValue": portfolio_value,
-                "Reason": "Strategy Signal", "Indicators": get_indicators_for_trade(row)
+                "Date": row.Index.isoformat(),
+                "Action": "BUY",
+                "Price": entry_price,
+                "Quantity": initial_quantity,
+                "Profit": 0,
+                "PortfolioValue": portfolio_value,
+                "Reason": "Strategy Signal",
+                "Indicators": get_indicators_for_trade(row)
             })
 
     # --- Post-processing: Close any open position at the end ---
@@ -2046,30 +2089,25 @@ async def backtest_strategy_generic(
             "Reason": "End of Backtest", "Indicators": {}
         })
 
-    # --- Calculate Final Metrics ---
-    buys = [t for t in tradebook if t['Action'] == 'BUY']
-    total_trades = len(buys)
-    pnl_per_trade_cycle = []
-    if buys:
-        buy_indices = [i for i, t in enumerate(tradebook) if t['Action'] == 'BUY']
-        for i, buy_index in enumerate(buy_indices):
-            start_index = buy_index
-            # The trade cycle ends at the next BUY signal or at the end of the book
-            end_index = buy_indices[i + 1] if i + 1 < len(buy_indices) else len(tradebook)
-            trade_cycle = tradebook[start_index:end_index]
-            # Sum up PnL from all SELLs within that cycle
-            total_pnl_for_cycle = sum(t['Profit'] for t in trade_cycle if t['Action'] == 'SELL')
-            pnl_per_trade_cycle.append(total_pnl_for_cycle)
+    # Calculate final metrics
+    final_portfolio_value = portfolio_value
+    total_profit = final_portfolio_value - initial_investment
 
-    winning_trades = len([pnl for pnl in pnl_per_trade_cycle if pnl > 0])
+    # Calculate trades and win rate
+    trades_df = pd.DataFrame(tradebook)
+    completed_trades = trades_df[trades_df['Action'] == 'SELL']
+    total_trades = len(completed_trades)
+    winning_trades = len(completed_trades[completed_trades['Profit'] > 0])
     win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
-    total_pnl = sum(pnl_per_trade_cycle)
 
     return {
+        "InitialInvestment": initial_investment,
+        "FinalPortfolioValue": final_portfolio_value,
+        "TotalProfit": total_profit,
+        "WinRate": win_rate,
         "TotalTrades": total_trades,
-        "WinRate": float(win_rate),
-        "TotalPNL": float(total_pnl),
-        "FinalPortfolioValue": float(portfolio_value),
+        "WinningTrades": winning_trades,
+        "LosingTrades": total_trades - winning_trades,
         "Tradebook": tradebook
     }
 

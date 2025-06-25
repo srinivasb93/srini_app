@@ -580,44 +580,62 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
 
                 with ui.expansion("Risk Management", icon="shield", value=True):
                     stop_loss_percent = ui.number("Stop Loss (%)", value=2.0, format="%.1f", min=0).props("dense")
+                    take_profit_percent = ui.number("Take Profit (%)", value=5.0, format="%.1f", min=0).props("dense")
                     trailing_stop_loss_percent = ui.number("Trailing Stop (%)", value=1.5, format="%.1f", min=0).props("dense")
                     position_sizing_percent = ui.number("Position Sizing (% of Capital)", value=10.0, format="%.1f").props("dense")
                     ui.separator().classes("my-2")
-                    ui.label("Partial Exits").classes("text-subtitle2")
-                    partial_exits_container = ui.column().classes("w-full gap-1")
 
-                    def add_partial_exit_row():
-                        row_id = str(uuid4())
-                        with partial_exits_container:
-                            with ui.row().classes("w-full items-center gap-2") as pe_row:
-                                target = ui.number("Target (%)", value=5.0, min=0.1).props("dense").classes("flex-grow")
-                                qty_percent = ui.number("Qty (%)", value=50.0, min=1, max=100).props("dense").classes("flex-grow")
-                                ui.button(icon="delete", on_click=lambda: remove_partial_exit(row_id)).props("flat round dense color=negative text-xs")
-                        partial_exit_rows.append({"id": row_id, "row": pe_row, "target": target, "qty_percent": qty_percent})
+                    ui.label("Advanced Exit Strategies").classes("text-subtitle2 font-bold")
+                    # Partial Exits section remains the same
+                    with ui.expansion("Partial Exits", icon="trending_down"):
+                        partial_exits_container = ui.column().classes("w-full")
 
-                    def remove_partial_exit(row_id):
-                        row_to_remove = next((r for r in partial_exit_rows if r["id"] == row_id), None)
-                        if row_to_remove:
-                            partial_exits_container.remove(row_to_remove["row"])
-                            partial_exit_rows.remove(row_to_remove)
+                        def add_partial_exit():
+                            with partial_exits_container:
+                                with ui.row().classes("items-center gap-2"):
+                                    target = ui.number("Target %", value=5.0, format="%.1f").props("dense").classes(
+                                        "flex-1")
+                                    qty_percent = ui.number("Qty %", value=50.0, format="%.1f").props("dense").classes(
+                                        "flex-1")
+                                    remove_btn = ui.button(icon="delete",
+                                                           on_click=lambda: remove_partial_exit(row_data)).props(
+                                        "flat color=negative dense")
 
-                    ui.button("Add Partial Exit", icon="add", on_click=add_partial_exit_row).props("outline size=sm").classes("w-full mt-1")
+                                row_data = {"target": target, "qty_percent": qty_percent, "remove_btn": remove_btn}
+                                partial_exit_rows.append(row_data)
 
-                with ui.expansion("Optimization Settings", icon="settings"):
-                    enable_optimization = ui.switch("Enable Parameter Optimization")
-                    with ui.column().classes("w-full").bind_visibility_from(enable_optimization, 'value'):
-                        optimization_iterations = ui.number("Iterations", value=20, min=5, max=200).props("dense")
-                        with ui.row():
-                            stop_loss_min = ui.number("SL Min (%)", value=1.0, min=0.1, format="%.1f").props("dense")
-                            stop_loss_max = ui.number("SL Max (%)", value=5.0, min=0.1, format="%.1f").props("dense")
-                        with ui.row():
-                            trail_stop_loss_min = ui.number("Trail SL Min (%)", value=1.0, min=0.0, format="%.1f").props("dense")
-                            trail_stop_loss_max = ui.number("Trail SL Max (%)", value=5.0, min=0.0, format="%.1f").props("dense")
-                            use_trail = ui.switch("Use Trailing SL")
-                        with ui.row():
-                            target_min = ui.number("Target Min (%)", value=1.0, min=0.0, format="%.1f").props("dense")
-                            target_max = ui.number("Target Max (%)", value=10.0, min=0.0, format="%.1f").props("dense")
-                            use_target = ui.switch("Use Target Profit")
+                        def remove_partial_exit(row_data):
+                            if row_data in partial_exit_rows:
+                                partial_exit_rows.remove(row_data)
+                                row_data["target"].delete()
+                                row_data["qty_percent"].delete()
+                                row_data["remove_btn"].delete()
+
+                        ui.button("Add Partial Exit", icon="add", on_click=add_partial_exit).props("outline")
+
+                with ui.expansion("Parameter Optimization", icon="auto_awesome"):
+                    enable_optimization = ui.switch("Enable Optimization", value=False)
+                    optimization_iterations = ui.number("Iterations", value=10, format="%.0f").props("dense")
+
+                    ui.label("Stop Loss Range").classes("text-subtitle2")
+                    with ui.row():
+                        stop_loss_min = ui.number("SL Min (%)", value=1.0, min=0.1, format="%.1f").props("dense")
+                        stop_loss_max = ui.number("SL Max (%)", value=5.0, min=0.1, format="%.1f").props("dense")
+
+                    # NEW: Take Profit Optimization
+                    ui.label("Take Profit Range").classes("text-subtitle2")
+                    with ui.row():
+                        take_profit_min = ui.number("TP Min (%)", value=2.0, min=0.0, format="%.1f").props("dense")
+                        take_profit_max = ui.number("TP Max (%)", value=8.0, min=0.0, format="%.1f").props("dense")
+                        use_take_profit_opt = ui.switch("Optimize TP")
+
+                    ui.label("Trailing Stop Range").classes("text-subtitle2")
+                    with ui.row():
+                        trail_stop_loss_min = ui.number("Trail SL Min (%)", value=1.0, min=0.0, format="%.1f").props(
+                            "dense")
+                        trail_stop_loss_max = ui.number("Trail SL Max (%)", value=5.0, min=0.0, format="%.1f").props(
+                            "dense")
+                        use_trail = ui.switch("Optimize Trail SL")
 
                 run_button = ui.button("Run Backtest", on_click=lambda: run_backtest()).props("color=primary icon=play_arrow").classes("w-full mt-4")
 
@@ -671,6 +689,7 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
             params = {
                 "initial_investment": float(initial_capital.value),
                 "stop_loss_percent": float(stop_loss_percent.value),
+                "take_profit_percent": float(take_profit_percent.value),
                 "trailing_stop_loss_percent": float(trailing_stop_loss_percent.value),
                 "position_sizing_percent": float(position_sizing_percent.value),
                 "enable_optimization": enable_optimization.value,
@@ -681,13 +700,17 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
                 if stop_loss_min.value >= stop_loss_max.value:
                     ui.notify("Stop Loss Min must be less than Max.", type="negative")
                     return
+
                 params["optimization_iterations"] = int(optimization_iterations.value)
                 params["stop_loss_range"] = [float(stop_loss_min.value), float(stop_loss_max.value)]
+
+                # Take profit optimization
+                if use_take_profit_opt.value and take_profit_max.value >= take_profit_min.value > 0:
+                    params["take_profit_range"] = [float(take_profit_min.value), float(take_profit_max.value)]
+
+                # Trailing stop optimization
                 if use_trail.value and trail_stop_loss_max.value >= trail_stop_loss_min.value > 0:
-                    params["trailing_stop_range"] = [float(trail_stop_loss_min.value),
-                                                          float(trail_stop_loss_max.value)]
-                if target_max.value >= target_min.value > 0 and use_target.value:
-                    params["take_profit_range"] = [float(target_min.value), float(target_max.value)]
+                    params["trailing_stop_range"] = [float(trail_stop_loss_min.value), float(trail_stop_loss_max.value)]
 
             strategy_id = strategies_select.value
             strategy_value = strategy_id
@@ -699,13 +722,18 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
                 strategy_value = json.dumps(strategy_response)
 
             backtest_payload = {
-                "instrument_token": instrument_select.value, "timeframe": "day", "strategy": strategy_value,
-                "params": params, "start_date": start_date.value, "end_date": end_date.value
+                "instrument_token": instrument_select.value,
+                "timeframe": "day",
+                "strategy": strategy_value,
+                "params": params,
+                "start_date": start_date.value,
+                "end_date": end_date.value
             }
 
             response = await fetch_api("/algo-trading/backtest", method="POST", data=backtest_payload)
-            logger.debug(f"ALGO RESPONSE: {json.dumps(response)}")
-            for panel in [performance_panel, trades_panel, metrics_panel, optimization_panel]: panel.clear()
+            # logger.debug(f"ALGO RESPONSE: {json.dumps(response)}")
+            for panel in [performance_panel, trades_panel, metrics_panel, optimization_panel]:
+                panel.clear()
 
             if response and not response.get("error"):
                 if response.get("optimization_enabled"):
