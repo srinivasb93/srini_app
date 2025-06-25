@@ -1609,20 +1609,6 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
         # --- 3. Prepare Indicators and Details for Logging ---
         indicator_details = []
 
-        def get_column_name(indicator, params):
-            # Helper to get the column name that pandas-ta will create
-            if indicator == 'SMA': return f"SMA_{params.get('period', 20)}"
-            if indicator == 'EMA': return f"EMA_{params.get('period', 14)}"
-            if indicator == 'RSI': return f"RSI_{params.get('period', 14)}"
-            if indicator == 'MACD': return f"MACD_{params.get('fast_period', 12)}_{params.get('slow_period', 26)}_{params.get('signal_period', 9)}"
-            if indicator == 'Bollinger Bands':
-                # pandas-ta creates multiple columns for bbands, let's create a representative name.
-                # The actual column names used later will be specific (e.g., BBU_20_2.0).
-                # This is primarily for the display name.
-                band = params.get('band', 'upper').upper()[0]
-                return f"BBands_{params.get('period', 20)}_{params.get('std_dev', 2.0)}"
-            return indicator # Fallback for price columns
-
         # Calculate indicators for all strategy types upfront
         if is_custom:
             strategy_data = json.loads(strategy)
@@ -1706,11 +1692,34 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
             final_response = {"optimization_enabled": False, **results}
 
         # --- 5. Final Formatting ---
-        final_response.update({"StrategyName": strategy_name, "Instrument": instrument_token})
-        # Add indicator data for charting, ensuring it's JSON serializable
+        final_response.update({
+            "StrategyName": strategy_name,
+            "Instrument": instrument_token,
+            "StartDate": start_date,
+            "EndDate": end_date,
+            "Timeframe": timeframe
+        })
+
+        # CRITICAL FIX: Always include OHLC data regardless of optimization
         chart_data = df.reset_index()
         chart_data['timestamp'] = chart_data['timestamp'].dt.strftime('%Y-%m-%dT%H:%M:%S')
-        final_response["OHLC"] = chart_data[['timestamp', 'open', 'high', 'low', 'close', 'volume']].to_dict(orient='records')
+
+        ohlc_data = chart_data[['timestamp', 'open', 'high', 'low', 'close', 'volume']].to_dict(orient='records')
+
+        # Ensure OHLC data is in the response (single backtest or optimization)
+        if final_response.get("optimization_enabled"):
+            # For optimization, add OHLC to best_result
+            if "best_result" in final_response and final_response["best_result"]:
+                final_response["best_result"]["OHLC"] = ohlc_data
+                final_response["best_result"]["Instrument"] = instrument_token
+                final_response["best_result"]["StartDate"] = start_date
+                final_response["best_result"]["EndDate"] = end_date
+                final_response["best_result"]["Timeframe"] = timeframe
+        else:
+            # For single backtest, add OHLC to main response
+            final_response["OHLC"] = ohlc_data
+
+        final_response["ChartData"] = chart_data.to_dict(orient='records')
         final_response["IndicatorDetails"] = indicator_details
 
         return final_response
@@ -1762,7 +1771,8 @@ async def run_parameter_optimization(df, strategy_func, params, ws_callback, ind
             "TotalPNL": iter_result.get("TotalProfit", 0),
             "WinRate": iter_result.get("WinRate", 0),
             "TotalTrades": iter_result.get("TotalTrades", 0),
-            "SharpeRatio": iter_result.get("SharpeRatio", 0)
+            "SharpeRatio": iter_result.get("SharpeRatio", 0),
+            "MaxDrawdown": iter_result.get("MaxDrawdown", 0)
         }
         all_runs.append(run_summary)
 
@@ -1771,6 +1781,8 @@ async def run_parameter_optimization(df, strategy_func, params, ws_callback, ind
         if current_pnl > best_metric:
             best_metric = current_pnl
             best_result = iter_result
+            # Add chart data to best result
+            best_result["OptimizedParameters"] = combo
 
         if ws_callback:
             progress = 0.1 + ((i + 1) / optimization_iterations) * 0.9
@@ -1881,6 +1893,8 @@ async def run_parameter_optimization_for_custom_strategy(df, strategy_data, para
         if current_pnl > best_metric:
             best_metric = current_pnl
             best_result = iter_result
+            # Add chart data and optimized parameters to best result
+            best_result["OptimizedParameters"] = combo
 
         if ws_callback:
             progress = 0.1 + ((i + 1) / optimization_iterations) * 0.9

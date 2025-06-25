@@ -567,7 +567,7 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
         with splitter.before:
             with ui.card().classes("w-full h-full p-4 overflow-auto"):
                 ui.label("Backtest Configuration").classes("text-h6 mb-4")
-                # ... Rest of the configuration UI elements from the original file ...
+
                 with ui.expansion("Instrument & Strategy", icon="tune", value=True):
                     instrument_select = ui.select(options=sorted(list(instruments.keys())), label="Select Instrument", with_input=True).props("clearable dense").classes("w-full")
                     strategies_select = ui.select(options=strategy_options, label="Select Strategy").props("dense disabled").classes("w-full")
@@ -777,6 +777,22 @@ def display_backtest_results(performance_panel, trades_panel, metrics_panel, res
     with metrics_panel:
         with ui.card().classes("w-full p-4 mb-4"):
             ui.label(f"Strategy: {results.get('StrategyName', 'Unknown Strategy')}").classes("text-h6")
+            optimized_params = results.get("OptimizedParameters", {})
+            is_optimized = bool(optimized_params)
+
+            if is_optimized:
+                ui.separator().classes("my-3")
+                ui.label("🎯 Optimized Parameters").classes("text-subtitle1 font-bold text-primary")
+
+                with ui.grid(columns=4).classes("gap-2 mb-3"):
+                    for param_name, param_value in optimized_params.items():
+                        with ui.card().classes("p-2 bg-primary-50"):
+                            param_display_name = param_name.replace('_', ' ').replace('percent', '%').title()
+                            ui.label(param_display_name).classes("text-caption font-medium")
+                            if 'percent' in param_name:
+                                ui.label(f"{param_value:.2f}%").classes("text-subtitle2 font-bold text-primary")
+                            else:
+                                ui.label(f"{param_value}").classes("text-subtitle2 font-bold text-primary")
             ui.label(
                 f"Period: {datetime.strptime(results.get('StartDate', ''), '%Y-%m-%d').strftime('%d %b %Y') if results.get('StartDate') else 'N/A'} to {datetime.strptime(results.get('EndDate', ''), '%Y-%m-%d').strftime('%d %b %Y') if results.get('EndDate') else 'N/A'}").classes("text-subtitle2")
 
@@ -925,88 +941,185 @@ def display_backtest_results(performance_panel, trades_panel, metrics_panel, res
     with trades_panel:
         completed_trades = process_tradebook_for_display(tradebook)
         if completed_trades:
-            ui.aggrid({
-                "columnDefs": [
-                    {"headerName": "Entry Date", "field": "EntryDate",
-                     "valueFormatter": "value ? new Date(value).toLocaleString() : ''"},
-                    {"headerName": "Exit Date", "field": "ExitDate",
-                     "valueFormatter": "value ? new Date(value).toLocaleString() : ''"},
-                    {"headerName": "Entry Price", "field": "EntryPrice",
-                     "valueFormatter": "'₹' + params.value.toFixed(2)"},
-                    {"headerName": "Exit Price", "field": "ExitPrice",
-                     "valueFormatter": "params.value ? '₹' + params.value.toFixed(2) : 'N/A'"},
-                    {"headerName": "PNL", "field": "PNL", "valueFormatter": "'₹' + params.value.toFixed(2)",
-                     "cellStyle": "params.value >= 0 ? {'color': '#4caf50'} : {'color': '#f44336'}"},
-                    {"headerName": "Exit Reason", "field": "ExitReason"},
-                    {"headerName": "Holding Period", "field": "HoldingPeriod"},
-                ],
-                "rowData": completed_trades, "domLayout": 'autoHeight'
-            }).classes("w-full")
+            # SECTION 1: TRADES TABLE (Fixed Height Container)
+            with ui.card().classes("w-full mb-4"):
+                with ui.card_section().classes("p-4"):
+                    ui.label(f"📋 Trade History ({len(completed_trades)} trades)").classes("text-h6 font-bold mb-3")
 
-            # Display metrics *below* the table
-            with ui.card().classes("w-full mt-4 p-4"):
-                ui.label("Trade Statistics").classes("text-h6 mb-2")
-                with ui.grid(columns=4).classes("gap-4"):
-                    avg_holding_period = pd.to_timedelta(
-                        [t['HoldingPeriod'] for t in completed_trades if t['HoldingPeriod'] != "N/A"]).mean()
-                    display_metric("Avg. Holding Period", str(avg_holding_period).split('.')[0], format_spec="s",
-                                   help_text="Average time a position is held.")
-                    display_metric("Avg. Profit per Trade",
-                                   metrics['TotalProfit'] / metrics['TotalTrades'] if metrics['TotalTrades'] > 0 else 0,
-                                   help_text="Average PNL across all trades.")
-                    win_loss_ratio = abs(metrics["AverageWin"] / metrics["AverageLoss"]) if metrics[
-                                                                                                "AverageLoss"] != 0 else 0
-                    display_metric("Win/Loss Ratio", win_loss_ratio,
-                                   help_text="Average win amount divided by average loss amount.")
-                    expectancy = (metrics["WinRate"] / 100 * metrics["AverageWin"]) + (
-                                (1 - metrics["WinRate"] / 100) * abs(metrics["AverageLoss"]))
-                    display_metric("Expectancy (₹)", expectancy, help_text="Expected PNL per trade.")
+                    ui.aggrid({
+                        "columnDefs": [
+                            {"headerName": "Entry Date", "field": "EntryDate",
+                             "valueFormatter": "value ? new Date(value).toLocaleDateString() : 'N/A'",
+                             "width": 120},
+                            {"headerName": "Exit Date", "field": "ExitDate",
+                             "valueFormatter": "value ? new Date(value).toLocaleDateString() : 'N/A'",
+                             "width": 120},
+                            {"headerName": "Entry ₹", "field": "EntryPrice",
+                             "valueFormatter": "params.value.toFixed(2)", "width": 100},
+                            {"headerName": "Exit ₹", "field": "ExitPrice",
+                             "valueFormatter": "params.value ? params.value.toFixed(2) : 'N/A'", "width": 100},
+                            {"headerName": "P&L", "field": "PNL",
+                             "valueFormatter": "params.value.toFixed(2)",
+                             "cellStyle": "params.value >= 0 ? {'color': '#16a34a', 'font-weight': 'bold'} : {'color': '#dc2626', 'font-weight': 'bold'}",
+                             "width": 120},
+                            {"headerName": "Exit Reason", "field": "ExitReason", "width": 150},
+                            {"headerName": "Duration", "field": "HoldingPeriod", "width": 120}
+                        ],
+                        "rowData": completed_trades,
+                        "defaultColDef": {"sortable": True, "filter": True, "resizable": True},
+                        "domLayout": "normal",
+                        "pagination": True,
+                        "paginationPageSize": 15,
+                        "rowHeight": 40
+                    }).classes("w-full").style("height: 400px;")  # FIXED HEIGHT
 
-            with ui.scroll_area().classes('w-full h-full border p-2 rounded-lg'):
-                ui.label("Trade Execution Log").classes("text-h6 p-2")
-                for trade in tradebook:
-                    # Each trade event gets its own card
-                    with ui.card().classes('w-full mb-2 p-3'):
-                        # Display primary trade info in a row
-                        with ui.row().classes('w-full items-center justify-between text-sm'):
-                            action_color = "text-positive" if trade['Action'] == "BUY" else "text-negative"
-                            ui.label(f"{trade['Action']}").classes(f'text-md font-bold {action_color}')
-                            ui.label(f"On: {trade['Date']}")
-                            ui.label(f"Price: ₹{trade['Price']:.2f}")
-                            ui.label(f"Reason: {trade['Reason']}")
-                            ui.label(f"PnL: ₹{trade['Profit']:.2f}").classes('font-mono')
+            # SECTION 2: TRADE STATISTICS (Separate Card)
+            with ui.card().classes("w-full mb-4"):
+                with ui.card_section().classes("p-4"):
+                    ui.label("📊 Trade Statistics").classes("text-h6 font-bold mb-3")
 
-                        # Check for and display indicators in an expandable section
-                        indicators = trade.get("Indicators")
-                        if indicators and isinstance(indicators, dict) and any(indicators.values()):
-                            with ui.expansion('View Indicators', icon='insights').classes('w-full text-xs mt-2'):
-                                with ui.grid(columns=3).classes('w-full gap-2 p-2'):
-                                    for key, value in indicators.items():
-                                        with ui.card().classes('items-center p-1 bg-blue-grey-1 dark:bg-blue-grey-8'):
-                                            ui.label(key).classes('text-xs text-gray-500')
-                                            ui.label(f"{value}").classes('font-bold')
+                    with ui.grid(columns=4).classes("gap-4"):
+                        def create_stat_card(title, value, color="blue"):
+                            with ui.card().classes(f"p-3 bg-{color}-50 border border-{color}-200"):
+                                ui.label(title).classes("text-sm font-medium text-gray-700")
+                                ui.label(str(value)).classes(f"text-xl font-bold text-{color}-700")
+
+                        # Calculate statistics
+                        avg_profit = metrics['TotalProfit'] / metrics['TotalTrades'] if metrics[
+                                                                                            'TotalTrades'] > 0 else 0
+                        win_loss_ratio = abs(metrics["AverageWin"] / metrics["AverageLoss"]) if metrics[
+                                                                                                    "AverageLoss"] != 0 else 0
+
+                        create_stat_card("Avg Profit/Trade", f"₹{avg_profit:.2f}", "green" if avg_profit > 0 else "red")
+                        create_stat_card("Win/Loss Ratio", f"{win_loss_ratio:.2f}", "purple")
+                        create_stat_card("Largest Win", f"₹{metrics['LargestWin']:.2f}", "green")
+                        create_stat_card("Largest Loss", f"₹{abs(metrics['LargestLoss']):.2f}", "red")
+
+            # SECTION 3: TRADE EXECUTION LOG (Separate Scrollable Container)
+            with ui.card().classes("w-full"):
+                with ui.card_section().classes("p-4"):
+                    ui.label("📜 Trade Execution Log").classes("text-h6 font-bold mb-3")
+
+                    with ui.scroll_area().classes('w-full border rounded-lg p-2 bg-gray-50').style("height: 300px;"):
+                        for i, trade in enumerate(tradebook):
+                            with ui.card().classes('w-full mb-2 p-3 bg-white border-l-4' +
+                                                   (' border-green-500' if trade[
+                                                                               'Action'] == 'BUY' else ' border-red-500')):
+                                with ui.row().classes('w-full items-center justify-between'):
+                                    action_color = "green" if trade['Action'] == "BUY" else "red"
+                                    ui.chip(f"{trade['Action']}", color=action_color).props("outline dense")
+                                    ui.label(f"#{i + 1}").classes("text-sm text-gray-500")
+
+                                with ui.row().classes('w-full items-center justify-between text-sm mt-2'):
+                                    ui.label(f"Price: ₹{trade['Price']:.2f}").classes("font-mono")
+                                    ui.label(f"Qty: {trade['Quantity']:.0f}").classes("font-mono")
+                                    ui.label(f"Reason: {trade['Reason']}").classes("text-blue-600")
+                                    pnl_color = "text-green-600" if trade['Profit'] >= 0 else "text-red-600"
+                                    ui.label(f"PnL: ₹{trade['Profit']:.2f}").classes(f'font-mono font-bold {pnl_color}')
         else:
             ui.label("No completed trades in this backtest.").classes("text-warning")
 
 
 def display_optimization_runs(container, all_runs):
+    """Enhanced optimization results display showing ALL optimization parameters."""
     with container:
         if not all_runs:
             ui.label("No optimization data available.").classes("absolute-center text-gray-500")
             return
 
-        ui.label("Optimization Run Summary").classes("text-h6 mb-2")
-        rowData = [{"sl_percent": r['parameters'].get('stop_loss_percent', 0),
-                    "pnl": r.get('TotalPNL', 0), "win_rate": r.get('WinRate', 0),
-                    "trades": r.get('TotalTrades', 0)} for r in all_runs]
+        ui.label("Parameter Optimization Results").classes("text-h6 mb-4")
+
+        # Analyze which parameters were optimized
+        sample_params = all_runs[0].get('parameters', {}) if all_runs else {}
+        optimized_params = list(sample_params.keys())
+
+        ui.label(f"Optimized Parameters: {', '.join(optimized_params)}").classes("text-subtitle2 mb-2")
+
+        # Enhanced row data to include ALL optimized parameters
+        rowData = []
+        for i, r in enumerate(all_runs):
+            params = r.get('parameters', {})
+            row = {
+                "run_number": i + 1,
+                "sl_percent": params.get('stop_loss_percent', 0),
+                "tp_percent": params.get('take_profit_percent', 0),
+                "trail_percent": params.get('trailing_stop_loss_percent', 0),
+                "pnl": r.get('TotalPNL', 0),
+                "win_rate": r.get('WinRate', 0),
+                "trades": r.get('TotalTrades', 0),
+                "sharpe": r.get('SharpeRatio', 0),
+                "max_drawdown": r.get('MaxDrawdown', 0)
+            }
+            rowData.append(row)
+
+        # Dynamic column definitions based on optimized parameters
+        columnDefs = [
+            {"headerName": "Run #", "field": "run_number", "width": 80, "pinned": "left"}
+        ]
+
+        # Add parameter columns based on what was actually optimized
+        if any(r.get('sl_percent', 0) > 0 for r in rowData):
+            columnDefs.append({
+                "headerName": "Stop Loss (%)",
+                "field": "sl_percent",
+                "valueFormatter": "params.value.toFixed(2)",
+                "width": 120,
+                "cellStyle": "{'background-color': '#ffebee'}"
+            })
+
+        if any(r.get('tp_percent', 0) > 0 for r in rowData):
+            columnDefs.append({
+                "headerName": "Take Profit (%)",
+                "field": "tp_percent",
+                "valueFormatter": "params.value.toFixed(2)",
+                "width": 130,
+                "cellStyle": "{'background-color': '#e8f5e8'}"
+            })
+
+        if any(r.get('trail_percent', 0) > 0 for r in rowData):
+            columnDefs.append({
+                "headerName": "Trail Stop (%)",
+                "field": "trail_percent",
+                "valueFormatter": "params.value.toFixed(2)",
+                "width": 120,
+                "cellStyle": "{'background-color': '#fff3e0'}"
+            })
+
+        # Performance columns
+        columnDefs.extend([
+            {
+                "headerName": "Total PNL (₹)",
+                "field": "pnl",
+                "valueFormatter": "params.value.toFixed(2)",
+                "sort": "desc",
+                "cellStyle": "params.value > 0 ? {'color': '#4caf50', 'font-weight': 'bold'} : {'color': '#f44336', 'font-weight': 'bold'}",
+                "width": 130
+            },
+            {
+                "headerName": "Win Rate (%)",
+                "field": "win_rate",
+                "valueFormatter": "params.value.toFixed(1)",
+                "width": 110
+            },
+            {
+                "headerName": "Trades",
+                "field": "trades",
+                "width": 80
+            }
+        ])
+
         ui.aggrid({
-            "columnDefs": [
-                {"headerName": "Stop Loss (%)", "field": "sl_percent", "valueFormatter": "params.value.toFixed(2)"},
-                {"headerName": "Total PNL (₹)", "field": "pnl", "valueFormatter": "params.value.toFixed(2)", "sort": "desc"},
-                {"headerName": "Win Rate (%)", "field": "win_rate", "valueFormatter": "params.value.toFixed(2)"},
-                {"headerName": "Total Trades", "field": "trades"},
-            ],
-            "rowData": rowData, "domLayout": 'autoHeight'
+            "columnDefs": columnDefs,
+            "rowData": rowData,
+            "domLayout": 'autoHeight',
+            "defaultColDef": {
+                "sortable": True,
+                "filter": True,
+                "resizable": True
+            },
+            "rowSelection": "single",
+            "pagination": True,
+            "paginationPageSize": 20
         }).classes("w-full")
 
 def display_strategy_comparison(container, all_results, user_storage):
