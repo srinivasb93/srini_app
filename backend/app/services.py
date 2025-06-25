@@ -1691,6 +1691,11 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
             logger.info(f"Starting optimization for strategy: {strategy_name}")
             results = await run_parameter_optimization(df, strategy_func, params, ws_callback, indicator_details=indicator_details)
             final_response = {"optimization_enabled": True, **results}
+        elif is_custom and enable_optimization:
+            logger.info(f"Starting optimization for custom strategy: {strategy_name}")
+            results = await run_parameter_optimization_for_custom_strategy(df, strategy_data, params, ws_callback,
+                                                                           indicator_details=indicator_details)
+            final_response = {"optimization_enabled": True, **results}
         elif is_custom:
             logger.info(f"Running single backtest for custom strategy: {strategy_name}")
             results = await backtest_custom_strategy(df, strategy_data, params, ws_callback, indicator_details=indicator_details)
@@ -1705,7 +1710,7 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
         # Add indicator data for charting, ensuring it's JSON serializable
         chart_data = df.reset_index()
         chart_data['timestamp'] = chart_data['timestamp'].dt.strftime('%Y-%m-%dT%H:%M:%S')
-        final_response["ChartData"] = chart_data.to_dict(orient='records')
+        final_response["OHLC"] = chart_data[['timestamp', 'open', 'high', 'low', 'close', 'volume']].to_dict(orient='records')
         final_response["IndicatorDetails"] = indicator_details
 
         return final_response
@@ -1760,21 +1765,107 @@ async def backtest_custom_strategy(df, strategy_data, params, ws_callback, indic
     """
     Generates signals for a custom strategy and then uses the generic backtesting engine.
     """
-    # 1. Generate signals from custom conditions
-    entry_signals = await evaluate_custom_strategy(df, strategy_data.get("entry_conditions", []), signal_type="BUY")
-    exit_signals = await evaluate_custom_strategy(df, strategy_data.get("exit_conditions", []), signal_type="SELL")
+    # Check if optimization is enabled
+    enable_optimization = params.get("enable_optimization", False)
 
-    # 2. Combine entry and exit signals into a single column
-    df['signal'] = entry_signals.where(entry_signals == 'BUY', exit_signals)
+    if enable_optimization:
+        # Use the specialized optimization function for custom strategies
+        return await run_parameter_optimization_for_custom_strategy(df, strategy_data, params, ws_callback,
+                                                                    indicator_details)
+    else:
+        # 1. Generate signals from custom conditions
+        entry_signals = await evaluate_custom_strategy(df, strategy_data.get("entry_conditions", []), signal_type="BUY")
+        exit_signals = await evaluate_custom_strategy(df, strategy_data.get("exit_conditions", []), signal_type="SELL")
 
-    # 3. Define a dummy function that returns the pre-calculated signals from the DataFrame
-    def custom_strategy_func(df, **params):
-        return df['signal']
+        # 2. Combine entry and exit signals into a single column
+        df['signal'] = entry_signals.where(entry_signals == 'BUY', exit_signals)
 
-    # 4. Call the generic backtesting engine with the custom signals
-    result = await backtest_strategy_generic(df, custom_strategy_func, params, ws_callback, indicator_details=indicator_details)
+        # 3. Define a dummy function that returns the pre-calculated signals from the DataFrame
+        def custom_strategy_func(df, **params):
+            return df['signal']
 
-    return result
+        # 4. Call the generic backtesting engine with the custom signals
+        result = await backtest_strategy_generic(df, custom_strategy_func, params, ws_callback, indicator_details=indicator_details)
+
+        return result
+
+
+async def run_parameter_optimization_for_custom_strategy(df, strategy_data, params, ws_callback,
+                                                         indicator_details: Optional[List[Dict]] = None):
+    """
+    Enhanced parameter optimization specifically for custom strategies.
+    Regenerates signals for each parameter combination.
+    """
+    optimization_iterations = int(params.get("optimization_iterations", 10))
+    stop_loss_range = params.get("stop_loss_range", [1.0, 5.0])
+    take_profit_range = params.get("take_profit_range", [0.0, 0.0])
+    trailing_stop_range = params.get("trailing_stop_range", [0.0, 0.0])
+
+    # Generate parameter combinations for multiple variables
+    param_combinations = []
+    for _ in range(optimization_iterations):
+        combo = {
+            'stop_loss_percent': round(np.random.uniform(stop_loss_range[0], stop_loss_range[1]), 2)
+        }
+        if 'trailing_stop_loss_percent' in params:
+            combo['trailing_stop_loss_percent'] = round(np.random.uniform(trailing_stop_range[0],
+                                                                          trailing_stop_range[1]), 2)
+        # Add take profit if specified
+        if 'take_profit_range' in params:
+            combo['take_profit_percent'] = round(np.random.uniform(take_profit_range[0], take_profit_range[1]), 2)
+
+        param_combinations.append(combo)
+
+    all_runs = []
+    best_result, best_metric = None, float('-inf')
+
+    for i, combo in enumerate(param_combinations):
+        iter_params = params.copy()
+        iter_params.update(combo)
+
+        # CRITICAL FIX: Regenerate signals with new parameters for custom strategies
+        df_copy = df.copy()
+
+        # Generate fresh signals for this parameter combination
+        entry_signals = await evaluate_custom_strategy(df_copy, strategy_data.get("entry_conditions", []),
+                                                       signal_type="BUY")
+        exit_signals = await evaluate_custom_strategy(df_copy, strategy_data.get("exit_conditions", []),
+                                                      signal_type="SELL")
+
+        # Combine signals
+        df_copy['signal'] = entry_signals.where(entry_signals == 'BUY', exit_signals)
+
+        # Create strategy function that uses the pre-calculated signals
+        def custom_strategy_func(df, **params):
+            return df['signal']
+
+        # Run backtest with this parameter combination
+        iter_result = await backtest_strategy_generic(df_copy, custom_strategy_func, iter_params,
+                                                      indicator_details=indicator_details)
+
+        # Store results for comparison
+        run_summary = {
+            "parameters": combo,
+            "TotalPNL": iter_result.get("TotalPNL", 0),  # Fix: Use TotalProfit instead of TotalPNL
+            "WinRate": iter_result.get("WinRate", 0),
+            "TotalTrades": iter_result.get("TotalTrades", 0),
+            "SharpeRatio": iter_result.get("SharpeRatio", 0),  # Add Sharpe ratio for better comparison
+            "MaxDrawdown": iter_result.get("MaxDrawdown", 0)
+        }
+        all_runs.append(run_summary)
+
+        # Update best result based on Total PNL
+        current_pnl = iter_result.get('TotalPNL', float('-inf'))
+        if current_pnl > best_metric:
+            best_metric = current_pnl
+            best_result = iter_result
+
+        if ws_callback:
+            progress = 0.1 + ((i + 1) / optimization_iterations) * 0.9
+            await ws_callback(
+                {"progress": round(progress, 2), "status": f"Running optimization {i + 1}/{optimization_iterations}"})
+
+    return {"best_result": best_result, "all_runs": all_runs}
 
 
 async def backtest_strategy_generic(
@@ -2380,50 +2471,51 @@ if __name__ == "__main__":
     import asyncio
     from backend.app.database import get_db
 
-    if __name__ == "__main__":
-        async def main():
-            # Example parameters (replace with real values as needed)
-            instrument_token = "SBIN"
-            timeframe = "day"
-            strategy = "RSI Oversold/Overbought"  # or a custom strategy JSON string
-            # strategy = {"strategy_id": "1fe9328e-f8cd-405c-9db2-68353fdcb2c3",
-            #             "user_id": "4fbba468-6a86-4516-8236-2f8abcbfd2ef",
-            #             "broker": "Zerodha",
-            #             "name": "RSI",
-            #             "description": "",
-            #             "entry_conditions": [{"left_indicator": "RSI",
-            #                                   "left_params": {"period": 14},
-            #                                   "left_value": "",
-            #                                   "comparison": "<=",
-            #                                   "right_indicator": "Fixed Value",
-            #                                   "right_params": "",
-            #                                   "right_value": 30.0}],
-            #             "exit_conditions": [{"left_indicator": "RSI",
-            #                                  "left_params": {"period": 14},
-            #                                  "left_value": "",
-            #                                  "comparison": ">=",
-            #                                  "right_indicator": "Fixed Value",
-            #                                  "right_params": "",
-            #                                  "right_value": 75.0}],
-            #             "parameters": {"timeframe": "day",
-            #                            "position_sizing": 100},
-            #             "status": "inactive",
-            #             "created_at": "2025-06-21T17:59:00.011814",
-            #             "updated_at": "2025-06-21T18:02:08.444443"}
-            params = {
-                "initial_investment": 100000,
-                "stop_loss_percent": 1,
-                "trailing_stop_loss_percent": 0,
-                "position_sizing_percent": 100,
-                "enable_optimization": False,
-                'partial_exits': []
-            }
-            start_date = "2024-01-20"
-            end_date = "2025-06-20"
+    async def main():
+        # Example parameters (replace with real values as needed)
+        instrument_token = "SBIN"
+        timeframe = "day"
+        # strategy = "RSI Oversold/Overbought"  # or a custom strategy JSON string
+        strategy = {"strategy_id": "1fe9328e-f8cd-405c-9db2-68353fdcb2c3",
+                    "user_id": "4fbba468-6a86-4516-8236-2f8abcbfd2ef",
+                    "broker": "Zerodha",
+                    "name": "RSI",
+                    "description": "",
+                    "entry_conditions": [{"left_indicator": "RSI",
+                                          "left_params": {"period": 14},
+                                          "left_value": "",
+                                          "comparison": "<=",
+                                          "right_indicator": "Fixed Value",
+                                          "right_params": "",
+                                          "right_value": 30.0}],
+                    "exit_conditions": [{"left_indicator": "RSI",
+                                         "left_params": {"period": 14},
+                                         "left_value": "",
+                                         "comparison": ">=",
+                                         "right_indicator": "Fixed Value",
+                                         "right_params": "",
+                                         "right_value": 75.0}],
+                    "parameters": {"timeframe": "day",
+                                   "position_sizing": 100},
+                    "status": "inactive",
+                    "created_at": "2025-06-21T17:59:00.011814",
+                    "updated_at": "2025-06-21T18:02:08.444443"}
+        params = {
+            "initial_investment": 100000,
+            "stop_loss_percent": 0,
+            "trailing_stop_loss_percent": 0,
+            "position_sizing_percent": 100,
+            "enable_optimization": True,
+            'partial_exits': [],
+            'optimization_iterations': 20,
+            'stop_loss_range': [1.0, 5.0]
+        }
+        start_date = "2024-01-20"
+        end_date = "2025-06-20"
 
-            result = await backtest_strategy(
-                instrument_token, timeframe, json.dumps(strategy) if not isinstance(strategy, str) else strategy, params, start_date, end_date, db=get_db()
-            )
-            print(result)
+        result = await backtest_strategy(
+            instrument_token, timeframe, json.dumps(strategy) if not isinstance(strategy, str) else strategy, params, start_date, end_date, db=get_db()
+        )
+        print(result)
 
-        asyncio.run(main())
+    asyncio.run(main())

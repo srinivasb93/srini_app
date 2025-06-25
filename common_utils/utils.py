@@ -3,6 +3,7 @@ import time
 import logging
 from functools import wraps
 import requests
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -51,3 +52,15 @@ def calculate_atr(df, period):
 def get_historical_data(instrument_token):
     # Placeholder: Implement API call to fetch historical data
     return []
+
+def sanitize_floats(obj):
+    if isinstance(obj, dict):
+        return {k: sanitize_floats(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_floats(v) for v in obj]
+    elif isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    else:
+        return obj

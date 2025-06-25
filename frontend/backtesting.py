@@ -610,6 +610,14 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
                         with ui.row():
                             stop_loss_min = ui.number("SL Min (%)", value=1.0, min=0.1, format="%.1f").props("dense")
                             stop_loss_max = ui.number("SL Max (%)", value=5.0, min=0.1, format="%.1f").props("dense")
+                        with ui.row():
+                            trail_stop_loss_min = ui.number("Trail SL Min (%)", value=1.0, min=0.0, format="%.1f").props("dense")
+                            trail_stop_loss_max = ui.number("Trail SL Max (%)", value=5.0, min=0.0, format="%.1f").props("dense")
+                            use_trail = ui.switch("Use Trailing SL")
+                        with ui.row():
+                            target_min = ui.number("Target Min (%)", value=1.0, min=0.0, format="%.1f").props("dense")
+                            target_max = ui.number("Target Max (%)", value=10.0, min=0.0, format="%.1f").props("dense")
+                            use_target = ui.switch("Use Target Profit")
 
                 run_button = ui.button("Run Backtest", on_click=lambda: run_backtest()).props("color=primary icon=play_arrow").classes("w-full mt-4")
 
@@ -675,6 +683,11 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
                     return
                 params["optimization_iterations"] = int(optimization_iterations.value)
                 params["stop_loss_range"] = [float(stop_loss_min.value), float(stop_loss_max.value)]
+                if use_trail.value and trail_stop_loss_max.value >= trail_stop_loss_min.value > 0:
+                    params["trailing_stop_range"] = [float(trail_stop_loss_min.value),
+                                                          float(trail_stop_loss_max.value)]
+                if target_max.value >= target_min.value > 0 and use_target.value:
+                    params["take_profit_range"] = [float(target_min.value), float(target_max.value)]
 
             strategy_id = strategies_select.value
             strategy_value = strategy_id

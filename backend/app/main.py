@@ -33,6 +33,7 @@ from services import (
     get_mf_sips, cancel_mf_sip, schedule_strategy_execution, stop_strategy_execution
 )
 from common_utils.db_utils import async_fetch_query
+from common_utils.utils import sanitize_floats
 from common_utils.read_write_sql_data import load_sql_data
 from schemas import (
     PlaceOrderRequest, UserCreate, UserResponse, ScheduledOrder, ScheduledOrderRequest, AutoOrder, AutoOrderRequest,
@@ -947,6 +948,9 @@ async def backtest_strategy_endpoint(request: BacktestRequest, user_id: str = De
             end_date=request.end_date,
             ws_callback=ws_callback
         )
+
+        result = sanitize_floats(result)
+
         return result
     except Exception as e:
         logger.error(f"Error backtesting strategy: {str(e)}")
