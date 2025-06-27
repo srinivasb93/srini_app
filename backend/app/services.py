@@ -19,6 +19,11 @@ from sqlalchemy.sql import text, func
 from fastapi import Depends, HTTPException
 from kiteconnect import KiteConnect
 import upstox_client
+from backtesting import Backtest
+from common_utils.backtesting_adapter import (
+    RSIStrategy, MACDStrategy, BollingerBandsStrategy,
+    prepare_data_for_backtesting, convert_backtesting_result
+)
 
 from common_utils.db_utils import async_fetch_query, async_execute_query
 from common_utils.read_write_sql_data import load_sql_data
@@ -1595,6 +1600,15 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
     Main service to orchestrate a backtest, correctly handling single runs,
     custom strategies, and parameter optimization.
     """
+    # Check if optimization is enabled
+    optimization_config = params.get('optimization_config')
+    if optimization_config and optimization_config.get('enabled'):
+        logger.info("Using backtesting.py optimization")
+        return await run_optimization_backtest(
+            instrument_token, timeframe, strategy, params,
+            start_date, end_date, db, ws_callback
+        )
+
     logger.info(f"Starting backtest for {instrument_token} from {start_date} to {end_date}")
     logger.info(f"Strategy: {strategy}, Timeframe: {timeframe}, Params: {params}")
 
@@ -2125,6 +2139,95 @@ async def backtest_strategy_generic(
         "Tradebook": tradebook
     }
 
+
+async def run_optimization_backtest(instrument_token: str,
+                                    timeframe: str,
+                                    strategy: str,
+                                    params: Dict,
+                                    start_date: str,
+                                    end_date: str,
+                                    db,
+                                    ws_callback: Optional[Callable] = None) -> Dict:
+    """
+    Run optimization using backtesting.py library
+    """
+    try:
+        logger.info(f"Starting optimization for {strategy} on {instrument_token}")
+
+        # Get historical data using your existing function
+        df = await get_historical_dataframe(instrument_token, timeframe, start_date, end_date, db)
+
+        if ws_callback:
+            await ws_callback({"progress": 0.1, "status": "Data loaded, preparing optimization..."})
+
+        # Prepare data for backtesting.py
+        bt_data = prepare_data_for_backtesting(df)
+
+        # Get optimization config
+        opt_config = params.get('optimization_config', {})
+
+        # Map strategy names to classes
+        strategy_map = {
+            'RSI Oversold/Overbought': RSIStrategy,
+            'MACD Crossover': MACDStrategy,
+            'Bollinger Bands': BollingerBandsStrategy
+        }
+
+        strategy_class = strategy_map.get(strategy)
+        if not strategy_class:
+            raise ValueError(f"Strategy '{strategy}' not supported for optimization")
+
+        # Create backtest instance
+        bt = Backtest(
+            bt_data,
+            strategy_class,
+            cash=params.get('initial_investment', 100000),
+            commission=0.002  # 0.2% commission
+        )
+
+        if ws_callback:
+            await ws_callback({"progress": 0.2, "status": "Running optimization..."})
+
+        # Extract optimization parameters
+        opt_params = opt_config.get('parameters', {})
+        max_tries = opt_config.get('max_tries', 50)
+        optimize_for = opt_config.get('optimize_for', 'Return [%]')
+
+        # Run optimization or single backtest
+        if opt_params:
+            result = bt.optimize(
+                **opt_params,
+                maximize=optimize_for,
+                max_tries=max_tries,
+                random_state=42
+            )
+
+            if ws_callback:
+                await ws_callback({"progress": 0.9, "status": "Optimization complete!"})
+
+            # Convert results
+            converted_result = convert_backtesting_result(result, opt_params)
+            converted_result['optimization_enabled'] = True
+
+        else:
+            # Run single backtest
+            result = bt.run()
+            converted_result = convert_backtesting_result(result)
+
+        # Add metadata
+        converted_result.update({
+            "StrategyName": strategy,
+            "Instrument": instrument_token
+        })
+
+        if ws_callback:
+            await ws_callback({"progress": 1.0, "status": "Complete!"})
+
+        return converted_result
+
+    except Exception as e:
+        logger.error(f"Optimization failed: {e}", exc_info=True)
+        raise e
 
 async def evaluate_custom_strategy(df: pd.DataFrame, strategy_conditions: List[Dict],
                                    signal_type: str = "BUY") -> pd.Series:

@@ -17,6 +17,7 @@ import aiohttp
 import time
 from functools import lru_cache
 from uuid import uuid4
+from optimization_ui import OptimizationUI
 
 logger = logging.getLogger(__name__)
 
@@ -637,6 +638,10 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
                             "dense")
                         use_trail = ui.switch("Optimize Trail SL")
 
+                # Your optimization UI code here
+                optimization_ui = OptimizationUI()
+                optimization_ui.render_optimization_controls()
+
                 run_button = ui.button("Run Backtest", on_click=lambda: run_backtest()).props("color=primary icon=play_arrow").classes("w-full mt-4")
 
         with splitter.after:
@@ -696,6 +701,13 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
                 "partial_exits": [{"target": r["target"].value, "qty_percent": r["qty_percent"].value} for r in
                                   partial_exit_rows]
             }
+
+            # NEW: Add optimization config
+            opt_config = optimization_ui.get_optimization_config()
+            if opt_config:
+                params["optimization_config"] = opt_config
+                ui.notify("Parameter optimization enabled!", type="info")
+
             if enable_optimization.value:
                 if stop_loss_min.value >= stop_loss_max.value:
                     ui.notify("Stop Loss Min must be less than Max.", type="negative")
@@ -760,6 +772,21 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
 
 def display_backtest_results(performance_panel, trades_panel, metrics_panel, results, user_storage, fetch_api):
     """Displays backtest results with metrics and charts in a tabbed interface."""
+    # 🔥 ADD FRONTEND DEBUG
+    print("=== FRONTEND DEBUG ===")
+    print(f"Results keys: {list(results.keys())}")
+    print(f"Optimization enabled: {results.get('optimization_enabled', False)}")
+    print(f"Optimized parameters: {results.get('OptimizedParameters', {})}")
+
+    tradebook = results.get("Tradebook", [])
+    print(f"Tradebook type: {type(tradebook)}")
+    print(f"Tradebook length: {len(tradebook)}")
+
+    if tradebook:
+        print(f"Sample tradebook entry: {tradebook[0]}")
+    else:
+        print("TRADEBOOK IS EMPTY!")
+
     theme_mode = "Dark" if user_storage.get("dark_mode", True) else "Light"
     tradebook = results.get("Tradebook", [])
 
@@ -769,6 +796,26 @@ def display_backtest_results(performance_panel, trades_panel, metrics_panel, res
     # Calculate metrics from processed data
     tradebook_json = json.dumps(tradebook)
     metrics = BacktestMetrics.calculate_metrics(tradebook_json, results.get("InitialInvestment", 100000))
+
+    # If BacktestMetrics returns empty or missing keys, use the direct results
+    if not metrics or "TotalProfit" not in metrics:
+        metrics = {
+            "TotalProfit": results.get("TotalProfit", 0),
+            "WinRate": results.get("WinRate", 0),
+            "TotalTrades": results.get("TotalTrades", 0),
+            "FinalPortfolioValue": results.get("EndValue", results.get("StartValue", 100000)),
+            "MaxDrawdown": results.get("MaxDrawdown", 0),
+            "SharpeRatio": results.get("SharpeRatio", 0),
+            "ProfitFactor": results.get("ProfitFactor", 1.0),
+            "AverageWin": results.get("AverageWin", 0),
+            "AverageLoss": results.get("AverageLoss", 0),
+            "LargestWin": results.get("LargestWin", 0),
+            "LargestLoss": results.get("LargestLoss", 0),
+            "WinningStreak": results.get("WinningStreak", 0),
+            "LosingStreak": results.get("LosingStreak", 0),
+            "CalmarRatio": results.get("CalmarRatio", 0),
+            "CAGR": 0
+        }
 
     # Store data for export
     user_storage["backtest_tradebook"] = convert_timestamps_to_iso(tradebook)
@@ -941,37 +988,47 @@ def display_backtest_results(performance_panel, trades_panel, metrics_panel, res
     with trades_panel:
         completed_trades = process_tradebook_for_display(tradebook)
         if completed_trades:
-            # SECTION 1: TRADES TABLE (Fixed Height Container)
-            with ui.card().classes("w-full mb-4"):
-                with ui.card_section().classes("p-4"):
-                    ui.label(f"📋 Trade History ({len(completed_trades)} trades)").classes("text-h6 font-bold mb-3")
 
-                    ui.aggrid({
-                        "columnDefs": [
-                            {"headerName": "Entry Date", "field": "EntryDate",
-                             "valueFormatter": "value ? new Date(value).toLocaleDateString() : 'N/A'",
-                             "width": 120},
-                            {"headerName": "Exit Date", "field": "ExitDate",
-                             "valueFormatter": "value ? new Date(value).toLocaleDateString() : 'N/A'",
-                             "width": 120},
-                            {"headerName": "Entry ₹", "field": "EntryPrice",
-                             "valueFormatter": "params.value.toFixed(2)", "width": 100},
-                            {"headerName": "Exit ₹", "field": "ExitPrice",
-                             "valueFormatter": "params.value ? params.value.toFixed(2) : 'N/A'", "width": 100},
-                            {"headerName": "P&L", "field": "PNL",
-                             "valueFormatter": "params.value.toFixed(2)",
-                             "cellStyle": "params.value >= 0 ? {'color': '#16a34a', 'font-weight': 'bold'} : {'color': '#dc2626', 'font-weight': 'bold'}",
-                             "width": 120},
-                            {"headerName": "Exit Reason", "field": "ExitReason", "width": 150},
-                            {"headerName": "Duration", "field": "HoldingPeriod", "width": 120}
-                        ],
-                        "rowData": completed_trades,
-                        "defaultColDef": {"sortable": True, "filter": True, "resizable": True},
-                        "domLayout": "normal",
-                        "pagination": True,
-                        "paginationPageSize": 15,
-                        "rowHeight": 40
-                    }).classes("w-full").style("height: 400px;")  # FIXED HEIGHT
+            # Single full-height table
+            ui.aggrid({
+                "columnDefs": [
+                    {"headerName": "Entry Date", "field": "EntryDate",
+                     "valueFormatter": "value ? new Date(value).toLocaleDateString() : 'N/A'",
+                     "width": 130},
+                    {"headerName": "Exit Date", "field": "ExitDate",
+                     "valueFormatter": "value ? new Date(value).toLocaleDateString() : 'N/A'",
+                     "width": 130},
+                    {"headerName": "Entry ₹", "field": "EntryPrice",
+                     "valueFormatter": "params.value.toFixed(2)", "width": 110},
+                    {"headerName": "Exit ₹", "field": "ExitPrice",
+                     "valueFormatter": "params.value ? params.value.toFixed(2) : 'N/A'", "width": 110},
+                    {"headerName": "Quantity", "field": "Quantity",
+                     "valueFormatter": "params.value.toFixed(0)", "width": 100},
+                    {"headerName": "P&L", "field": "PNL",
+                     "valueFormatter": "params.value.toFixed(2)",
+                     "cellStyle": "params.value >= 0 ? {'color': '#16a34a', 'font-weight': 'bold'} : {'color': '#dc2626', 'font-weight': 'bold'}",
+                     "width": 120},
+                    {"headerName": "Exit Reason", "field": "ExitReason", "width": 140},
+                    {"headerName": "Duration", "field": "HoldingPeriod", "width": 120}
+                ],
+                "rowData": completed_trades,
+                "defaultColDef": {"sortable": True, "filter": True, "resizable": True},
+                "domLayout": "normal",
+                "pagination": True,  # Show all rows
+                "rowHeight": 40,
+                "headerHeight": 50
+            }).classes("w-full h-full")  # Takes full height of the tab panel
+
+            # Quick stats at the bottom
+            with ui.row().classes("w-full mt-4 gap-4"):
+                ui.chip(f"Total Profit: ₹{metrics['TotalProfit']:,.2f}", icon="account_balance").props("outline")
+                ui.chip(f"Win Rate: {metrics['WinRate']:.1f}%", icon="percent").props("outline")
+                ui.chip(f"Trades: {metrics['TotalTrades']}", icon="format_list_numbered").props("outline")
+                ui.chip(f"Winning Trades: {int(metrics['TotalTrades'] * metrics['WinRate'] / 100)}",
+                        icon="thumb_up").props("outline")
+                ui.chip(
+                    f"Losing Trades: {metrics['TotalTrades'] - int(metrics['TotalTrades'] * metrics['WinRate'] / 100)}",
+                    icon="thumb_down").props("outline")
 
             # SECTION 2: TRADE STATISTICS (Separate Card)
             with ui.card().classes("w-full mb-4"):
@@ -989,35 +1046,15 @@ def display_backtest_results(performance_panel, trades_panel, metrics_panel, res
                                                                                             'TotalTrades'] > 0 else 0
                         win_loss_ratio = abs(metrics["AverageWin"] / metrics["AverageLoss"]) if metrics[
                                                                                                     "AverageLoss"] != 0 else 0
-
                         create_stat_card("Avg Profit/Trade", f"₹{avg_profit:.2f}", "green" if avg_profit > 0 else "red")
                         create_stat_card("Win/Loss Ratio", f"{win_loss_ratio:.2f}", "purple")
                         create_stat_card("Largest Win", f"₹{metrics['LargestWin']:.2f}", "green")
                         create_stat_card("Largest Loss", f"₹{abs(metrics['LargestLoss']):.2f}", "red")
 
-            # SECTION 3: TRADE EXECUTION LOG (Separate Scrollable Container)
-            with ui.card().classes("w-full"):
-                with ui.card_section().classes("p-4"):
-                    ui.label("📜 Trade Execution Log").classes("text-h6 font-bold mb-3")
-
-                    with ui.scroll_area().classes('w-full border rounded-lg p-2 bg-gray-50').style("height: 300px;"):
-                        for i, trade in enumerate(tradebook):
-                            with ui.card().classes('w-full mb-2 p-3 bg-white border-l-4' +
-                                                   (' border-green-500' if trade[
-                                                                               'Action'] == 'BUY' else ' border-red-500')):
-                                with ui.row().classes('w-full items-center justify-between'):
-                                    action_color = "green" if trade['Action'] == "BUY" else "red"
-                                    ui.chip(f"{trade['Action']}", color=action_color).props("outline dense")
-                                    ui.label(f"#{i + 1}").classes("text-sm text-gray-500")
-
-                                with ui.row().classes('w-full items-center justify-between text-sm mt-2'):
-                                    ui.label(f"Price: ₹{trade['Price']:.2f}").classes("font-mono")
-                                    ui.label(f"Qty: {trade['Quantity']:.0f}").classes("font-mono")
-                                    ui.label(f"Reason: {trade['Reason']}").classes("text-blue-600")
-                                    pnl_color = "text-green-600" if trade['Profit'] >= 0 else "text-red-600"
-                                    ui.label(f"PnL: ₹{trade['Profit']:.2f}").classes(f'font-mono font-bold {pnl_color}')
         else:
-            ui.label("No completed trades in this backtest.").classes("text-warning")
+            with ui.column().classes("w-full h-full items-center justify-center"):
+                ui.icon("trending_down", size="4rem").classes("text-gray-400 mb-4")
+                ui.label("No completed trades in this backtest").classes("text-h5 text-gray-500")
 
 
 def display_optimization_runs(container, all_runs):
