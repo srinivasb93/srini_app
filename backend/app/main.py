@@ -1,25 +1,47 @@
+import sys
+import os
+import logging
+
+# Ensure consistent import path - add this RIGHT after your existing path manipulation
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# Configure logging BEFORE any other imports
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# Now import everything else in the same order as before
 import aiohttp
 from fastapi import FastAPI, Depends, HTTPException, Request, WebSocket
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import List, Optional
-import logging
 from datetime import datetime, timedelta
 import uuid
-from database import get_db, init_engine
-from sqlalchemy.future import select
-import sys
-import os
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql import text
 import pandas as pd
 import asyncio
 import bcrypt
 from collections import defaultdict
 from uuid import uuid4
 
-# Add the project_root to the Python path
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-sys.path.insert(0, project_root)
+# Import database early and check the instance
+from database import get_db, init_engine
+logger.info("🔧 Main.py imported database module")
+
+# Try to import the database manager if it exists
+try:
+    from database import get_database_manager
+    logger.info(f"🔧 Main.py using DatabaseManager instance: {id(get_database_manager())}")
+except ImportError:
+    logger.warning("⚠️ get_database_manager not found - using legacy database functions")
+    get_database_manager = None
+
+# Continue with your other imports...
+from sqlalchemy.future import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import text
+
+# Rest of your imports exactly as they were
 from models import Order, ScheduledOrder as ScheduledOrderModel, AutoOrder as AutoOrderModel, \
     GTTOrder as GTTOrderModel, User, Strategy
 from backend.app.routes import data
@@ -43,9 +65,6 @@ from schemas import (
 )
 from auth import UserManager, oauth2_scheme
 
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
-
 app = FastAPI(
     title="Algo Trading App",
     description="API for managing algorithmic trading with Upstox and Zerodha",
@@ -64,6 +83,14 @@ app = FastAPI(
 
 # Include routers
 app.include_router(data.router)
+
+# Add your SIP router
+try:
+    from backend.app.routes.sip_routes import sip_router
+    app.include_router(sip_router)
+    logger.info("✅ SIP router included successfully")
+except Exception as e:
+    logger.error(f"❌ Failed to include SIP router: {e}")
 
 # Initialize OrderMonitor and OrderManager
 order_monitor = OrderMonitor()
@@ -121,13 +148,67 @@ async def initialize_user_apis(user_id: str, db: AsyncSession, force_reinitializ
             raise HTTPException(status_code=500, detail=f"Failed to initialize APIs: {str(e)}")
     return user_apis[user_id]
 
+
 @app.on_event("startup")
 async def startup_event():
-    session_factory, _ = await init_engine()
-    logger.info("Database engine and session factory initialized successfully")
-    asyncio.create_task(order_monitor.run_scheduled_tasks(user_apis=user_apis))
-    asyncio.create_task(order_manager.start(user_apis=user_apis))
-    logger.info("Background tasks scheduled")
+    logger.info("=== APPLICATION STARTUP BEGINNING ===")
+
+    try:
+        # Import database module
+        import database
+
+        # Initialize database
+        logger.info("🔧 Initializing database...")
+        session_factory_result, engine_result = await database.init_engine()
+
+        # CRITICAL: Set the session factory in ALL possible database modules
+        logger.info("🔧 Setting session factory globally...")
+
+        # Set in main database module
+        database.session_factory = session_factory_result
+        database.engine = engine_result
+
+        # Try to set in other possible database imports
+        try:
+            from backend.app import database as backend_db
+            backend_db.session_factory = session_factory_result
+            backend_db.engine = engine_result
+            logger.info("✅ Set session factory in backend.app.database")
+        except:
+            pass
+
+        try:
+            import backend.app.database as backend_app_db
+            backend_app_db.session_factory = session_factory_result
+            backend_app_db.engine = engine_result
+            logger.info("✅ Set session factory in backend.app.database (alt import)")
+        except:
+            pass
+
+        logger.info(f"✅ Database initialization completed successfully")
+
+        # Test database access
+        async for test_session in database.get_db():
+            result = await test_session.execute(text("SELECT 1"))
+            test_value = result.fetchone()
+            logger.info(f"✅ Database access test successful: {test_value[0]}")
+            break
+
+    except Exception as e:
+        logger.error(f"❌ Database initialization failed: {e}")
+        raise
+
+    try:
+        # Start background tasks
+        asyncio.create_task(order_monitor.run_scheduled_tasks(user_apis=user_apis))
+        asyncio.create_task(order_manager.start(user_apis=user_apis))
+        logger.info("✅ Background tasks scheduled successfully")
+
+    except Exception as e:
+        logger.error(f"❌ Background tasks failed: {e}")
+
+    logger.info("=== APPLICATION STARTUP COMPLETED ===")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -1214,3 +1295,34 @@ async def get_strategy_performance(broker: str, user_id: str = Depends(get_curre
     }).to_dict()
     return performance
 
+
+@app.get("/debug/db-status")
+async def debug_db_status():
+    """Check database status"""
+    try:
+        import database
+        return {
+            "session_factory_exists": database.session_factory is not None,
+            "is_initialized": database.is_database_initialized(),
+            "module_file": database.__file__
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# Test endpoint for main.py database access
+@app.get("/debug/test-main-db")
+async def test_main_database_simple(db: AsyncSession = Depends(get_db)):
+    """Simple test of main.py database access"""
+    try:
+        result = await db.execute(text("SELECT 1 as test"))
+        test_result = result.fetchone()
+
+        return {
+            "success": True,
+            "test_result": test_result[0] if test_result else None,
+            "message": "Main.py database access working",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Main.py database test failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

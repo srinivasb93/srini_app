@@ -3,6 +3,7 @@ import json
 import logging
 import inspect
 import os
+import sys
 from datetime import datetime, time as date_time, timedelta
 from typing import Optional, Dict, Any, List, Callable
 import pandas as pd
@@ -10,7 +11,12 @@ import numpy as np
 import requests
 import smtplib
 from email.mime.text import MIMEText
-from database import get_db
+# Force the same import path as main.py
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from backend.app.database import get_db
 import pandas_ta as ta
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -2621,6 +2627,7 @@ def evaluate_condition(left_value, right_value, comparison):
         # Use a small epsilon for float comparison
         return abs(left_value - right_value) < 1e-9
     return False
+
 
 if __name__ == "__main__":
     import asyncio

@@ -20,6 +20,7 @@ from orderbook import render_order_book_page
 from portfolio import render_portfolio_page
 from positions import render_positions_page
 from livetrading import render_live_trading_page
+from sip_strategy import render_sip_strategy_page
 from watchlist import render_watchlist_page
 from settings import render_settings_page
 
@@ -194,7 +195,7 @@ def render_header():
         ui.label("Xpress Trader").classes("text-2xl font-semibold")
         with ui.row().classes("items-center"):
             pages = ["Dashboard", "Order Management", "Order Book", "Positions",
-                     "Portfolio", "Mutual Funds", "Analytics", "Strategies",
+                     "Portfolio", "Mutual Funds", "Analytics", "Strategies", "SIP Strategy",
                      "Backtesting", "Live Trading", "Watchlist", "Settings"]
             for page_name in pages:
                 route = f"/{page_name.lower().replace(' ', '-')}"
@@ -442,6 +443,18 @@ async def strategies_page(client: Client):
     await render_strategies_page(fetch_api, app.storage.user, await get_cached_instruments(broker))
 
 
+@ui.page('/sip-strategy')
+async def sip_strategies_page(client: Client):
+    await client.connected()
+    if not app.storage.user.get(STORAGE_TOKEN_KEY):
+        ui.navigate.to('/')
+        return
+    apply_theme_from_storage()
+    render_header()
+    broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
+    await render_sip_strategy_page(fetch_api, app.storage.user, await get_cached_instruments(broker))
+
+
 @ui.page('/backtesting')
 async def backtesting_page(client: Client):
     await client.connected()
@@ -570,7 +583,7 @@ async def on_client_connect(client: Client):
 if __name__ in {"__main__", "__mp_main__"}:
     storage_secret_key = "my_super_secret_key_for_testing_123_please_change_for_prod"
     ui.run(title="Algo Trader",
-           port=8080,
+           port=8081,
            reload=True,
            uvicorn_reload_dirs='.',
            uvicorn_reload_includes='*.py',
