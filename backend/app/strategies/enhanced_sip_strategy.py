@@ -1,6 +1,7 @@
+# backend/app/strategies/enhanced_sip_strategy.py - Fixed Multi-Database Version
 """
-Fixed SIP Strategy Module that follows main.py database patterns
-Uses existing sync utilities for data fetching and properly handles async operations
+Enhanced SIP Strategy with proper multi-database support
+Fixes the database connectivity issue by using the correct database for stock data
 """
 
 import pandas as pd
@@ -15,8 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 import uuid
 
-# Import your existing synchronous database utilities
-from common_utils.fetch_db_data import get_table_data
+# Import synchronous utilities as fallback
+from common_utils.fetch_db_data import get_table_data, get_engine
 
 logger = logging.getLogger(__name__)
 
@@ -62,15 +63,75 @@ class SIPResults:
     volatility: Optional[float] = None
 
 
-class EnhancedSIPStrategy:
-    """Enhanced SIP Strategy that follows main.py database patterns"""
+class SIPPortfolioTracker:
+    """Enhanced portfolio tracking for SIP strategy"""
 
-    def __init__(self, db_session: AsyncSession = None):
-        self.db_session = db_session
+    def __init__(self):
+        self.total_units = 0.0
+        self.total_investment = 0.0
+        self.trades: List[Trade] = []
+        self.max_portfolio_value = 0.0
+        self.max_drawdown = 0.0
+
+    def execute_investment(self, price: float, amount: float, timestamp: datetime,
+                           drawdown: Optional[float] = None) -> Trade:
+        """Execute an investment and track the trade"""
+        units = amount / price
+        self.total_units += units
+        self.total_investment += amount
+
+        current_portfolio_value = self.total_units * price
+        self.max_portfolio_value = max(self.max_portfolio_value, current_portfolio_value)
+
+        # Calculate drawdown from peak
+        if self.max_portfolio_value > 0:
+            current_drawdown = (current_portfolio_value - self.max_portfolio_value) / self.max_portfolio_value
+            self.max_drawdown = min(self.max_drawdown, current_drawdown)
+
+        trade = Trade(
+            timestamp=timestamp,
+            price=price,
+            units=units,
+            amount=amount,
+            drawdown=drawdown,
+            portfolio_value=current_portfolio_value,
+            trade_type="BUY",
+            total_investment=self.total_investment
+        )
+
+        self.trades.append(trade)
+        return trade
+
+    def get_current_value(self, current_price: float) -> float:
+        """Get current portfolio value"""
+        return self.total_units * current_price
+
+    def get_average_buy_price(self) -> float:
+        """Calculate average buy price"""
+        if self.total_units > 0:
+            return self.total_investment / self.total_units
+        return 0.0
+
+
+class EnhancedSIPStrategy:
+    """Enhanced SIP Strategy with multi-database support"""
+
+    def __init__(self, nsedata_session: AsyncSession = None, trading_session: AsyncSession = None):
+        self.nsedata_session = nsedata_session  # For stock data
+        self.trading_session = trading_session  # For saving results
 
     async def fetch_data_from_db_async(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """Fetch data using async database utilities"""
+        """Fetch data using async database utilities - FIXED VERSION"""
         try:
+            if not self.nsedata_session:
+                logger.error("No nsedata session provided")
+                return await self._fetch_data_sync_fallback(symbol, start_date, end_date)
+
+            # Convert string dates to datetime objects for PostgreSQL
+            start_datetime = datetime.strptime(start_date, '%Y-%m-%d').date()
+            end_datetime = datetime.strptime(end_date, '%Y-%m-%d').date()
+
+            # Use the CORRECT database session for stock data
             query = text(f"""
                 SELECT timestamp, open, high, low, close, volume 
                 FROM public."{symbol}" 
@@ -78,9 +139,9 @@ class EnhancedSIPStrategy:
                 ORDER BY timestamp ASC
             """)
 
-            result = await self.db_session.execute(query, {
-                'start_date': start_date,
-                'end_date': end_date
+            result = await self.nsedata_session.execute(query, {
+                'start_date': start_datetime,
+                'end_date': end_datetime
             })
 
             rows = result.fetchall()
@@ -93,7 +154,7 @@ class EnhancedSIPStrategy:
                 data[['open', 'high', 'low', 'close', 'volume']] = data[
                     ['open', 'high', 'low', 'close', 'volume']].astype(float)
 
-                logger.info(f"Successfully fetched {len(data)} rows for {symbol} using async DB")
+                logger.info(f"✅ Successfully fetched {len(data)} rows for {symbol} using async nsedata DB")
                 return data
             else:
                 logger.warning(f"No data found for {symbol} between {start_date} and {end_date}")
@@ -101,6 +162,57 @@ class EnhancedSIPStrategy:
 
         except Exception as e:
             logger.error(f"Error fetching data for {symbol} using async DB: {e}")
+            # Fallback to sync method
+            return await self._fetch_data_sync_fallback(symbol, start_date, end_date)
+
+    async def _fetch_data_sync_fallback(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """Fallback to synchronous data fetching - FIXED VERSION"""
+        try:
+            logger.info(f"Using sync fallback for {symbol}")
+
+            # FIXED: Create a simple sync query without using the complex fetch_db_data
+            # This avoids the config.ini dependency issue
+
+            # Try direct database connection using the same credentials as async
+            import os
+            from sqlalchemy import create_engine
+
+            # Use environment variables or default values
+            db_url = os.getenv("NSEDATA_URL", "postgresql://trading_user:password123@localhost:5432/nsedata")
+            # Convert asyncpg URL to psycopg2 for sync
+            sync_db_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
+
+            def fetch_sync():
+                try:
+                    engine = create_engine(sync_db_url)
+                    query = f"""
+                        SELECT timestamp, open, high, low, close, volume 
+                        FROM public."{symbol}" 
+                        WHERE timestamp BETWEEN '{start_date}' AND '{end_date}' 
+                        ORDER BY timestamp ASC
+                    """
+
+                    import pandas as pd
+                    data = pd.read_sql(query, engine)
+                    engine.dispose()
+                    return data
+                except Exception as e:
+                    logger.error(f"Sync query failed: {e}")
+                    return pd.DataFrame()
+
+            # Run sync function in thread pool
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, fetch_sync)
+
+            if not data.empty:
+                logger.info(f"✅ Sync fallback successful for {symbol}: {len(data)} rows")
+                return data
+            else:
+                logger.warning(f"No data found via sync fallback for {symbol}")
+                return pd.DataFrame()
+
+        except Exception as e:
+            logger.error(f"Sync fallback also failed for {symbol}: {e}")
             return pd.DataFrame()
 
     def calculate_technical_indicators(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -128,336 +240,232 @@ class EnhancedSIPStrategy:
             delta = data['close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-
-            # Avoid division by zero
-            rs = gain / loss.replace(0, np.nan)
+            rs = gain / loss
             data['RSI'] = 100 - (100 / (1 + rs))
 
-            # Moving averages
+            # Moving averages for trend
             data['SMA_50'] = data['close'].rolling(window=50).mean()
             data['SMA_200'] = data['close'].rolling(window=200).mean()
 
-            # Fill NaN values using forward fill then backward fill
-            data = data.fillna(method='ffill').fillna(method='bfill').fillna(0)
+            return data
 
         except Exception as e:
             logger.error(f"Error calculating technical indicators: {e}")
-            # Return original data if calculation fails
             return data
 
-        return data
-
-    def optimize_entry_conditions(self, row: pd.Series, config: SIPConfig) -> Tuple[bool, float, str]:
-        """Enhanced entry condition logic with multiple factors"""
-
+    def determine_investment_amount(self, current_price: float, data: pd.DataFrame,
+                                    config: SIPConfig, current_row_index: int) -> float:
+        """Enhanced investment amount calculation based on market conditions"""
         try:
-            # Basic drawdown condition
-            drawdown_trigger = row.get('Drawdown_100', 0) < config.drawdown_threshold_1
+            if current_row_index < config.rolling_window:
+                return config.fixed_investment
 
-            # Additional filters for better timing
-            volatility_filter = row.get('Volatility_20', 0) > 0.15
-            rsi_oversold = row.get('RSI', 50) < 40
-            trend_support = row['close'] > row.get('SMA_200', row['close'])
+            # Get current market conditions
+            current_data = data.iloc[current_row_index]
+            drawdown_50 = current_data.get('Drawdown_50', 0)
+            drawdown_100 = current_data.get('Drawdown_100', 0)
+            rsi = current_data.get('RSI', 50)
+            volatility = current_data.get('Volatility_20', 0)
 
-            multiplier = 1.0
-            trade_type = "Regular"
+            # Base investment
+            investment_amount = config.fixed_investment
 
-            if drawdown_trigger:
-                if row.get('Drawdown_100', 0) < config.drawdown_threshold_1 * 1.5:
-                    multiplier = config.investment_multiplier_3
-                    trade_type = "Aggressive (5x)"
-                elif row.get('Drawdown_100', 0) < config.drawdown_threshold_1 * 1.2:
-                    multiplier = config.investment_multiplier_2
-                    trade_type = "Enhanced (3x)"
-                else:
-                    multiplier = config.investment_multiplier_1
-                    trade_type = "Dynamic (2x)"
+            # Increase investment during significant drawdowns
+            if drawdown_100 <= config.drawdown_threshold_1:  # -10% or worse
+                investment_amount *= config.investment_multiplier_3  # 5x
+                logger.info(f"Severe drawdown detected ({drawdown_100:.2f}%), increasing to {investment_amount}")
+            elif drawdown_100 <= config.drawdown_threshold_2:  # -4% to -10%
+                investment_amount *= config.investment_multiplier_2  # 3x
+                logger.info(f"Moderate drawdown detected ({drawdown_100:.2f}%), increasing to {investment_amount}")
+            elif drawdown_50 <= -2:  # Minor drawdown
+                investment_amount *= config.investment_multiplier_1  # 2x
 
-                # Enhance multiplier based on additional conditions
-                if volatility_filter and rsi_oversold:
-                    multiplier *= 1.2
-                    trade_type += " + Enhanced"
+            # Additional adjustments based on RSI (oversold conditions)
+            if rsi < 30:  # Oversold
+                investment_amount *= 1.2
+            elif rsi > 70:  # Overbought - reduce investment
+                investment_amount *= 0.8
 
-            return drawdown_trigger, multiplier, trade_type
+            # Volatility adjustment - invest more during high volatility (opportunity)
+            if volatility > 0.3:  # High volatility
+                investment_amount *= 1.1
+
+            return round(investment_amount, 2)
 
         except Exception as e:
-            logger.error(f"Error in optimize_entry_conditions: {e}")
-            return False, 1.0, "Regular"
+            logger.error(f"Error determining investment amount: {e}")
+            return config.fixed_investment
 
-    def backtest_enhanced_strategy(self, data: pd.DataFrame, config: SIPConfig) -> SIPResults:
-        """Enhanced backtesting with improved logic and metrics"""
-
-        if data.empty:
-            logger.error("No data provided for backtesting")
-            return SIPResults(
-                strategy_name="Enhanced Dynamic SIP",
-                total_investment=0,
-                final_portfolio_value=0,
-                total_units=0,
-                average_buy_price=0,
-                cagr=0,
-                trades=[],
-                max_drawdown=0
-            )
-
+    async def run_backtest(self, symbol: str, start_date: str, end_date: str,
+                           config: SIPConfig) -> Optional[SIPResults]:
+        """Run enhanced SIP backtest for a single symbol"""
         try:
+            logger.info(f"🚀 Starting SIP backtest for {symbol} from {start_date} to {end_date}")
+
+            # Fetch data
+            data = await self.fetch_data_from_db_async(symbol, start_date, end_date)
+
+            if data.empty:
+                logger.warning(f"No data available for {symbol}")
+                return None
+
             # Calculate technical indicators
             data = self.calculate_technical_indicators(data)
 
-            portfolio = {
-                'units': 0.0,
-                'total_investment': 0.0,
-                'trades': []
-            }
+            # Initialize portfolio tracker
+            portfolio = SIPPortfolioTracker()
 
-            # Monthly processing
-            data['YearMonth'] = data['timestamp'].dt.to_period('M')
-            unique_months = data['YearMonth'].unique()
+            # Simulate monthly SIP investments
+            for i, row in data.iterrows():
+                # Invest on fallback day of each month or first available day
+                if row['timestamp'].day == config.fallback_day or (
+                        i > 0 and row['timestamp'].month != data.iloc[i - 1]['timestamp'].month
+                ):
+                    current_price = row['close']
+                    investment_amount = self.determine_investment_amount(
+                        current_price, data, config, i
+                    )
 
-            for month in unique_months:
-                month_data = data[data['YearMonth'] == month].copy()
-                monthly_investments = 0
+                    # Execute investment
+                    drawdown = row.get('Drawdown_100', 0)
+                    trade = portfolio.execute_investment(
+                        price=current_price,
+                        amount=investment_amount,
+                        timestamp=row['timestamp'],
+                        drawdown=drawdown
+                    )
 
-                for idx, row in month_data.iterrows():
-                    # Check entry conditions
-                    should_invest, multiplier, trade_type = self.optimize_entry_conditions(row, config)
+                    logger.debug(f"Investment: {trade.amount} at {trade.price} on {trade.timestamp.date()}")
 
-                    if should_invest and row['close'] > 0:  # Ensure valid price
-                        investment_amount = config.fixed_investment * multiplier
-                        units_bought = investment_amount / row['close']
+            # Calculate final results
+            if not portfolio.trades:
+                logger.warning(f"No trades executed for {symbol}")
+                return None
 
-                        portfolio['units'] += units_bought
-                        portfolio['total_investment'] += investment_amount
-                        monthly_investments += 1
+            final_price = data.iloc[-1]['close']
+            final_portfolio_value = portfolio.get_current_value(final_price)
 
-                        trade = Trade(
-                            timestamp=row['timestamp'],
-                            price=row['close'],
-                            units=units_bought,
-                            amount=investment_amount,
-                            drawdown=row.get('Drawdown_100'),
-                            portfolio_value=portfolio['units'] * row['close'],
-                            trade_type=trade_type,
-                            total_investment=portfolio['total_investment']
-                        )
-                        portfolio['trades'].append(trade)
+            # Calculate CAGR
+            years = (data.iloc[-1]['timestamp'] - data.iloc[0]['timestamp']).days / 365.25
+            cagr = ((final_portfolio_value / portfolio.total_investment) ** (1 / years)) - 1 if years > 0 else 0
 
-                # Fallback investment if no investments made
-                if monthly_investments == 0 and len(month_data) > 0:
-                    fallback_row = month_data.iloc[-1]  # Last trading day
+            # Calculate Sharpe ratio and volatility
+            if len(data) > 1:
+                returns = data['close'].pct_change().dropna()
+                volatility = returns.std() * np.sqrt(252)
+                sharpe_ratio = (cagr - 0.05) / volatility if volatility > 0 else 0  # Assuming 5% risk-free rate
+            else:
+                volatility = None
+                sharpe_ratio = None
 
-                    if fallback_row['close'] > 0:  # Ensure valid price
-                        units_bought = config.fixed_investment / fallback_row['close']
-                        portfolio['units'] += units_bought
-                        portfolio['total_investment'] += config.fixed_investment
-
-                        trade = Trade(
-                            timestamp=fallback_row['timestamp'],
-                            price=fallback_row['close'],
-                            units=units_bought,
-                            amount=config.fixed_investment,
-                            drawdown=fallback_row.get('Drawdown_100'),
-                            portfolio_value=portfolio['units'] * fallback_row['close'],
-                            trade_type="Fallback",
-                            total_investment=portfolio['total_investment']
-                        )
-                        portfolio['trades'].append(trade)
-
-            # Calculate final metrics
-            if portfolio['total_investment'] == 0:
-                logger.error("No investments made during backtesting period")
-                return SIPResults(
-                    strategy_name="Enhanced Dynamic SIP",
-                    total_investment=0,
-                    final_portfolio_value=0,
-                    total_units=0,
-                    average_buy_price=0,
-                    cagr=0,
-                    trades=[],
-                    max_drawdown=0
-                )
-
-            final_value = portfolio['units'] * data['close'].iloc[-1]
-            num_years = max((data['timestamp'].iloc[-1] - data['timestamp'].iloc[0]).days / 365.25, 0.1)
-
-            cagr = (final_value / portfolio['total_investment']) ** (1 / num_years) - 1
-
-            # Calculate additional metrics
-            volatility = 0
-            max_drawdown = 0
-            sharpe_ratio = 0
-
-            if len(portfolio['trades']) > 1:
-                try:
-                    trade_df = pd.DataFrame([asdict(t) for t in portfolio['trades']])
-                    trade_df['portfolio_returns'] = trade_df['portfolio_value'].pct_change()
-
-                    volatility = trade_df['portfolio_returns'].std() * np.sqrt(12) if len(trade_df) > 1 else 0
-                    max_drawdown = self._calculate_max_drawdown(trade_df['portfolio_value'])
-                    sharpe_ratio = (cagr - 0.05) / volatility if volatility > 0 else 0
-                except Exception as e:
-                    logger.error(f"Error calculating additional metrics: {e}")
-
-            return SIPResults(
-                strategy_name="Enhanced Dynamic SIP",
-                total_investment=portfolio['total_investment'],
-                final_portfolio_value=final_value,
-                total_units=portfolio['units'],
-                average_buy_price=portfolio['total_investment'] / portfolio['units'] if portfolio['units'] > 0 else 0,
+            results = SIPResults(
+                strategy_name="Enhanced SIP Strategy",
+                total_investment=portfolio.total_investment,
+                final_portfolio_value=final_portfolio_value,
+                total_units=portfolio.total_units,
+                average_buy_price=portfolio.get_average_buy_price(),
                 cagr=cagr,
-                trades=portfolio['trades'],
-                max_drawdown=max_drawdown,
+                trades=portfolio.trades,
+                max_drawdown=portfolio.max_drawdown,
                 sharpe_ratio=sharpe_ratio,
                 volatility=volatility
             )
 
-        except Exception as e:
-            logger.error(f"Error in backtest_enhanced_strategy: {e}")
-            return SIPResults(
-                strategy_name="Enhanced Dynamic SIP",
-                total_investment=0,
-                final_portfolio_value=0,
-                total_units=0,
-                average_buy_price=0,
-                cagr=0,
-                trades=[],
-                max_drawdown=0
-            )
+            logger.info(f"✅ Backtest completed for {symbol}: "
+                        f"Investment: ₹{portfolio.total_investment:,.2f}, "
+                        f"Final Value: ₹{final_portfolio_value:,.2f}, "
+                        f"CAGR: {cagr * 100:.2f}%")
 
-    def _calculate_max_drawdown(self, portfolio_values: pd.Series) -> float:
-        """Calculate maximum drawdown from portfolio values"""
-        try:
-            peak = portfolio_values.cummax()
-            drawdown = (portfolio_values - peak) / peak
-            return drawdown.min()
-        except Exception as e:
-            logger.error(f"Error calculating max drawdown: {e}")
-            return 0
+            return results
 
-    async def run_batch_backtest(self, symbols: List[str], start_date: str, end_date: str,
-                                 config: SIPConfig) -> Dict[str, SIPResults]:
-        """Run backtesting on multiple symbols"""
+        except Exception as e:
+            logger.error(f"Error running backtest for {symbol}: {e}")
+            return None
+
+    async def run_batch_backtest(self, symbols: List[str], start_date: str,
+                                 end_date: str, config: SIPConfig) -> Dict[str, SIPResults]:
+        """Run backtest for multiple symbols"""
         results = {}
 
         for symbol in symbols:
             try:
-                logger.info(f"Backtesting {symbol}...")
-                data = await self.fetch_data_from_db_async(symbol, start_date, end_date)
-
-                if data.empty:
-                    logger.warning(f"No data found for {symbol}")
-                    continue
-
-                result = self.backtest_enhanced_strategy(data, config)
-                results[symbol] = result
-                logger.info(f"Backtest completed for {symbol}: CAGR {result.cagr*100:.2f}%")
-
+                result = await self.run_backtest(symbol, start_date, end_date, config)
+                if result:
+                    results[symbol] = result
+                else:
+                    logger.warning(f"Skipping {symbol} - no valid backtest result")
             except Exception as e:
-                logger.error(f"Error backtesting {symbol}: {e}")
+                logger.error(f"Error processing {symbol}: {e}")
+                continue
 
+        logger.info(f"Batch backtest completed. Processed {len(results)} out of {len(symbols)} symbols")
         return results
 
-    def get_next_investment_signals(self, data: pd.DataFrame, config: SIPConfig) -> Dict:
-        """Get investment signals for current market conditions"""
-        if data.empty:
-            return {}
-
+    def get_next_investment_signals(self, data: pd.DataFrame, config: SIPConfig) -> Dict[str, Any]:
+        """Generate investment signals for the next investment"""
         try:
-            data = self.calculate_technical_indicators(data)
-            latest = data.iloc[-1]
+            if data.empty:
+                return {"signal": "NO_DATA", "confidence": 0}
 
-            should_invest, multiplier, trade_type = self.optimize_entry_conditions(latest, config)
+            # Calculate indicators for latest data
+            data_with_indicators = self.calculate_technical_indicators(data)
+            latest = data_with_indicators.iloc[-1]
+
+            drawdown_100 = latest.get('Drawdown_100', 0)
+            rsi = latest.get('RSI', 50)
+            volatility = latest.get('Volatility_20', 0)
+
+            # Determine signal strength
+            signal_strength = "NORMAL"
+            confidence = 0.5
+            recommended_multiplier = 1.0
+
+            if drawdown_100 <= config.drawdown_threshold_1:
+                signal_strength = "STRONG_BUY"
+                confidence = 0.9
+                recommended_multiplier = config.investment_multiplier_3
+            elif drawdown_100 <= config.drawdown_threshold_2:
+                signal_strength = "BUY"
+                confidence = 0.7
+                recommended_multiplier = config.investment_multiplier_2
+            elif rsi < 30:
+                signal_strength = "OVERSOLD_BUY"
+                confidence = 0.6
+                recommended_multiplier = config.investment_multiplier_1
 
             return {
-                'should_invest': should_invest,
-                'investment_multiplier': multiplier,
-                'trade_type': trade_type,
-                'current_price': latest['close'],
-                'drawdown_100': latest.get('Drawdown_100', 0),
-                'rsi': latest.get('RSI', 50),
-                'volatility': latest.get('Volatility_20', 0),
-                'recommended_amount': config.fixed_investment * multiplier if should_invest else config.fixed_investment,
-                'next_fallback_date': self._get_next_fallback_date().isoformat()
+                "signal": signal_strength,
+                "confidence": confidence,
+                "recommended_amount": config.fixed_investment * recommended_multiplier,
+                "current_price": latest['close'],
+                "drawdown_100": drawdown_100,
+                "rsi": rsi,
+                "volatility": volatility,
+                "reasoning": self._generate_signal_reasoning(latest, config)
             }
-        except Exception as e:
-            logger.error(f"Error getting investment signals: {e}")
-            return {}
-
-    def _get_next_fallback_date(self) -> datetime:
-        """Calculate next fallback investment date (last working day of month)"""
-        today = datetime.now()
-        if today.month == 12:
-            next_month = today.replace(year=today.year + 1, month=1, day=1)
-        else:
-            next_month = today.replace(month=today.month + 1, day=1)
-
-        last_day = next_month - timedelta(days=1)
-
-        # Adjust for weekends (simple approximation)
-        while last_day.weekday() > 4:  # Saturday=5, Sunday=6
-            last_day -= timedelta(days=1)
-
-        return last_day
-
-
-# Simplified portfolio tracker that follows main.py patterns
-class SIPPortfolioTracker:
-    """Track real SIP portfolio performance using main.py database patterns"""
-
-    def __init__(self, db_session: AsyncSession):
-        self.db_session = db_session
-
-    async def create_sip_portfolio(self, user_id: str, symbol: str, config: SIPConfig) -> str:
-        """Create a new SIP portfolio for tracking"""
-        portfolio_id = str(uuid.uuid4())
-
-        try:
-            # Use the same pattern as main.py for database operations
-            query = text("""
-                INSERT INTO sip_portfolios 
-                (portfolio_id, user_id, symbol, config, created_at, status)
-                VALUES (:portfolio_id, :user_id, :symbol, :config, :created_at, :status)
-            """)
-
-            await self.db_session.execute(query, {
-                'portfolio_id': portfolio_id,
-                'user_id': user_id,
-                'symbol': symbol,
-                'config': json.dumps(asdict(config)),
-                'created_at': datetime.now(),
-                'status': 'active'
-            })
-
-            await self.db_session.commit()
-            return portfolio_id
 
         except Exception as e:
-            await self.db_session.rollback()
-            logger.error(f"Error creating SIP portfolio: {e}")
-            raise
+            logger.error(f"Error generating investment signals: {e}")
+            return {"signal": "ERROR", "confidence": 0, "error": str(e)}
 
-    async def log_sip_investment(self, portfolio_id: str, trade: Trade) -> None:
-        """Log actual SIP investment"""
-        try:
-            query = text("""
-                INSERT INTO sip_actual_trades 
-                (trade_id, portfolio_id, timestamp, price, units, amount, trade_type)
-                VALUES (:trade_id, :portfolio_id, :timestamp, :price, :units, :amount, :trade_type)
-            """)
+    def _generate_signal_reasoning(self, latest_data: pd.Series, config: SIPConfig) -> str:
+        """Generate human-readable reasoning for the investment signal"""
+        drawdown = latest_data.get('Drawdown_100', 0)
+        rsi = latest_data.get('RSI', 50)
 
-            await self.db_session.execute(query, {
-                'trade_id': str(uuid.uuid4()),
-                'portfolio_id': portfolio_id,
-                'timestamp': trade.timestamp,
-                'price': trade.price,
-                'units': trade.units,
-                'amount': trade.amount,
-                'trade_type': trade.trade_type
-            })
+        reasons = []
 
-            await self.db_session.commit()
+        if drawdown <= config.drawdown_threshold_1:
+            reasons.append(f"Severe drawdown of {drawdown:.1f}% presents excellent buying opportunity")
+        elif drawdown <= config.drawdown_threshold_2:
+            reasons.append(f"Moderate drawdown of {drawdown:.1f}% suggests good entry point")
 
-        except Exception as e:
-            await self.db_session.rollback()
-            logger.error(f"Error logging SIP investment: {e}")
-            raise
+        if rsi < 30:
+            reasons.append(f"RSI of {rsi:.1f} indicates oversold conditions")
+        elif rsi > 70:
+            reasons.append(f"RSI of {rsi:.1f} suggests overbought market - consider reducing investment")
+
+        if not reasons:
+            reasons.append("Normal market conditions - regular SIP investment recommended")
+
+        return "; ".join(reasons)

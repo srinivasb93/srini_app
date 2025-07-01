@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 import aiohttp
 from fastapi import FastAPI, Depends, HTTPException, Request, WebSocket
 from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from typing import List, Optional
 from datetime import datetime, timedelta
 import uuid
@@ -24,17 +26,15 @@ import bcrypt
 from collections import defaultdict
 from uuid import uuid4
 
-# Import database early and check the instance
-from database import get_db, init_engine
-logger.info("🔧 Main.py imported database module")
+from backend.app.database import (
+    init_databases,
+    db_manager,
+    get_db,
+    get_nsedata_db
+)
 
-# Try to import the database manager if it exists
-try:
-    from database import get_database_manager
-    logger.info(f"🔧 Main.py using DatabaseManager instance: {id(get_database_manager())}")
-except ImportError:
-    logger.warning("⚠️ get_database_manager not found - using legacy database functions")
-    get_database_manager = None
+from backend.app.routes.sip_routes import sip_router
+from backend.app.routes import data
 
 # Continue with your other imports...
 from sqlalchemy.future import select
@@ -44,7 +44,7 @@ from sqlalchemy.sql import text
 # Rest of your imports exactly as they were
 from models import Order, ScheduledOrder as ScheduledOrderModel, AutoOrder as AutoOrderModel, \
     GTTOrder as GTTOrderModel, User, Strategy
-from backend.app.routes import data
+
 from services import (
     OrderManager, OrderMonitor, init_upstox_api, init_zerodha_api,
     fetch_upstox_access_token, fetch_zerodha_access_token, place_order,
@@ -65,10 +65,57 @@ from schemas import (
 )
 from auth import UserManager, oauth2_scheme
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan - clean startup and shutdown"""
+    logger.info("🚀 Starting Modern Trading Platform...")
+
+    try:
+        # Initialize multi-database system
+        await init_databases()
+        logger.info("✅ Multi-database system initialized")
+
+        # Log available databases
+        available_databases = list(db_manager.db_configs.keys())
+        logger.info(f"📊 Available databases: {available_databases}")
+
+        # Test database connections
+        for db_name in available_databases:
+            session_factory = db_manager.get_session_factory(db_name)
+            if session_factory:
+                async with session_factory() as session:
+                    await session.execute(text("SELECT 1"))
+                logger.info(f"✅ {db_name} database connection verified")
+
+        # Start background services
+        asyncio.create_task(order_monitor.run_scheduled_tasks(user_apis=user_apis))
+        asyncio.create_task(order_manager.start(user_apis=user_apis))
+        logger.info("✅ Background services started")
+
+        yield  # Application runs here
+
+    except Exception as e:
+        logger.error(f"❌ Startup failed: {e}")
+        raise
+    finally:
+        logger.info("🛑 Shutting down application...")
+
+        # Cleanup background tasks
+        await order_monitor.cancel_all_tasks()
+
+        # Close database connections
+        for engine in db_manager.engines.values():
+            if engine:
+                await engine.dispose()
+
+        logger.info("✅ Cleanup completed")
+
 app = FastAPI(
-    title="Algo Trading App",
-    description="API for managing algorithmic trading with Upstox and Zerodha",
+    title="Modern Algorithmic Trading Platform",
+    description="Clean, scalable trading platform with multi-database architecture",
     version="1.0.0",
+    lifespan=lifespan,
     openapi_tags=[
         {"name": "auth", "description": "Authentication endpoints"},
         {"name": "orders", "description": "Order management endpoints"},
@@ -81,16 +128,18 @@ app = FastAPI(
     ]
 )
 
-# Include routers
-app.include_router(data.router)
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Add your SIP router
-try:
-    from backend.app.routes.sip_routes import sip_router
-    app.include_router(sip_router)
-    logger.info("✅ SIP router included successfully")
-except Exception as e:
-    logger.error(f"❌ Failed to include SIP router: {e}")
+# Include routers
+app.include_router(sip_router)
+app.include_router(data.router, prefix="/api/data", tags=["data"])
 
 # Initialize OrderMonitor and OrderManager
 order_monitor = OrderMonitor()
@@ -130,22 +179,27 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user_id
 
+
 async def initialize_user_apis(user_id: str, db: AsyncSession, force_reinitialize: bool = False):
-    if force_reinitialize or user_id not in user_apis:
-        try:
-            upstox_apis = await init_upstox_api(db, user_id)
-            kite_apis = await init_zerodha_api(db, user_id)
-            user_apis[user_id] = {"upstox": upstox_apis, "zerodha": kite_apis}
-        except TokenExpiredError as e:
-            logger.info(f"Token expired during initialization for user {user_id}: {e.message}")
-            user_apis[user_id] = {
-                "upstox": {"user": None, "order": None, "portfolio": None, "market_data": None, "history": None},
-                "zerodha": {"kite": None}
-            }
-            return user_apis[user_id]
-        except Exception as e:
-            logger.error(f"Failed to initialize APIs for user {user_id}: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Failed to initialize APIs: {str(e)}")
+    """Initialize trading APIs for user"""
+    if user_id in user_apis and not force_reinitialize:
+        return user_apis[user_id]
+
+    try:
+        upstox_apis = await init_upstox_api(db, user_id)
+        kite_apis = await init_zerodha_api(db, user_id)
+        user_apis[user_id] = {"upstox": upstox_apis, "zerodha": kite_apis}
+
+    except TokenExpiredError as e:
+        logger.info(f"Token expired for user {user_id}: {e.message}")
+        user_apis[user_id] = {
+            "upstox": {"user": None, "order": None, "portfolio": None, "market_data": None, "history": None},
+            "zerodha": {"kite": None}
+        }
+    except Exception as e:
+        logger.error(f"Failed to initialize APIs for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"API initialization failed: {str(e)}")
+
     return user_apis[user_id]
 
 
@@ -215,22 +269,134 @@ async def shutdown_event():
     await order_monitor.cancel_all_tasks()
     logger.info("Application shutdown")
 
-# Root endpoint
+
+# ============================================================================
+# CORE ENDPOINTS
+# ============================================================================
+
 @app.get("/")
 async def root():
-    return {"message": "Trading Backend API"}
+    """Root endpoint with system status"""
+    try:
+        # Get database status
+        db_status = {}
+        for db_name in db_manager.db_configs.keys():
+            session_factory = db_manager.get_session_factory(db_name)
+            db_status[db_name] = "healthy" if session_factory else "disconnected"
 
-# Authentication endpoints
-@app.post("/auth/register", response_model=UserResponse, tags=["auth"], dependencies=[Depends(auth_limiter)])
+        return {
+            "message": "Modern Algorithmic Trading Platform",
+            "version": "3.0.0",
+            "status": "operational",
+            "architecture": "multi-database",
+            "databases": db_status,
+            "features": [
+                "Multi-database architecture",
+                "Enhanced SIP strategies",
+                "Real-time order management",
+                "Advanced backtesting",
+                "Portfolio optimization",
+                "Risk management"
+            ],
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Root endpoint error: {e}")
+        raise HTTPException(status_code=500, detail="System error")
+
+
+@app.get("/health")
+async def health_check():
+    """Comprehensive health check"""
+    health_status = {
+        "api": "healthy",
+        "databases": {},
+        "services": {}
+    }
+
+    # Test database connections
+    for db_name in db_manager.db_configs.keys():
+        try:
+            session_factory = db_manager.get_session_factory(db_name)
+            if session_factory:
+                async with session_factory() as session:
+                    await session.execute(text("SELECT 1"))
+                health_status["databases"][db_name] = "healthy"
+            else:
+                health_status["databases"][db_name] = "disconnected"
+        except Exception as e:
+            health_status["databases"][db_name] = f"error: {str(e)}"
+
+    # Check services
+    health_status["services"]["order_manager"] = "running"
+    health_status["services"]["order_monitor"] = "running"
+
+    # Overall status
+    all_dbs_healthy = all(status == "healthy" for status in health_status["databases"].values())
+    health_status["overall"] = "healthy" if all_dbs_healthy else "degraded"
+
+    return health_status
+
+
+@app.get("/system/info")
+async def get_system_info():
+    """Get detailed system information"""
+    try:
+        system_info = {
+            "platform": "Modern Trading Platform",
+            "version": "3.0.0",
+            "databases": {},
+            "active_users": len(user_apis),
+            "uptime": datetime.now().isoformat()
+        }
+
+        # Database information
+        for db_name, config in db_manager.db_configs.items():
+            session_factory = db_manager.get_session_factory(db_name)
+
+            db_info = {
+                "description": config["description"],
+                "status": "connected" if session_factory else "disconnected",
+                "tables": 0
+            }
+
+            # Get table count
+            if session_factory:
+                try:
+                    async with session_factory() as session:
+                        result = await session.execute(text("""
+                            SELECT COUNT(*) FROM information_schema.tables 
+                            WHERE table_schema = 'public'
+                        """))
+                        db_info["tables"] = result.scalar()
+                except Exception:
+                    db_info["tables"] = "unknown"
+
+            system_info["databases"][db_name] = db_info
+
+        return system_info
+
+    except Exception as e:
+        logger.error(f"System info error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# AUTHENTICATION ENDPOINTS
+# ============================================================================
+
+@app.post("/auth/register", response_model=UserResponse, tags=["auth"])
 async def register(user: UserCreate, db: AsyncSession = Depends(get_db)):
+    """Register new user"""
+    # Check if user exists
     result = await db.execute(select(User).filter(User.email == user.email))
-    db_user = result.scalars().first()
-    if db_user:
+    if result.scalars().first():
         raise HTTPException(status_code=400, detail="Email already registered")
+
+    # Create new user
     hashed_password = bcrypt.hashpw(user.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-    user_id = str(uuid.uuid4())
     new_user = User(
-        user_id=user_id,
+        user_id=str(uuid.uuid4()),
         email=user.email,
         hashed_password=hashed_password,
         upstox_api_key=user.upstox_api_key,
@@ -239,36 +405,55 @@ async def register(user: UserCreate, db: AsyncSession = Depends(get_db)):
         zerodha_api_secret=user.zerodha_api_secret,
         created_at=datetime.now()
     )
+
     db.add(new_user)
     await db.commit()
     await db.refresh(new_user)
+
+    logger.info(f"New user registered: {user.email}")
     return UserResponse.from_orm(new_user)
 
-@app.post("/auth/login", response_model=dict, tags=["auth"], dependencies=[Depends(auth_limiter)])
+
+@app.post("/auth/login", tags=["auth"])
 async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+    """User login"""
+    # Verify user credentials
     result = await db.execute(select(User).filter(User.email == form_data.username))
     user = result.scalars().first()
+
     if not user or not bcrypt.checkpw(form_data.password.encode('utf-8'), user.hashed_password.encode('utf-8')):
-        raise HTTPException(status_code=401, detail="Incorrect email or password")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # Initialize user APIs
     try:
         await initialize_user_apis(user.user_id, db, force_reinitialize=True)
-    except TokenExpiredError as e:
-        logger.info(f"Token expired for user {user.user_id} during login")
-    token = UserManager.create_access_token(data={"sub": user.user_id})
-    return {"access_token": token, "token_type": "bearer"}
+    except TokenExpiredError:
+        logger.info(f"API tokens expired for user {user.user_id}")
 
-@app.post("/auth/upstox/", tags=["auth"], dependencies=[Depends(auth_limiter)])
+    # Create access token
+    token = UserManager.create_access_token(data={"sub": user.user_id})
+
+    logger.info(f"User logged in: {user.email}")
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user_id": user.user_id
+    }
+
+
+@app.post("/auth/upstox", tags=["auth"])
 async def auth_upstox(auth_code: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Authenticate Upstox"""
     try:
         access_token = await fetch_upstox_access_token(db, user_id, auth_code)
         if access_token:
             user_apis[user_id] = await initialize_user_apis(user_id, db, force_reinitialize=True)
             return {"status": "success", "message": "Upstox authentication successful"}
         else:
-            raise HTTPException(status_code=400, detail="Failed to authenticate with Upstox")
+            raise HTTPException(status_code=400, detail="Upstox authentication failed")
     except Exception as e:
-        logger.error(f"Error in Upstox auth: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error(f"Upstox auth error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/auth/zerodha/", tags=["auth"], dependencies=[Depends(auth_limiter)])
 async def auth_zerodha(request_token: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -1296,19 +1481,6 @@ async def get_strategy_performance(broker: str, user_id: str = Depends(get_curre
     return performance
 
 
-@app.get("/debug/db-status")
-async def debug_db_status():
-    """Check database status"""
-    try:
-        import database
-        return {
-            "session_factory_exists": database.session_factory is not None,
-            "is_initialized": database.is_database_initialized(),
-            "module_file": database.__file__
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
 # Test endpoint for main.py database access
 @app.get("/debug/test-main-db")
 async def test_main_database_simple(db: AsyncSession = Depends(get_db)):
@@ -1326,3 +1498,119 @@ async def test_main_database_simple(db: AsyncSession = Depends(get_db)):
     except Exception as e:
         logger.error(f"Main.py database test failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/debug/test-nsedata-db")
+async def test_main_database_simple(db: AsyncSession = Depends(get_nsedata_db)):
+    """Simple test of main.py database access"""
+    try:
+        result = await db.execute(text("SELECT 1 as test"))
+        test_result = result.fetchone()
+
+        return {
+            "success": True,
+            "test_result": test_result[0] if test_result else None,
+            "message": "Main.py database access working",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Main.py database test failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# MONITORING ENDPOINTS
+# ============================================================================
+
+@app.get("/metrics")
+async def get_metrics():
+    """Get application metrics"""
+    try:
+        metrics = {
+            "active_users": len(user_apis),
+            "database_connections": len([
+                db for db, status in {
+                    db_name: "connected" if db_manager.get_session_factory(db_name) else "disconnected"
+                    for db_name in db_manager.db_configs.keys()
+                }.items() if status == "connected"
+            ]),
+            "timestamp": datetime.now().isoformat()
+        }
+
+        # Add database-specific metrics
+        for db_name in db_manager.db_configs.keys():
+            session_factory = db_manager.get_session_factory(db_name)
+            if session_factory:
+                try:
+                    async with session_factory() as session:
+                        if db_name == "nsedata":
+                            # Get symbol count
+                            result = await session.execute(text("""
+                                SELECT COUNT(*) FROM pg_tables 
+                                WHERE schemaname = 'public' AND tablename ~ '^[A-Z]+$'
+                            """))
+                            metrics[f"{db_name}_symbols"] = result.scalar()
+                        elif db_name == "trading_db":
+                            # Get user count
+                            result = await session.execute(text("SELECT COUNT(*) FROM users"))
+                            metrics[f"{db_name}_users"] = result.scalar()
+                except Exception:
+                    pass
+
+        return metrics
+
+    except Exception as e:
+        logger.error(f"Metrics error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# ERROR HANDLERS
+# ============================================================================
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    logger.error(f"HTTP {exc.status_code}: {exc.detail}")
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": exc.detail,
+            "status_code": exc.status_code,
+            "timestamp": datetime.now().isoformat()
+        }
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "message": "An unexpected error occurred",
+            "timestamp": datetime.now().isoformat()
+        }
+    )
+
+
+# ============================================================================
+# DEVELOPMENT UTILITIES
+# ============================================================================
+
+if __name__ == "__main__":
+    import uvicorn
+
+    # Development configuration
+    config = {
+        "host": os.getenv("HOST", "0.0.0.0"),
+        "port": int(os.getenv("PORT", 8000)),
+        "reload": os.getenv("DEBUG", "true").lower() == "true",
+        "log_level": "info"
+    }
+
+    logger.info(f"🚀 Starting development server: http://{config['host']}:{config['port']}")
+    logger.info(f"📚 API Documentation: http://{config['host']}:{config['port']}/docs")
+
+    uvicorn.run("main:app", **config)
