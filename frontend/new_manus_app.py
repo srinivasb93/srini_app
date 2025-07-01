@@ -452,7 +452,7 @@ async def sip_strategies_page(client: Client):
     apply_theme_from_storage()
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
-    await render_sip_strategy_page(fetch_api, app.storage.user, await get_cached_instruments(broker))
+    await render_sip_strategy_page(fetch_api, app.storage.user)
 
 
 @ui.page('/backtesting')

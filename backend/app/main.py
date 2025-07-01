@@ -139,7 +139,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(sip_router)
-app.include_router(data.router, prefix="/api/data", tags=["data"])
+app.include_router(data.router, prefix="/api", tags=["data"])
 
 # Initialize OrderMonitor and OrderManager
 order_monitor = OrderMonitor()
