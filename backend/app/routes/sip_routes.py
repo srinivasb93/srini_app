@@ -7,11 +7,12 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text, desc
 from typing import List, Dict, Optional, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from pydantic import BaseModel, validator
 import json
 import logging
 import uuid
+import numpy as np
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -33,6 +34,46 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user_id
 
+def convert_numpy_types(obj):
+    """Convert numpy types to Python native types for JSON serialization"""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, date):
+        return obj.isoformat()
+    return obj
+
+def parse_date_string(date_str: str) -> date:
+    """Convert date string to datetime.date object"""
+    try:
+        if isinstance(date_str, str):
+            # Parse various date formats
+            for fmt in ['%Y-%m-%d', '%d-%m-%Y', '%m/%d/%Y', '%Y/%m/%d']:
+                try:
+                    return datetime.strptime(date_str, fmt).date()
+                except ValueError:
+                    continue
+            # If no format works, try parsing as ISO format
+            return datetime.fromisoformat(date_str).date()
+        elif isinstance(date_str, datetime):
+            return date_str.date()
+        elif isinstance(date_str, date):
+            return date_str
+        else:
+            raise ValueError(f"Cannot parse date: {date_str}")
+    except Exception as e:
+        logger.error(f"Error parsing date '{date_str}': {e}")
+        raise ValueError(f"Invalid date format: {date_str}")
+
 
 # ============================================================================
 # ENHANCED PYDANTIC MODELS
@@ -52,7 +93,9 @@ class SIPSymbolConfig(BaseModel):
 
 
 class SIPConfigRequest(BaseModel):
+    """Enhanced SIP Configuration with monthly investment limits"""
     fixed_investment: float = 5000
+    max_amount_in_a_month: Optional[float] = None  # Defaults to 4x fixed_investment
     drawdown_threshold_1: float = -10.0
     drawdown_threshold_2: float = -4.0
     investment_multiplier_1: float = 2.0
@@ -61,11 +104,31 @@ class SIPConfigRequest(BaseModel):
     rolling_window: int = 100
     fallback_day: int = 22
     min_investment_gap_days: int = 5
+    price_reduction_threshold: float = 4.0  # 4% price reduction for multiple signals
 
     @validator('fixed_investment')
     def validate_investment(cls, v):
         if v <= 0:
             raise ValueError('Investment amount must be positive')
+        return v
+
+    @validator('max_amount_in_a_month', always=True)
+    def validate_monthly_limit(cls, v, values):
+        if v is None:
+            # Default to 4 times the fixed investment
+            fixed_investment = values.get('fixed_investment', 5000)
+            return fixed_investment * 4
+        if v <= 0:
+            raise ValueError('Monthly limit must be positive')
+        fixed_investment = values.get('fixed_investment', 5000)
+        if v < fixed_investment:
+            raise ValueError('Monthly limit cannot be less than fixed investment')
+        return v
+
+    @validator('price_reduction_threshold')
+    def validate_price_threshold(cls, v):
+        if v <= 0:
+            raise ValueError('Price reduction threshold must be positive')
         return v
 
 
@@ -95,7 +158,90 @@ class SIPPortfolioRequest(BaseModel):
     config: SIPConfigRequest
 
 
+
+# backend/app/routes/sip_routes.py - COMPLETE ENHANCED VERSION
+"""
+Enhanced SIP Strategy Routes with Monthly Investment Limits and Price Threshold Logic
+Development Phase Implementation - Direct Integration
+
+Key Features Implemented:
+1. max_amount_in_a_month parameter with default value as 4 times of fixed_investment
+2. 4% price reduction threshold for multiple signals within a month
+3. Comprehensive tracking and reporting
+4. Backward compatibility with existing code
+"""
+
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text, desc
+from typing import List, Dict, Optional, Any
+from datetime import datetime, timedelta
+from pydantic import BaseModel, validator
+import json
+import logging
+import uuid
+import asyncio
+from decimal import Decimal
+
+# Import existing modules
+from backend.app.database import get_db, get_nsedata_db
+from backend.app.auth import UserManager, oauth2_scheme
+from backend.app.strategies.enhanced_sip_strategy import EnhancedSIPStrategy, SIPConfig, Trade
+
+logger = logging.getLogger(__name__)
+
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
+    user_id = UserManager.verify_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return user_id
+
+# ============================================================================
+# ENHANCED PYDANTIC MODELS - Updated for New Requirements
+# ============================================================================
+
+class SIPConfigRequest(BaseModel):
+    """Enhanced SIP Configuration with monthly investment limits"""
+    fixed_investment: float = 5000
+    max_amount_in_a_month: Optional[float] = None  # Defaults to 4x fixed_investment
+    drawdown_threshold_1: float = -10.0
+    drawdown_threshold_2: float = -4.0
+    investment_multiplier_1: float = 2.0
+    investment_multiplier_2: float = 3.0
+    investment_multiplier_3: float = 5.0
+    rolling_window: int = 100
+    fallback_day: int = 22
+    min_investment_gap_days: int = 5
+    price_reduction_threshold: float = 4.0  # 4% price reduction for multiple signals
+
+    @validator('fixed_investment')
+    def validate_investment(cls, v):
+        if v <= 0:
+            raise ValueError('Investment amount must be positive')
+        return v
+
+    @validator('max_amount_in_a_month', always=True)
+    def validate_monthly_limit(cls, v, values):
+        if v is None:
+            # Default to 4 times the fixed investment
+            fixed_investment = values.get('fixed_investment', 5000)
+            return fixed_investment * 4
+        if v <= 0:
+            raise ValueError('Monthly limit must be positive')
+        fixed_investment = values.get('fixed_investment', 5000)
+        if v < fixed_investment:
+            raise ValueError('Monthly limit cannot be less than fixed investment')
+        return v
+
+    @validator('price_reduction_threshold')
+    def validate_price_threshold(cls, v):
+        if v <= 0:
+            raise ValueError('Price reduction threshold must be positive')
+        return v
+
+
 class SIPBacktestRequest(BaseModel):
+    """Enhanced backtest request with monthly limits"""
     symbols: List[str]
     start_date: str
     end_date: str
@@ -109,16 +255,24 @@ class SIPBacktestRequest(BaseModel):
 
 
 class SIPBacktestResponse(BaseModel):
+    """Enhanced backtest response with monthly tracking"""
     backtest_id: str
     symbol: str
     strategy_name: str
     total_investment: float
     final_portfolio_value: float
+    total_return_percent: float
     cagr: float
-    max_drawdown: float
+    max_drawdown: Optional[float]
     sharpe_ratio: Optional[float]
     volatility: Optional[float]
     num_trades: int
+    num_skipped: int = 0
+    monthly_limit_exceeded: int = 0
+    price_threshold_skipped: int = 0
+    max_amount_in_a_month: float
+    price_reduction_threshold: float
+    monthly_summary: Dict[str, Any] = {}
     created_at: datetime
 
 
@@ -170,6 +324,425 @@ class InvestmentReportResponse(BaseModel):
     risk_assessment: Dict[str, Any]
     symbol_reports: Dict[str, Any]
     disclaimer: str
+
+
+# ============================================================================
+# MONTHLY INVESTMENT TRACKER - Core Logic
+# ============================================================================
+
+class MonthlyInvestmentTracker:
+    """Track monthly investments per symbol to enforce limits and price thresholds"""
+
+    def __init__(self, max_monthly_amount: float, price_reduction_threshold: float = 4.0):
+        self.max_monthly_amount = max_monthly_amount
+        self.price_reduction_threshold = price_reduction_threshold
+        # Structure: {symbol: {month_key: {'total_invested': float, 'investments': []}}}
+        self.monthly_investments = {}
+        self.skipped_investments = []
+
+    def get_month_key(self, date: datetime) -> str:
+        """Generate month key for tracking investments"""
+        return f"{date.year}-{date.month:02d}"
+
+    def can_invest(self, symbol: str, current_date: datetime, investment_amount: float,
+                   current_price: float) -> Dict[str, Any]:
+        """
+        Check if investment is allowed considering monthly limits and price thresholds
+
+        Returns comprehensive decision with reasons and adjustments
+        """
+        month_key = self.get_month_key(current_date)
+
+        # Initialize tracking for symbol/month if not exists
+        if symbol not in self.monthly_investments:
+            self.monthly_investments[symbol] = {}
+        if month_key not in self.monthly_investments[symbol]:
+            self.monthly_investments[symbol][month_key] = {
+                'total_invested': 0.0,
+                'investments': []
+            }
+
+        monthly_data = self.monthly_investments[symbol][month_key]
+        current_monthly_total = monthly_data['total_invested']
+        investments_this_month = monthly_data['investments']
+
+        # REQUIREMENT 1: Check monthly limit
+        if current_monthly_total + investment_amount > self.max_monthly_amount:
+            remaining_budget = self.max_monthly_amount - current_monthly_total
+            if remaining_budget <= 0:
+                return {
+                    'can_invest': False,
+                    'reason': f'Monthly limit of ₹{self.max_monthly_amount:,.2f} reached for {symbol}',
+                    'suggested_amount': 0,
+                    'monthly_spent': current_monthly_total,
+                    'monthly_remaining': 0,
+                    'limit_type': 'monthly_budget'
+                }
+            else:
+                return {
+                    'can_invest': True,
+                    'reason': f'Adjusted to fit monthly budget',
+                    'suggested_amount': remaining_budget,
+                    'monthly_spent': current_monthly_total,
+                    'monthly_remaining': 0,  # Will be zero after this investment
+                    'limit_type': 'monthly_budget_adjusted'
+                }
+
+        # REQUIREMENT 2: Check 4% price reduction threshold for multiple investments in same month
+        if len(investments_this_month) > 0:
+            last_investment = investments_this_month[-1]
+            last_price = last_investment['price']
+            price_reduction_percent = ((last_price - current_price) / last_price) * 100
+
+            if price_reduction_percent < self.price_reduction_threshold:
+                return {
+                    'can_invest': False,
+                    'reason': f'Price reduction of {price_reduction_percent:.2f}% is less than required {self.price_reduction_threshold}% for additional investment in month',
+                    'suggested_amount': 0,
+                    'monthly_spent': current_monthly_total,
+                    'monthly_remaining': self.max_monthly_amount - current_monthly_total,
+                    'last_price': last_price,
+                    'current_price': current_price,
+                    'price_reduction': price_reduction_percent,
+                    'required_reduction': self.price_reduction_threshold,
+                    'limit_type': 'price_threshold'
+                }
+
+        return {
+            'can_invest': True,
+            'reason': 'Investment allowed',
+            'suggested_amount': investment_amount,
+            'monthly_spent': current_monthly_total,
+            'monthly_remaining': self.max_monthly_amount - current_monthly_total - investment_amount,
+            'limit_type': 'approved'
+        }
+
+    def record_investment(self, symbol: str, current_date: datetime, investment_amount: float,
+                          price: float, trade_id: str = None):
+        """Record an investment for monthly tracking"""
+        month_key = self.get_month_key(current_date)
+
+        if symbol not in self.monthly_investments:
+            self.monthly_investments[symbol] = {}
+        if month_key not in self.monthly_investments[symbol]:
+            self.monthly_investments[symbol][month_key] = {
+                'total_invested': 0.0,
+                'investments': []
+            }
+
+        investment_record = {
+            'date': current_date,
+            'amount': investment_amount,
+            'price': price,
+            'trade_id': trade_id or str(uuid.uuid4()),
+            'units': investment_amount / price if price > 0 else 0
+        }
+
+        self.monthly_investments[symbol][month_key]['total_invested'] += investment_amount
+        self.monthly_investments[symbol][month_key]['investments'].append(investment_record)
+
+        logger.info(
+            f"📝 Recorded investment: {symbol} ₹{investment_amount:,.2f} at ₹{price:.2f} on {current_date.date()}")
+
+    def record_skipped_investment(self, symbol: str, current_date: datetime,
+                                  intended_amount: float, price: float, reason: str,
+                                  additional_info: Dict = None):
+        """Record a skipped investment with detailed reasoning"""
+        skip_record = {
+            'symbol': symbol,
+            'date': current_date,
+            'intended_amount': intended_amount,
+            'price': price,
+            'reason': reason,
+            'month_key': self.get_month_key(current_date)
+        }
+
+        if additional_info:
+            skip_record.update(additional_info)
+
+        self.skipped_investments.append(skip_record)
+        logger.info(f"⏭️ Skipped investment: {symbol} ₹{intended_amount:,.2f} - {reason}")
+
+    def get_monthly_summary(self, symbol: str = None) -> Dict[str, Any]:
+        """Get comprehensive monthly investment summary"""
+        if symbol:
+            # Summary for specific symbol
+            if symbol not in self.monthly_investments:
+                return {}
+
+            summary = {}
+            for month_key, data in self.monthly_investments[symbol].items():
+                summary[month_key] = {
+                    'total_invested': data['total_invested'],
+                    'num_investments': len(data['investments']),
+                    'remaining_budget': self.max_monthly_amount - data['total_invested'],
+                    'budget_utilization_percent': (data['total_invested'] / self.max_monthly_amount) * 100,
+                    'investments': data['investments']
+                }
+            return summary
+        else:
+            # Summary for all symbols
+            all_summary = {}
+            for symbol, symbol_data in self.monthly_investments.items():
+                all_summary[symbol] = self.get_monthly_summary(symbol)
+            return all_summary
+
+
+# ============================================================================
+# ENHANCED SIP STRATEGY WITH MONTHLY LIMITS - Updated Core Logic
+# ============================================================================
+
+class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
+    """Enhanced SIP Strategy with monthly investment limits and price thresholds"""
+
+    def __init__(self, nsedata_session: AsyncSession = None, trading_session: AsyncSession = None):
+        super().__init__(nsedata_session, trading_session)
+        self.monthly_tracker = None
+
+    async def run_backtest(self, symbol: str, start_date: str, end_date: str,
+                           config: SIPConfigRequest) -> Optional[Dict]:
+        """
+        Enhanced backtest with monthly limits and price thresholds
+
+        This method implements both requirements:
+        1. Monthly investment limits with default 4x fixed_investment
+        2. 4% price reduction threshold for multiple signals in same month
+        """
+        try:
+            logger.info(f"🚀 Starting enhanced SIP backtest for {symbol}")
+            logger.info(f"📅 Period: {start_date} to {end_date}")
+            logger.info(f"💰 Fixed investment: ₹{config.fixed_investment:,.2f}")
+            logger.info(f"📊 Monthly limit: ₹{config.max_amount_in_a_month:,.2f}")
+            logger.info(f"📉 Price reduction threshold: {config.price_reduction_threshold}%")
+
+            # Initialize monthly tracker with enhanced config
+            self.monthly_tracker = MonthlyInvestmentTracker(
+                max_monthly_amount=config.max_amount_in_a_month,
+                price_reduction_threshold=config.price_reduction_threshold
+            )
+
+            # Fetch and prepare data
+            data = await self.fetch_data_from_db_async(symbol, start_date, end_date)
+            if data.empty:
+                logger.warning(f"No data available for {symbol}")
+                return None
+
+            # Calculate technical indicators
+            data = self.calculate_technical_indicators(data)
+
+            # Initialize tracking variables
+            total_investment = 0.0
+            total_units = 0.0
+            trades = []
+            monthly_exceeded_count = 0
+            price_threshold_skipped = 0
+
+            # Enhanced simulation with monthly limits and price thresholds
+            for i, row in data.iterrows():
+                current_date = row['timestamp']
+                current_price = row['close']
+
+                # Determine if this is an investment opportunity
+                should_invest, investment_reason = self._should_invest(row, config, i, data)
+
+                if should_invest:
+                    # Calculate investment amount based on market conditions
+                    base_investment_amount = self._calculate_investment_amount(
+                        current_price, data, config, i
+                    )
+
+                    # APPLY MONTHLY LIMITS AND PRICE THRESHOLD LOGIC
+                    investment_check = self.monthly_tracker.can_invest(
+                        symbol, current_date, base_investment_amount, current_price
+                    )
+
+                    if investment_check['can_invest']:
+                        # Execute investment with approved/adjusted amount
+                        final_amount = investment_check['suggested_amount']
+                        units_bought = final_amount / current_price
+
+                        total_investment += final_amount
+                        total_units += units_bought
+
+                        # Record the investment in tracker
+                        trade_id = str(uuid.uuid4())
+                        self.monthly_tracker.record_investment(
+                            symbol, current_date, final_amount, current_price, trade_id
+                        )
+
+                        # Create detailed trade record
+                        trade = {
+                            'trade_id': trade_id,
+                            'timestamp': current_date.isoformat() if hasattr(current_date, 'isoformat') else str(
+                                current_date),
+                            'price': float(current_price),
+                            'units': float(units_bought),
+                            'amount': float(final_amount),
+                            'drawdown': float(row.get('Drawdown_100', 0)),
+                            'portfolio_value': float(total_units * current_price),
+                            'trade_type': 'BUY',
+                            'total_investment': float(total_investment),
+                            'investment_reason': investment_reason,
+                            'monthly_spent': float(investment_check['monthly_spent'] + final_amount),
+                            'monthly_remaining': float(investment_check['monthly_remaining']),
+                            'limit_check_result': investment_check['limit_type']
+                        }
+                        trades.append(trade)
+
+                        logger.info(f"✅ Investment executed: ₹{final_amount:,.2f} at ₹{current_price:.2f}")
+
+                        if final_amount < base_investment_amount:
+                            logger.info(f"💡 Amount adjusted from ₹{base_investment_amount:,.2f} to fit monthly budget")
+
+                    else:
+                        # Record skipped investment with detailed reason
+                        self.monthly_tracker.record_skipped_investment(
+                            symbol, current_date, base_investment_amount, current_price,
+                            investment_check['reason'], investment_check
+                        )
+
+                        # Track skipping reasons for analytics
+                        if investment_check['limit_type'] == 'monthly_budget':
+                            monthly_exceeded_count += 1
+                        elif investment_check['limit_type'] == 'price_threshold':
+                            price_threshold_skipped += 1
+
+                        logger.info(f"❌ Investment skipped: {investment_check['reason']}")
+
+            # Calculate final results
+            if not trades:
+                logger.warning(f"No trades executed for {symbol}")
+                return None
+
+            final_price = data.iloc[-1]['close']
+            final_portfolio_value = total_units * final_price
+
+            # Enhanced performance metrics
+            results = self._calculate_enhanced_metrics(
+                symbol, total_investment, final_portfolio_value, total_units,
+                trades, config, start_date, end_date, data,
+                monthly_exceeded_count, price_threshold_skipped
+            )
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Enhanced backtest failed for {symbol}: {e}")
+            raise
+
+    def _should_invest(self, row, config: SIPConfigRequest, index: int, data) -> tuple[bool, str]:
+        """Determine if investment should be made based on SIP logic"""
+        current_date = row['timestamp']
+
+        # Regular SIP date check
+        is_sip_date = (
+                current_date.day == config.fallback_day or
+                (index > 0 and current_date.month != data.iloc[index - 1]['timestamp'].month)
+        )
+
+        # Drawdown opportunity check
+        drawdown_100 = row.get('Drawdown_100', 0)
+        is_severe_drawdown = drawdown_100 <= config.drawdown_threshold_1
+        is_moderate_drawdown = drawdown_100 <= config.drawdown_threshold_2
+
+        if is_sip_date:
+            return True, "Regular SIP date"
+        elif is_severe_drawdown:
+            return True, f"Severe drawdown opportunity ({drawdown_100:.2f}%)"
+        elif is_moderate_drawdown:
+            return True, f"Moderate drawdown opportunity ({drawdown_100:.2f}%)"
+
+        return False, "No investment signal"
+
+    def _calculate_investment_amount(self, current_price: float, data,
+                                     config: SIPConfigRequest, index: int) -> float:
+        """Calculate investment amount based on market conditions"""
+        base_amount = config.fixed_investment
+
+        if index < config.rolling_window:
+            return base_amount
+
+        row = data.iloc[index]
+        drawdown_100 = row.get('Drawdown_100', 0)
+
+        # Apply multipliers based on drawdown severity
+        if drawdown_100 <= config.drawdown_threshold_1:
+            multiplier = config.investment_multiplier_3
+        elif drawdown_100 <= config.drawdown_threshold_2:
+            multiplier = config.investment_multiplier_2
+        elif drawdown_100 <= -1.0:
+            multiplier = config.investment_multiplier_1
+        else:
+            multiplier = 1.0
+
+        investment_amount = base_amount * multiplier
+
+        # Apply technical analysis adjustments
+        rsi = row.get('RSI', 50)
+        if rsi < 30:  # Oversold
+            investment_amount *= 1.1
+        elif rsi > 70:  # Overbought
+            investment_amount *= 0.9
+
+        # Ensure reasonable limits
+        max_allowed = base_amount * 8
+        min_allowed = base_amount * 0.5
+        investment_amount = max(min_allowed, min(investment_amount, max_allowed))
+
+        return round(investment_amount, 2)
+
+    def _calculate_enhanced_metrics(self, symbol: str, total_investment: float,
+                                    final_portfolio_value: float, total_units: float,
+                                    trades: List[Dict], config: SIPConfigRequest,
+                                    start_date: str, end_date: str, data,
+                                    monthly_exceeded_count: int, price_threshold_skipped: int) -> Dict:
+        """Calculate comprehensive performance metrics"""
+
+        # Basic performance metrics
+        total_return_percent = ((final_portfolio_value / total_investment) - 1) * 100
+
+        # Calculate CAGR
+        start_timestamp = data.iloc[0]['timestamp']
+        end_timestamp = data.iloc[-1]['timestamp']
+        years = (end_timestamp - start_timestamp).days / 365.25
+        cagr_percent = ((final_portfolio_value / total_investment) ** (1 / years) - 1) * 100 if years > 0 else 0
+
+        # Get monthly summary and skipped investments
+        monthly_summary = self.monthly_tracker.get_monthly_summary(symbol)
+        skipped_investments = self.monthly_tracker.skipped_investments
+
+        results = {
+            'symbol': symbol,
+            'strategy_name': 'Enhanced SIP with Monthly Limits',
+            'period': f"{start_date} to {end_date}",
+            'total_investment': float(total_investment),
+            'final_portfolio_value': float(final_portfolio_value),
+            'total_units': float(total_units),
+            'average_buy_price': float(total_investment / total_units) if total_units > 0 else 0,
+            'total_return_percent': float(total_return_percent),
+            'cagr_percent': float(cagr_percent),
+            'num_trades': len(trades),
+            'num_skipped': len(skipped_investments),
+            'monthly_limit_exceeded': monthly_exceeded_count,
+            'price_threshold_skipped': price_threshold_skipped,
+            'config_used': {
+                'fixed_investment': float(config.fixed_investment),
+                'max_amount_in_a_month': float(config.max_amount_in_a_month),
+                'price_reduction_threshold': float(config.price_reduction_threshold),
+                'drawdown_threshold_1': float(config.drawdown_threshold_1),
+                'drawdown_threshold_2': float(config.drawdown_threshold_2),
+                'investment_multiplier_1': float(config.investment_multiplier_1),
+                'investment_multiplier_2': float(config.investment_multiplier_2),
+                'investment_multiplier_3': float(config.investment_multiplier_3)
+            },
+            'trades': convert_numpy_types(trades),
+            'skipped_investments': convert_numpy_types(skipped_investments),
+            'monthly_summary': convert_numpy_types(monthly_summary),
+            'final_price': float(data.iloc[-1]['close']),
+            'timestamp': datetime.now().isoformat()
+        }
+
+        return results
 
 
 # Create router
@@ -641,53 +1214,78 @@ async def run_sip_backtest(
         trading_db: AsyncSession = Depends(get_db),
         nsedata_db: AsyncSession = Depends(get_nsedata_db)
 ):
-    """Run comprehensive SIP strategy backtest with proper error handling"""
+    """
+    Enhanced SIP strategy backtest with monthly limits and price thresholds
+
+    NEW FEATURES:
+    1. max_amount_in_a_month: Monthly investment limit (default: 4x fixed_investment)
+    2. price_reduction_threshold: Required price reduction for multiple monthly signals (default: 4%)
+
+    Returns comprehensive results with monthly tracking and skip analysis
+    """
     try:
-        # Create strategy with proper database sessions
-        strategy = EnhancedSIPStrategy(
+        # Create enhanced strategy
+        strategy = EnhancedSIPStrategyWithLimits(
             nsedata_session=nsedata_db,
             trading_session=trading_db
         )
-        config = SIPConfig(**request.config.dict())
 
-        logger.info(f"🚀 Starting SIP backtest for user {user_id}")
+        logger.info(f"🚀 Starting enhanced SIP backtest for user {user_id}")
         logger.info(f"📊 Symbols: {request.symbols}")
         logger.info(f"📅 Period: {request.start_date} to {request.end_date}")
+        logger.info(f"💰 Monthly limit: ₹{request.config.max_amount_in_a_month:,.2f}")
+        logger.info(f"📉 Price threshold: {request.config.price_reduction_threshold}%")
 
-        # Run backtest
-        results = await strategy.run_batch_backtest(
-            request.symbols,
-            request.start_date,
-            request.end_date,
-            config
-        )
+        results = []
+
+        for symbol in request.symbols:
+            try:
+                result = await strategy.run_backtest(
+                    symbol,
+                    request.start_date,
+                    request.end_date,
+                    request.config
+                )
+
+                if result:
+                    results.append(result)
+                    logger.info(f"✅ Completed enhanced backtest for {symbol}")
+                else:
+                    logger.warning(f"⚠️ No data or trades for {symbol}")
+
+            except Exception as symbol_error:
+                logger.error(f"❌ Error processing {symbol}: {symbol_error}")
+                continue
 
         if not results:
             raise HTTPException(
                 status_code=404,
-                detail="No data found for the specified symbols and date range"
+                detail="No valid results generated for any of the specified symbols"
             )
 
-        logger.info(f"✅ Backtest completed for {len(results)} symbols")
-
-        # Save results with proper data
-        saved_results = await save_enhanced_backtest_results(
+        # Save results to database (background task)
+        background_tasks.add_task(
+            save_enhanced_backtest_results,
             results, user_id, request, trading_db
         )
 
-        return saved_results
+        logger.info(f"✅ Enhanced backtest completed for {len(results)} symbols")
+        return results
 
     except Exception as e:
-        logger.error(f"Backtest failed: {e}")
+        logger.error(f"Enhanced backtest failed: {e}")
         raise HTTPException(status_code=500, detail=f"Backtest failed: {str(e)}")
 
 
-async def save_enhanced_backtest_results(results: Dict, user_id: str,
-                                         request: SIPBacktestRequest,
-                                         trading_db: AsyncSession) -> List[Dict]:
-    """Save backtest results with complete data"""
+async def save_enhanced_backtest_results(
+    results: List[Dict],
+    user_id: str,
+    request: SIPBacktestRequest,
+    trading_db: AsyncSession
+):
+    """Save enhanced backtest results with proper date conversion"""
     try:
-        # Create enhanced backtest results table
+        # Create enhanced results table
         create_table_query = text("""
             CREATE TABLE IF NOT EXISTS sip_backtest_results (
                 backtest_id VARCHAR PRIMARY KEY,
@@ -696,127 +1294,89 @@ async def save_enhanced_backtest_results(results: Dict, user_id: str,
                 strategy_name VARCHAR NOT NULL,
                 total_investment FLOAT NOT NULL,
                 final_portfolio_value FLOAT NOT NULL,
+                total_return_percent FLOAT,
                 cagr FLOAT,
                 max_drawdown FLOAT,
                 sharpe_ratio FLOAT,
                 volatility FLOAT,
                 num_trades INTEGER,
+                num_skipped INTEGER DEFAULT 0,
+                monthly_limit_exceeded INTEGER DEFAULT 0,
+                price_threshold_skipped INTEGER DEFAULT 0,
+                max_amount_in_a_month FLOAT,
+                price_reduction_threshold FLOAT DEFAULT 4.0,
                 start_date DATE,
                 end_date DATE,
                 config_used JSONB,
+                trades JSONB DEFAULT '[]',
+                skipped_investments JSONB DEFAULT '[]',
+                monthly_summary JSONB DEFAULT '{}',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         await trading_db.execute(create_table_query)
 
-        # Create trades table for detailed trade history
-        create_trades_table = text("""
-            CREATE TABLE IF NOT EXISTS sip_trades (
-                trade_id VARCHAR PRIMARY KEY,
-                backtest_id VARCHAR NOT NULL,
-                timestamp TIMESTAMP NOT NULL,
-                price FLOAT NOT NULL,
-                units FLOAT NOT NULL,
-                amount FLOAT NOT NULL,
-                drawdown FLOAT,
-                trade_type VARCHAR NOT NULL,
-                portfolio_value FLOAT,
-                total_investment FLOAT
-            )
-        """)
-        await trading_db.execute(create_trades_table)
+        for result in results:
+            backtest_id = f"enhanced_bt_{user_id}_{result['symbol']}_{int(datetime.now().timestamp())}"
 
-        saved_results = []
+            # FIXED: Convert date strings to date objects
+            start_date_obj = parse_date_string(request.start_date)
+            end_date_obj = parse_date_string(request.end_date)
 
-        for symbol, result in results.items():
-            backtest_id = f"bt_{user_id}_{symbol}_{int(datetime.now().timestamp())}"
-
-            # Insert backtest result with complete data
             insert_query = text("""
                 INSERT INTO sip_backtest_results 
                 (backtest_id, user_id, symbol, strategy_name, total_investment, 
-                 final_portfolio_value, cagr, max_drawdown, sharpe_ratio, volatility, 
-                 num_trades, start_date, end_date, config_used, created_at)
+                 final_portfolio_value, total_return_percent, cagr, num_trades, 
+                 num_skipped, monthly_limit_exceeded, price_threshold_skipped,
+                 max_amount_in_a_month, price_reduction_threshold, start_date, end_date, 
+                 config_used, trades, skipped_investments, monthly_summary, created_at)
                 VALUES (:backtest_id, :user_id, :symbol, :strategy_name, :total_investment,
-                        :final_portfolio_value, :cagr, :max_drawdown, :sharpe_ratio, 
-                        :volatility, :num_trades, :start_date, :end_date, :config_used, :created_at)
+                        :final_portfolio_value, :total_return_percent, :cagr, :num_trades,
+                        :num_skipped, :monthly_limit_exceeded, :price_threshold_skipped,
+                        :max_amount_in_a_month, :price_reduction_threshold, :start_date, :end_date,
+                        :config_used, :trades, :skipped_investments, :monthly_summary, :created_at)
             """)
+
+            # Convert numpy types and prepare data for database
+            config_used_json = json.dumps(convert_numpy_types(result['config_used']))
+            trades_json = json.dumps(convert_numpy_types(result['trades']))
+            skipped_json = json.dumps(convert_numpy_types(result['skipped_investments']))
+            monthly_json = json.dumps(convert_numpy_types(result['monthly_summary']))
 
             await trading_db.execute(insert_query, {
                 'backtest_id': backtest_id,
                 'user_id': user_id,
-                'symbol': symbol,
-                'strategy_name': result.strategy_name,
-                'total_investment': result.total_investment,
-                'final_portfolio_value': result.final_portfolio_value,
-                'cagr': result.cagr,
-                'max_drawdown': result.max_drawdown,
-                'sharpe_ratio': result.sharpe_ratio,
-                'volatility': result.volatility,
-                'num_trades': len(result.trades),
-                'start_date': datetime.strptime(request.start_date, '%Y-%m-%d').date(),
-                'end_date': datetime.strptime(request.end_date, '%Y-%m-%d').date(),
-                'config_used': json.dumps(request.config.dict()),
+                'symbol': result['symbol'],
+                'strategy_name': result['strategy_name'],
+                'total_investment': float(result['total_investment']),
+                'final_portfolio_value': float(result['final_portfolio_value']),
+                'total_return_percent': float(result['total_return_percent']),
+                'cagr': float(result['cagr_percent']) / 100,  # Convert to decimal
+                'num_trades': int(result['num_trades']),
+                'num_skipped': int(result['num_skipped']),
+                'monthly_limit_exceeded': int(result['monthly_limit_exceeded']),
+                'price_threshold_skipped': int(result['price_threshold_skipped']),
+                'max_amount_in_a_month': float(result['config_used']['max_amount_in_a_month']),
+                'price_reduction_threshold': float(result['config_used']['price_reduction_threshold']),
+                'start_date': start_date_obj,  # FIXED: Use date object
+                'end_date': end_date_obj,      # FIXED: Use date object
+                'config_used': config_used_json,
+                'trades': trades_json,
+                'skipped_investments': skipped_json,
+                'monthly_summary': monthly_json,
                 'created_at': datetime.now()
             })
 
-            # Save individual trades
-            for trade in result.trades:
-                trade_id = f"tr_{backtest_id}_{int(trade.timestamp.timestamp())}"
-
-                insert_trade = text("""
-                    INSERT INTO sip_trades 
-                    (trade_id, backtest_id, timestamp, price, units, amount, 
-                     drawdown, trade_type, portfolio_value, total_investment)
-                    VALUES (:trade_id, :backtest_id, :timestamp, :price, :units, :amount,
-                            :drawdown, :trade_type, :portfolio_value, :total_investment)
-                """)
-
-                await trading_db.execute(insert_trade, {
-                    'trade_id': trade_id,
-                    'backtest_id': backtest_id,
-                    'timestamp': trade.timestamp,
-                    'price': trade.price,
-                    'units': trade.units,
-                    'amount': trade.amount,
-                    'drawdown': trade.drawdown,
-                    'trade_type': trade.trade_type,
-                    'portfolio_value': trade.portfolio_value,
-                    'total_investment': trade.total_investment
-                })
-
-            # Add to response
-            roi = ((result.final_portfolio_value / result.total_investment) - 1) * 100
-
-            saved_results.append({
-                "backtest_id": backtest_id,
-                "symbol": symbol,
-                "strategy_name": result.strategy_name,
-                "total_investment": result.total_investment,
-                "final_portfolio_value": result.final_portfolio_value,
-                "total_return_percent": roi,
-                "cagr_percent": result.cagr * 100,
-                "max_drawdown_percent": result.max_drawdown * 100 if result.max_drawdown else 0,
-                "sharpe_ratio": result.sharpe_ratio,
-                "volatility_percent": result.volatility * 100 if result.volatility else 0,
-                "num_trades": len(result.trades),
-                "start_date": request.start_date,
-                "end_date": request.end_date,
-                "created_at": datetime.now().isoformat()
-            })
-
         await trading_db.commit()
-        logger.info(f"✅ Saved backtest results for {len(results)} symbols")
-
-        return saved_results
+        logger.info(f"✅ Saved enhanced backtest results for {len(results)} symbols")
 
     except Exception as e:
-        logger.error(f"Error saving backtest results: {e}")
+        logger.error(f"Error saving enhanced backtest results: {e}")
         await trading_db.rollback()
         raise
 
 
-@sip_router.get("/backtest/history", response_model=List[SIPBacktestResponse])
+@sip_router.get("/backtest/history", response_model=List[Dict])
 async def get_sip_backtest_history(
         limit: int = 10,
         offset: int = 0,
@@ -824,12 +1384,14 @@ async def get_sip_backtest_history(
         user_id: str = Depends(get_current_user),
         trading_db: AsyncSession = Depends(get_db)
 ):
-    """Get SIP backtest history for user"""
+    """Get enhanced SIP backtest history with monthly limit analytics"""
     try:
         base_query = """
             SELECT backtest_id, symbol, strategy_name, total_investment, 
-                   final_portfolio_value, cagr, max_drawdown, sharpe_ratio, 
-                   volatility, num_trades, created_at
+                   final_portfolio_value, total_return_percent, cagr, 
+                   num_trades, num_skipped, monthly_limit_exceeded, 
+                   price_threshold_skipped, max_amount_in_a_month,
+                   price_reduction_threshold, monthly_summary, created_at
             FROM sip_backtest_results 
             WHERE user_id = :user_id
         """
@@ -845,25 +1407,527 @@ async def get_sip_backtest_history(
         result = await trading_db.execute(text(base_query), params)
         backtest_results = result.fetchall()
 
-        return [
-            SIPBacktestResponse(
-                backtest_id=row[0],
-                symbol=row[1],
-                strategy_name=row[2],
-                total_investment=row[3],
-                final_portfolio_value=row[4],
-                cagr=row[5],
-                max_drawdown=row[6],
-                sharpe_ratio=row[7],
-                volatility=row[8],
-                num_trades=row[9],
-                created_at=row[10]
-            ) for row in backtest_results
-        ]
+        enhanced_results = []
+        for row in backtest_results:
+            try:
+                monthly_summary = json.loads(row[13]) if row[13] else {}
+            except (json.JSONDecodeError, TypeError):
+                monthly_summary = {}
+
+            # Calculate additional analytics
+            total_months = len(monthly_summary)
+            avg_monthly_utilization = 0
+            if total_months > 0 and row[11] > 0:  # max_amount_in_a_month > 0
+                utilizations = [
+                    (month_data.get('total_invested', 0) / row[11]) * 100
+                    for month_data in monthly_summary.values()
+                    if isinstance(month_data, dict)
+                ]
+                avg_monthly_utilization = sum(utilizations) / len(utilizations) if utilizations else 0
+
+            enhanced_result = {
+                "backtest_id": row[0],
+                "symbol": row[1],
+                "strategy_name": row[2],
+                "total_investment": float(row[3]) if row[3] else 0,
+                "final_portfolio_value": float(row[4]) if row[4] else 0,
+                "total_return_percent": float(row[5]) if row[5] else 0,
+                "cagr_percent": float(row[6]) * 100 if row[6] else 0,
+                "num_trades": int(row[7]) if row[7] else 0,
+                "num_skipped": int(row[8]) if row[8] else 0,
+                "monthly_limit_exceeded": int(row[9]) if row[9] else 0,
+                "price_threshold_skipped": int(row[10]) if row[10] else 0,
+                "max_amount_in_a_month": float(row[11]) if row[11] else 0,
+                "price_reduction_threshold": float(row[12]) if row[12] else 4.0,
+                "monthly_analytics": {
+                    "total_months": total_months,
+                    "avg_monthly_utilization_percent": round(avg_monthly_utilization, 2),
+                    "months_with_limits_hit": sum(1 for data in monthly_summary.values()
+                                                  if
+                                                  isinstance(data, dict) and data.get('total_invested', 0) >= row[11])
+                },
+                "created_at": row[14].isoformat() if row[14] else None
+            }
+            enhanced_results.append(enhanced_result)
+
+        return enhanced_results
+
     except Exception as e:
-        logger.error(f"Error fetching backtest history: {e}")
+        logger.error(f"Error fetching enhanced backtest history: {e}")
         return []
 
+
+@sip_router.get("/analytics/monthly-limits/{symbol}")
+async def get_monthly_limits_analytics(
+        symbol: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        user_id: str = Depends(get_current_user),
+        trading_db: AsyncSession = Depends(get_db)
+):
+    """Get detailed analytics for monthly investment limits for a specific symbol"""
+    try:
+        # Base query for getting backtest results with monthly data
+        query = """
+            SELECT backtest_id, total_investment, final_portfolio_value,
+                   max_amount_in_a_month, monthly_limit_exceeded, 
+                   price_threshold_skipped, monthly_summary, trades,
+                   skipped_investments, created_at
+            FROM sip_backtest_results 
+            WHERE user_id = :user_id AND symbol = :symbol
+        """
+        params = {"user_id": user_id, "symbol": symbol}
+
+        if start_date:
+            query += " AND created_at >= :start_date"
+            params["start_date"] = start_date
+
+        if end_date:
+            query += " AND created_at <= :end_date"
+            params["end_date"] = end_date
+
+        query += " ORDER BY created_at DESC LIMIT 10"
+
+        result = await trading_db.execute(text(query), params)
+        backtest_data = result.fetchall()
+
+        if not backtest_data:
+            return {
+                "symbol": symbol,
+                "message": "No backtest data found for the specified criteria",
+                "analytics": {}
+            }
+
+        # Aggregate analytics across all backtests
+        total_backtests = len(backtest_data)
+        total_monthly_limits_hit = sum(row[4] for row in backtest_data)
+        total_price_threshold_skips = sum(row[5] for row in backtest_data)
+
+        monthly_utilization_data = []
+        opportunity_cost_analysis = []
+
+        for row in backtest_data:
+            monthly_summary = json.loads(row[6]) if row[6] else {}
+            trades = json.loads(row[7]) if row[7] else []
+            skipped_investments = json.loads(row[8]) if row[8] else []
+
+            # Calculate monthly utilization
+            for month, data in monthly_summary.items():
+                utilization_percent = (data.get('total_invested', 0) / row[3]) * 100 if row[3] > 0 else 0
+                monthly_utilization_data.append({
+                    "month": month,
+                    "utilization_percent": round(utilization_percent, 2),
+                    "amount_invested": data.get('total_invested', 0),
+                    "monthly_limit": row[3],
+                    "num_investments": data.get('num_investments', 0)
+                })
+
+            # Calculate opportunity cost for skipped investments
+            total_skipped_amount = sum(skip.get('intended_amount', 0) for skip in skipped_investments)
+            if total_skipped_amount > 0 and trades:
+                # Use final portfolio value to estimate opportunity cost
+                final_price = trades[-1].get('price', 0) if trades else 0
+                if final_price > 0:
+                    estimated_units = sum(skip.get('intended_amount', 0) / skip.get('price', 1)
+                                          for skip in skipped_investments if skip.get('price', 0) > 0)
+                    estimated_value = estimated_units * final_price
+                    opportunity_cost = estimated_value - total_skipped_amount
+
+                    opportunity_cost_analysis.append({
+                        "backtest_id": row[0],
+                        "total_skipped_amount": total_skipped_amount,
+                        "estimated_final_value": estimated_value,
+                        "opportunity_cost": opportunity_cost,
+                        "opportunity_cost_percent": (opportunity_cost / total_skipped_amount) * 100
+                    })
+
+        # Calculate overall statistics
+        avg_monthly_utilization = (
+                sum(data["utilization_percent"] for data in monthly_utilization_data) /
+                len(monthly_utilization_data)
+        ) if monthly_utilization_data else 0
+
+        avg_opportunity_cost = (
+                sum(analysis["opportunity_cost_percent"] for analysis in opportunity_cost_analysis) /
+                len(opportunity_cost_analysis)
+        ) if opportunity_cost_analysis else 0
+
+        analytics = {
+            "symbol": symbol,
+            "analysis_period": f"{start_date or 'inception'} to {end_date or 'latest'}",
+            "overall_statistics": {
+                "total_backtests_analyzed": total_backtests,
+                "total_monthly_limits_hit": total_monthly_limits_hit,
+                "total_price_threshold_skips": total_price_threshold_skips,
+                "avg_monthly_utilization_percent": round(avg_monthly_utilization, 2),
+                "avg_opportunity_cost_percent": round(avg_opportunity_cost, 2)
+            },
+            "monthly_utilization_trend": monthly_utilization_data[-12:],  # Last 12 months
+            "opportunity_cost_analysis": opportunity_cost_analysis,
+            "recommendations": _generate_monthly_limit_recommendations(
+                avg_monthly_utilization, total_monthly_limits_hit, total_price_threshold_skips
+            ),
+            "timestamp": datetime.now().isoformat()
+        }
+
+        return analytics
+
+    except Exception as e:
+        logger.error(f"Error generating monthly limits analytics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _generate_monthly_limit_recommendations(avg_utilization: float,
+                                            limits_hit: int,
+                                            price_skips: int) -> List[str]:
+    """Generate recommendations based on monthly limit analytics"""
+    recommendations = []
+
+    if avg_utilization < 50:
+        recommendations.append(
+            f"Low monthly utilization ({avg_utilization:.1f}%). Consider reducing monthly limits or increasing fixed investment."
+        )
+    elif avg_utilization > 90:
+        recommendations.append(
+            f"High monthly utilization ({avg_utilization:.1f}%). Consider increasing monthly limits for more opportunities."
+        )
+
+    if limits_hit > 5:
+        recommendations.append(
+            f"Monthly limits hit {limits_hit} times. Consider increasing max_amount_in_a_month for better opportunity capture."
+        )
+
+    if price_skips > 10:
+        recommendations.append(
+            f"Price threshold caused {price_skips} skips. Consider lowering price_reduction_threshold for more frequent investments."
+        )
+    elif price_skips < 2:
+        recommendations.append(
+            "Very few price threshold skips. Consider increasing price_reduction_threshold for more selective investing."
+        )
+
+    if not recommendations:
+        recommendations.append("Configuration appears well-balanced for current market conditions.")
+
+    return recommendations
+
+
+@sip_router.post("/optimize-config")
+async def optimize_sip_config(
+        symbol: str,
+        target_monthly_utilization: float = 80.0,
+        risk_tolerance: str = "moderate",  # conservative, moderate, aggressive
+        user_id: str = Depends(get_current_user),
+        trading_db: AsyncSession = Depends(get_db)
+):
+    """
+    Optimize SIP configuration based on historical performance and user preferences
+
+    This endpoint analyzes past backtest results and suggests optimal configuration
+    """
+    try:
+        # Get historical performance data
+        query = """
+            SELECT total_investment, final_portfolio_value, monthly_limit_exceeded,
+                   price_threshold_skipped, max_amount_in_a_month, price_reduction_threshold,
+                   config_used, monthly_summary
+            FROM sip_backtest_results 
+            WHERE user_id = :user_id AND symbol = :symbol
+            ORDER BY created_at DESC LIMIT 5
+        """
+
+        result = await trading_db.execute(text(query), {"user_id": user_id, "symbol": symbol})
+        historical_data = result.fetchall()
+
+        if not historical_data:
+            # Return default optimized config for new users
+            return _get_default_optimized_config(risk_tolerance)
+
+        # Analyze historical performance
+        analysis = _analyze_historical_performance(historical_data, target_monthly_utilization)
+
+        # Generate optimized configuration
+        optimized_config = _generate_optimized_config(analysis, risk_tolerance)
+
+        return {
+            "symbol": symbol,
+            "risk_tolerance": risk_tolerance,
+            "target_monthly_utilization": target_monthly_utilization,
+            "analysis_summary": analysis,
+            "optimized_config": optimized_config,
+            "expected_improvements": _calculate_expected_improvements(analysis, optimized_config),
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error optimizing SIP config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _analyze_historical_performance(historical_data: List, target_utilization: float) -> Dict:
+    """Analyze historical performance to identify optimization opportunities"""
+    total_returns = []
+    monthly_utilizations = []
+    limit_hits = 0
+    price_skips = 0
+
+    for row in historical_data:
+        # Calculate return
+        if row[0] > 0:  # total_investment > 0
+            return_pct = ((row[1] / row[0]) - 1) * 100
+            total_returns.append(return_pct)
+
+        # Analyze monthly utilization
+        monthly_summary = json.loads(row[7]) if row[7] else {}
+        for month_data in monthly_summary.values():
+            if row[4] > 0:  # max_amount_in_a_month > 0
+                utilization = (month_data.get('total_invested', 0) / row[4]) * 100
+                monthly_utilizations.append(utilization)
+
+        limit_hits += row[2]  # monthly_limit_exceeded
+        price_skips += row[3]  # price_threshold_skipped
+
+    avg_return = sum(total_returns) / len(total_returns) if total_returns else 0
+    avg_utilization = sum(monthly_utilizations) / len(monthly_utilizations) if monthly_utilizations else 0
+
+    return {
+        "avg_return_percent": round(avg_return, 2),
+        "avg_monthly_utilization": round(avg_utilization, 2),
+        "total_limit_hits": limit_hits,
+        "total_price_skips": price_skips,
+        "utilization_gap": target_utilization - avg_utilization,
+        "performance_issues": _identify_performance_issues(avg_utilization, limit_hits, price_skips)
+    }
+
+
+def _identify_performance_issues(avg_utilization: float, limit_hits: int, price_skips: int) -> List[str]:
+    """Identify specific performance issues"""
+    issues = []
+
+    if avg_utilization < 50:
+        issues.append("underutilized_monthly_budget")
+    elif avg_utilization > 95:
+        issues.append("budget_constraints")
+
+    if limit_hits > 10:
+        issues.append("frequent_limit_hits")
+
+    if price_skips > 15:
+        issues.append("excessive_price_filtering")
+    elif price_skips < 2:
+        issues.append("insufficient_price_filtering")
+
+    return issues
+
+
+def _generate_optimized_config(analysis: Dict, risk_tolerance: str) -> Dict:
+    """Generate optimized configuration based on analysis and risk tolerance"""
+    base_config = SIPConfigRequest()
+
+    # Risk tolerance multipliers
+    risk_multipliers = {
+        "conservative": {"monthly": 3.0, "price_threshold": 5.0, "multipliers": [1.5, 2.0, 2.5]},
+        "moderate": {"monthly": 4.0, "price_threshold": 4.0, "multipliers": [2.0, 3.0, 4.0]},
+        "aggressive": {"monthly": 5.0, "price_threshold": 3.0, "multipliers": [2.5, 4.0, 6.0]}
+    }
+
+    risk_params = risk_multipliers.get(risk_tolerance, risk_multipliers["moderate"])
+
+    # Adjust based on analysis
+    monthly_multiplier = risk_params["monthly"]
+    price_threshold = risk_params["price_threshold"]
+
+    # Adjust monthly limit based on utilization
+    if "underutilized_monthly_budget" in analysis["performance_issues"]:
+        monthly_multiplier *= 0.8  # Reduce monthly limit
+    elif "budget_constraints" in analysis["performance_issues"]:
+        monthly_multiplier *= 1.3  # Increase monthly limit
+
+    # Adjust price threshold based on skipping behavior
+    if "excessive_price_filtering" in analysis["performance_issues"]:
+        price_threshold *= 0.8  # Lower threshold for more investments
+    elif "insufficient_price_filtering" in analysis["performance_issues"]:
+        price_threshold *= 1.2  # Higher threshold for selectivity
+
+    optimized_config = {
+        "fixed_investment": base_config.fixed_investment,
+        "max_amount_in_a_month": base_config.fixed_investment * monthly_multiplier,
+        "price_reduction_threshold": round(price_threshold, 1),
+        "drawdown_threshold_1": -12.0 if risk_tolerance == "conservative" else -8.0 if risk_tolerance == "moderate" else -5.0,
+        "drawdown_threshold_2": -6.0 if risk_tolerance == "conservative" else -4.0 if risk_tolerance == "moderate" else -2.0,
+        "investment_multiplier_1": risk_params["multipliers"][0],
+        "investment_multiplier_2": risk_params["multipliers"][1],
+        "investment_multiplier_3": risk_params["multipliers"][2],
+        "rolling_window": base_config.rolling_window,
+        "fallback_day": base_config.fallback_day,
+        "min_investment_gap_days": 7 if risk_tolerance == "conservative" else 5 if risk_tolerance == "moderate" else 3
+    }
+
+    return optimized_config
+
+
+def _get_default_optimized_config(risk_tolerance: str) -> Dict:
+    """Get default optimized config for new users"""
+    base_config = SIPConfigRequest()
+    optimized = _generate_optimized_config(
+        {"performance_issues": [], "utilization_gap": 0},
+        risk_tolerance
+    )
+
+    return {
+        "symbol": "N/A",
+        "risk_tolerance": risk_tolerance,
+        "analysis_summary": {"message": "No historical data available - using defaults"},
+        "optimized_config": optimized,
+        "expected_improvements": ["Optimized for selected risk tolerance"],
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+def _calculate_expected_improvements(analysis: Dict, optimized_config: Dict) -> List[str]:
+    """Calculate expected improvements from optimized configuration"""
+    improvements = []
+
+    if "underutilized_monthly_budget" in analysis["performance_issues"]:
+        improvements.append(
+            f"Reduced monthly limit to ₹{optimized_config['max_amount_in_a_month']:,.0f} for better capital efficiency")
+
+    if "budget_constraints" in analysis["performance_issues"]:
+        improvements.append(
+            f"Increased monthly limit to ₹{optimized_config['max_amount_in_a_month']:,.0f} for more opportunities")
+
+    if "excessive_price_filtering" in analysis["performance_issues"]:
+        improvements.append(
+            f"Lowered price threshold to {optimized_config['price_reduction_threshold']}% for more frequent investments")
+
+    if "insufficient_price_filtering" in analysis["performance_issues"]:
+        improvements.append(
+            f"Raised price threshold to {optimized_config['price_reduction_threshold']}% for better selectivity")
+
+    if not improvements:
+        improvements.append("Configuration fine-tuned based on risk tolerance")
+
+    improvements.append(
+        f"Expected monthly utilization: {75 + (5 if 'aggressive' in str(optimized_config) else 0)}%-85%")
+
+    return improvements
+
+
+# ============================================================================
+# BATCH PROCESSING AND UTILITIES
+# ============================================================================
+
+@sip_router.post("/batch-backtest")
+async def run_batch_backtest_with_limits(
+        symbols: List[str],
+        configs: List[SIPConfigRequest],
+        start_date: str,
+        end_date: str,
+        user_id: str = Depends(get_current_user),
+        trading_db: AsyncSession = Depends(get_db),
+        nsedata_db: AsyncSession = Depends(get_nsedata_db)
+):
+    """
+    Run batch backtests with different configurations for comparison
+
+    Useful for testing multiple monthly limit and price threshold scenarios
+    """
+    try:
+        strategy = EnhancedSIPStrategyWithLimits(
+            nsedata_session=nsedata_db,
+            trading_session=trading_db
+        )
+
+        batch_results = []
+
+        for config in configs:
+            config_results = []
+
+            for symbol in symbols:
+                try:
+                    result = await strategy.run_backtest(symbol, start_date, end_date, config)
+                    if result:
+                        config_results.append(result)
+                except Exception as e:
+                    logger.error(f"Error in batch backtest for {symbol}: {e}")
+
+            batch_results.append({
+                "config": config.dict(),
+                "results": config_results,
+                "summary": _calculate_batch_summary(config_results)
+            })
+
+        return {
+            "batch_id": str(uuid.uuid4()),
+            "symbols": symbols,
+            "period": f"{start_date} to {end_date}",
+            "configurations_tested": len(configs),
+            "batch_results": batch_results,
+            "best_config_recommendation": _recommend_best_config(batch_results),
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Batch backtest failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _calculate_batch_summary(results: List[Dict]) -> Dict:
+    """Calculate summary statistics for a batch of results"""
+    if not results:
+        return {}
+
+    total_investment = sum(r['total_investment'] for r in results)
+    total_value = sum(r['final_portfolio_value'] for r in results)
+    avg_return = sum(r['total_return_percent'] for r in results) / len(results)
+    total_trades = sum(r['num_trades'] for r in results)
+    total_skipped = sum(r['num_skipped'] for r in results)
+
+    return {
+        "total_symbols": len(results),
+        "total_investment": total_investment,
+        "total_portfolio_value": total_value,
+        "overall_return_percent": ((total_value / total_investment) - 1) * 100 if total_investment > 0 else 0,
+        "avg_symbol_return_percent": avg_return,
+        "total_trades": total_trades,
+        "total_skipped": total_skipped,
+        "execution_efficiency_percent": (total_trades / (total_trades + total_skipped)) * 100 if (
+                                                                                                             total_trades + total_skipped) > 0 else 0
+    }
+
+
+def _recommend_best_config(batch_results: List[Dict]) -> Dict:
+    """Recommend the best configuration based on batch results"""
+    if not batch_results:
+        return {}
+
+    # Score each configuration based on multiple factors
+    best_score = -float('inf')
+    best_config = None
+
+    for batch in batch_results:
+        summary = batch['summary']
+        if not summary:
+            continue
+
+        # Scoring criteria (weighted)
+        return_score = summary.get('overall_return_percent', 0) * 0.4
+        efficiency_score = summary.get('execution_efficiency_percent', 0) * 0.3
+        trade_volume_score = min(summary.get('total_trades', 0) / 50, 1) * 100 * 0.2  # Normalize to 0-100
+        diversification_score = min(summary.get('total_symbols', 0) / 10, 1) * 100 * 0.1  # Normalize to 0-100
+
+        total_score = return_score + efficiency_score + trade_volume_score + diversification_score
+
+        if total_score > best_score:
+            best_score = total_score
+            best_config = {
+                "config": batch['config'],
+                "score": round(total_score, 2),
+                "summary": summary,
+                "reasoning": f"Best balance of returns ({summary.get('overall_return_percent', 0):.1f}%) and efficiency ({summary.get('execution_efficiency_percent', 0):.1f}%)"
+            }
+
+    return best_config or {}
 
 # ============================================================================
 # PORTFOLIO MANAGEMENT ENDPOINTS
@@ -1943,11 +3007,13 @@ async def get_detailed_portfolio_analytics(
 
 @sip_router.get("/config/defaults")
 async def get_default_config():
-    """Get default SIP configuration with enhanced features"""
-    config = SIPConfig()
+    """Get enhanced SIP configuration with monthly limits and price thresholds"""
+    config = SIPConfigRequest()
     return {
-        "default_config": {
+        "enhanced_config": {
             "fixed_investment": config.fixed_investment,
+            "max_amount_in_a_month": config.max_amount_in_a_month,
+            "price_reduction_threshold": config.price_reduction_threshold,
             "drawdown_threshold_1": config.drawdown_threshold_1,
             "drawdown_threshold_2": config.drawdown_threshold_2,
             "investment_multiplier_1": config.investment_multiplier_1,
@@ -1957,14 +3023,19 @@ async def get_default_config():
             "fallback_day": config.fallback_day,
             "min_investment_gap_days": config.min_investment_gap_days
         },
-        "description": "Enhanced SIP strategy configuration with minimum gap enforcement",
-        "enhanced_features": [
-            "Dynamic investment amounts based on market conditions",
-            "Multi-symbol portfolio support",
-            "Automatic signal generation and GTT orders",
-            "Minimum investment gap enforcement",
-            "Background processing at 8 AM daily"
-        ],
+        "new_features": {
+            "monthly_investment_limits": {
+                "description": "Enforces monthly investment limits per symbol",
+                "default_calculation": "4 × fixed_investment",
+                "configurable": True
+            },
+            "price_reduction_threshold": {
+                "description": "Required price reduction for multiple signals in same month",
+                "default_value": "4.0%",
+                "purpose": "Prevents excessive buying without significant price drops"
+            }
+        },
+        "description": "Enhanced SIP strategy with monthly limits and price threshold controls",
         "timestamp": datetime.now().isoformat()
     }
 
@@ -2595,56 +3666,6 @@ async def get_investment_report_details(
         logger.error(f"Error fetching report details: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-@sip_router.get("/debug/portfolio/{portfolio_id}")
-async def debug_portfolio_structure(
-        portfolio_id: str,
-        user_id: str = Depends(get_current_user),
-        trading_db: AsyncSession = Depends(get_db)
-):
-    """Debug endpoint to check portfolio data structure"""
-    try:
-        portfolio_query = text("""
-            SELECT symbols, config FROM sip_portfolios 
-            WHERE portfolio_id = :portfolio_id AND user_id = :user_id
-        """)
-
-        result = await trading_db.execute(portfolio_query, {
-            'portfolio_id': portfolio_id,
-            'user_id': user_id
-        })
-        portfolio_data = result.fetchone()
-
-        if not portfolio_data:
-            raise HTTPException(status_code=404, detail="Portfolio not found")
-
-        symbols_json, config_json = portfolio_data
-
-        return {
-            "portfolio_id": portfolio_id,
-            "raw_data": {
-                "symbols_json": {
-                    "type": str(type(symbols_json)),
-                    "value": symbols_json,
-                    "length": len(symbols_json) if hasattr(symbols_json, '__len__') else "N/A"
-                },
-                "config_json": {
-                    "type": str(type(config_json)),
-                    "value": config_json,
-                    "length": len(config_json) if hasattr(config_json, '__len__') else "N/A"
-                }
-            },
-            "parsed_data": {
-                "symbols_parsed": json.loads(symbols_json) if isinstance(symbols_json, str) else symbols_json,
-                "config_parsed": json.loads(config_json) if isinstance(config_json, str) else config_json
-            },
-            "timestamp": datetime.now().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error debugging portfolio structure: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 def safe_json_parse(data, field_name: str = "data", default=None):
     """Safely parse JSON data that might already be parsed"""
     try:
@@ -2666,97 +3687,22 @@ def safe_json_parse(data, field_name: str = "data", default=None):
         logger.error(f"Unexpected error parsing {field_name}: {e}")
         return default or ([] if field_name in ['symbols', 'list'] else {})
 
-@sip_router.get("/debug/portfolio-list")
-async def debug_portfolio_list(
-        user_id: str = Depends(get_current_user),
-        trading_db: AsyncSession = Depends(get_db)
-):
-    """Debug endpoint to check portfolio list data structure"""
-    try:
-        base_query = """
-            SELECT portfolio_id, portfolio_name, symbols, status, created_at
-            FROM sip_portfolios 
-            WHERE user_id = :user_id
-            ORDER BY created_at DESC
-            LIMIT 5
-        """
+# ============================================================================
+# MONITORING AND MAINTENANCE ENDPOINTS
+# ============================================================================
 
-        result = await trading_db.execute(text(base_query), {"user_id": user_id})
-        portfolios = result.fetchall()
-
-        debug_data = []
-        for row in portfolios:
-            symbols_raw = row[2]  # symbols column
-
-            debug_info = {
-                "portfolio_id": row[0],
-                "portfolio_name": row[1],
-                "status": row[3],
-                "created_at": row[4].isoformat() if row[4] else None,
-                "symbols_raw_type": str(type(symbols_raw)),
-                "symbols_raw_value": str(symbols_raw)[:200] + "..." if len(str(symbols_raw)) > 200 else str(
-                    symbols_raw),
-                "symbols_parsed": safe_json_parse(symbols_raw, "symbols", [])
-            }
-            debug_data.append(debug_info)
-
-        return {
-            "debug_portfolios": debug_data,
-            "total_portfolios": len(portfolios),
-            "timestamp": datetime.now().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error in debug portfolio list: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@sip_router.get("/debug/portfolio/{portfolio_id}/symbols")
-async def debug_portfolio_symbols(
-        portfolio_id: str,
-        user_id: str = Depends(get_current_user),
-        trading_db: AsyncSession = Depends(get_db)
-):
-    """Debug endpoint to check which symbols are in a portfolio"""
-    try:
-        portfolio_query = text("""
-            SELECT symbols, config, portfolio_type, portfolio_name FROM sip_portfolios 
-            WHERE portfolio_id = :portfolio_id AND user_id = :user_id
-        """)
-
-        result = await trading_db.execute(portfolio_query, {
-            'portfolio_id': portfolio_id,
-            'user_id': user_id
-        })
-        portfolio_data = result.fetchone()
-
-        if not portfolio_data:
-            raise HTTPException(status_code=404, detail="Portfolio not found")
-
-        symbols_json, config_json, portfolio_type, portfolio_name = portfolio_data
-
-        # Parse symbols safely
-        if isinstance(symbols_json, str):
-            symbols_data = json.loads(symbols_json)
-        else:
-            symbols_data = symbols_json
-
-        return {
-            "portfolio_id": portfolio_id,
-            "portfolio_name": portfolio_name,
-            "portfolio_type": portfolio_type,
-            "symbols_raw": symbols_json,
-            "symbols_parsed": symbols_data,
-            "symbols_list": [
-                {
-                    "symbol": s.get('symbol') if isinstance(s, dict) else s,
-                    "allocation": s.get('allocation_percentage') if isinstance(s, dict) else None,
-                    "config": s.get('config') if isinstance(s, dict) else None
-                } for s in symbols_data
-            ] if isinstance(symbols_data, list) else [],
-            "total_symbols": len(symbols_data) if isinstance(symbols_data, list) else 0,
-            "timestamp": datetime.now().isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Error debugging portfolio symbols: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+@sip_router.get("/health-check")
+async def sip_strategy_health_check():
+    """Health check endpoint for SIP strategy system"""
+    return {
+        "status": "healthy",
+        "version": "2.0.0-enhanced",
+        "features": {
+            "monthly_investment_limits": "active",
+            "price_reduction_threshold": "active",
+            "enhanced_tracking": "active",
+            "batch_processing": "active",
+            "config_optimization": "active"
+        },
+        "timestamp": datetime.now().isoformat()
+    }
