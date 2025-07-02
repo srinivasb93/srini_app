@@ -181,7 +181,7 @@ sip_router = APIRouter(prefix="/sip", tags=["sip-strategy"])
 # ============================================================================
 
 async def daily_signal_check():
-    """Background task to check for signals daily at 8 AM"""
+    """Background task to check for signals daily at 8 AM - FIXED JSON handling"""
     logger.info("🔄 Starting daily signal check at 8 AM")
 
     try:
@@ -203,18 +203,38 @@ async def daily_signal_check():
 
                 logger.info(f"Processing {len(portfolios)} active portfolios")
 
-                strategy = EnhancedSIPStrategy(nsedata_session=nsedata_db)
+                strategy = EnhancedSIPStrategy(
+                    nsedata_session=nsedata_db,
+                    trading_session=trading_db
+                )
 
                 for portfolio in portfolios:
                     portfolio_id, user_id, symbols_json, config_json, total_invested, current_units, next_investment_date = portfolio
 
                     try:
-                        symbols_data = json.loads(symbols_json)
-                        config = SIPConfig(**json.loads(config_json))
+                        # FIXED: Safe JSON parsing
+                        if isinstance(symbols_json, str):
+                            symbols_data = json.loads(symbols_json)
+                        else:
+                            symbols_data = symbols_json
+
+                        if isinstance(config_json, str):
+                            config_dict = json.loads(config_json)
+                        else:
+                            config_dict = config_json
+
+                        config = SIPConfig(**config_dict)
 
                         # Process each symbol in the portfolio
                         for symbol_config in symbols_data:
-                            symbol = symbol_config['symbol']
+                            if isinstance(symbol_config, dict):
+                                symbol = symbol_config.get('symbol')
+                            else:
+                                symbol = symbol_config  # Direct string
+
+                            if not symbol:
+                                logger.warning(f"Skipping invalid symbol config: {symbol_config}")
+                                continue
 
                             # Check if it's time for next investment
                             current_date = datetime.now().date()
@@ -239,40 +259,32 @@ async def daily_signal_check():
                                 days_since_last = (current_date - last_trade_date.date()).days
                                 if days_since_last < config.min_investment_gap_days:
                                     logger.info(
-                                        f"Skipping {portfolio_id}/{symbol} - only {days_since_last} days since last investment")
+                                        f"Skipping {symbol} - only {days_since_last} days since last investment")
                                     continue
 
                             # Generate signals
-                            end_date = current_date.strftime('%Y-%m-%d')
-                            start_date = (current_date - timedelta(days=365)).strftime('%Y-%m-%d')
+                            try:
+                                end_date = datetime.now().strftime('%Y-%m-%d')
+                                start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
 
-                            data = await strategy.fetch_data_from_db_async(symbol, start_date, end_date)
+                                data = await strategy.fetch_data_from_db_async(symbol, start_date, end_date)
+                                if not data.empty:
+                                    signals = strategy.get_next_investment_signals(data, config)
 
-                            if data.empty:
-                                logger.warning(f"No data for {symbol}")
-                                continue
+                                    # Save signal if valid
+                                    if signals.get('signal') not in ['NO_DATA', 'ERROR']:
+                                        await save_signal_with_gtt_order(portfolio_id, symbol, signals, trading_db,
+                                                                         config)
+                                        logger.info(f"✅ Generated daily signal for {symbol}")
 
-                            signals = strategy.get_next_investment_signals(data, config)
+                            except Exception as signal_error:
+                                logger.error(f"Error generating daily signal for {symbol}: {signal_error}")
 
-                            # Save signal and create GTT order if needed
-                            if signals.get('signal') not in ['NO_DATA', 'ERROR']:
-                                await save_signal_with_gtt_order(
-                                    portfolio_id, symbol, signals, trading_db, config
-                                )
-
-                        # Update next investment date
-                        next_date = calculate_next_investment_date(current_date, config)
-                        await update_next_investment_date(portfolio_id, next_date, trading_db)
-
-                    except Exception as e:
-                        logger.error(f"Error processing portfolio {portfolio_id}: {e}")
-                        continue
-
-                await trading_db.commit()
-                logger.info("✅ Daily signal check completed")
+                    except Exception as portfolio_error:
+                        logger.error(f"Error processing portfolio {portfolio_id}: {portfolio_error}")
 
     except Exception as e:
-        logger.error(f"Error in daily signal check: {e}")
+        logger.error(f"Critical error in daily signal check: {e}")
 
 
 def calculate_next_investment_date(current_date: datetime.date, config: SIPConfig) -> datetime.date:
@@ -289,20 +301,22 @@ def calculate_next_investment_date(current_date: datetime.date, config: SIPConfi
     return next_investment
 
 
-async def save_signal_with_gtt_order(portfolio_id: str, symbol: str, signals: Dict,
+async def save_signal_with_gtt_order(portfolio_id: str, symbol: str, signals: Dict[str, Any],
                                      trading_db: AsyncSession, config: SIPConfig):
-    """Save signal and create GTT limit order"""
+    """Save investment signal with GTT order - FIXED JSON handling"""
     try:
-        signal_id = f"sg_{portfolio_id}_{int(datetime.now().timestamp())}"
+        signal_id = f"sig_{portfolio_id}_{symbol}_{int(datetime.now().timestamp())}"
 
         # Determine signal strength
-        signal_strength = "low"
-        if signals.get('confidence', 0) > 0.7:
+        confidence = signals.get('confidence', 0)
+        if confidence > 0.7:
             signal_strength = "high"
-        elif signals.get('confidence', 0) > 0.4:
+        elif confidence > 0.4:
             signal_strength = "medium"
+        else:
+            signal_strength = "low"
 
-        # Calculate GTT trigger price (slightly above current for dip buying)
+        # Calculate GTT trigger price (slightly below current for dip buying)
         current_price = signals.get('current_price', 0)
         gtt_trigger_price = current_price * 0.98  # 2% below current price
 
@@ -321,21 +335,45 @@ async def save_signal_with_gtt_order(portfolio_id: str, symbol: str, signals: Di
                 is_processed BOOLEAN DEFAULT FALSE,
                 gtt_order_id VARCHAR,
                 gtt_trigger_price FLOAT,
+                signal_data JSONB,  -- Store full signal data
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP
             )
         """)
         await trading_db.execute(create_signals_table)
 
+        # FIXED: Proper JSON serialization for signal_data
+        try:
+            # Ensure all values in signals are JSON serializable
+            serializable_signals = {}
+            for key, value in signals.items():
+                if isinstance(value, (int, float, str, bool, list, dict)) or value is None:
+                    serializable_signals[key] = value
+                elif hasattr(value, 'isoformat'):  # datetime objects
+                    serializable_signals[key] = value.isoformat()
+                else:
+                    serializable_signals[key] = str(value)  # Convert to string as fallback
+
+            signal_data_json = json.dumps(serializable_signals)
+
+        except Exception as json_error:
+            logger.error(f"JSON serialization error for signals: {json_error}")
+            # Fallback to basic signal data
+            signal_data_json = json.dumps({
+                "signal": signals.get('signal', 'UNKNOWN'),
+                "confidence": signals.get('confidence', 0),
+                "message": signals.get('message', 'Signal data serialization failed')
+            })
+
         insert_signal = text("""
             INSERT INTO sip_signals 
             (signal_id, portfolio_id, symbol, signal_type, recommended_amount, 
              multiplier, current_price, drawdown_percent, signal_strength, 
-             gtt_trigger_price, created_at, expires_at)
+             gtt_trigger_price, signal_data, created_at, expires_at)
             VALUES (:signal_id, :portfolio_id, :symbol, :signal_type, 
                     :recommended_amount, :multiplier, :current_price, 
                     :drawdown_percent, :signal_strength, :gtt_trigger_price,
-                    :created_at, :expires_at)
+                    :signal_data, :created_at, :expires_at)
         """)
 
         await trading_db.execute(insert_signal, {
@@ -349,15 +387,18 @@ async def save_signal_with_gtt_order(portfolio_id: str, symbol: str, signals: Di
             'drawdown_percent': signals.get('drawdown_100'),
             'signal_strength': signal_strength,
             'gtt_trigger_price': gtt_trigger_price,
+            'signal_data': signal_data_json,
             'created_at': datetime.now(),
             'expires_at': datetime.now() + timedelta(days=7)
         })
 
-        logger.info(f"✅ Signal and GTT order created for portfolio {portfolio_id}")
+        await trading_db.commit()
+        logger.info(f"✅ Signal and GTT order created for portfolio {portfolio_id}, symbol {symbol}")
 
     except Exception as e:
         logger.error(f"Error saving signal with GTT order: {e}")
         await trading_db.rollback()
+        raise  # Re-raise to handle in calling function
 
 
 async def update_next_investment_date(portfolio_id: str, next_date: datetime.date,
@@ -995,7 +1036,7 @@ async def get_sip_portfolios(
         user_id: str = Depends(get_current_user),
         trading_db: AsyncSession = Depends(get_db)
 ):
-    """Get user's SIP portfolios with enhanced information"""
+    """Get user's SIP portfolios with enhanced information - FIXED VERSION"""
     try:
         base_query = """
             SELECT portfolio_id, portfolio_name, portfolio_type, symbols, status, 
@@ -1021,25 +1062,54 @@ async def get_sip_portfolios(
         enhanced_portfolios = []
 
         for row in portfolios:
-            symbols_data = json.loads(row[3]) if row[3] else []
+            try:
+                # CRITICAL FIX: Safe JSON parsing for symbols
+                symbols_raw = row[3]  # symbols column
 
-            portfolio_info = {
-                "portfolio_id": row[0],
-                "portfolio_name": row[1],
-                "portfolio_type": row[2],
-                "symbols": symbols_data,
-                "status": row[4],
-                "total_invested": row[5] or 0,
-                "current_units": row[6] or 0,
-                "current_value": row[7] or 0,
-                "next_investment_date": row[8].isoformat() if row[8] else None,
-                "auto_rebalance": row[9] or False,
-                "created_at": row[10].isoformat() if row[10] else None,
-                "symbols_count": len(symbols_data)
-            }
+                if symbols_raw is None:
+                    symbols_data = []
+                elif isinstance(symbols_raw, str):
+                    # It's a JSON string, parse it
+                    try:
+                        symbols_data = json.loads(symbols_raw)
+                    except json.JSONDecodeError as json_err:
+                        logger.error(f"JSON decode error for portfolio {row[0]} symbols: {json_err}")
+                        symbols_data = []
+                elif isinstance(symbols_raw, (list, dict)):
+                    # It's already parsed (JSONB from PostgreSQL)
+                    symbols_data = symbols_raw
+                else:
+                    logger.warning(f"Unexpected symbols data type for portfolio {row[0]}: {type(symbols_raw)}")
+                    symbols_data = []
 
-            enhanced_portfolios.append(portfolio_info)
+                # Ensure symbols_data is a list
+                if not isinstance(symbols_data, list):
+                    logger.warning(f"Symbols data is not a list for portfolio {row[0]}: {type(symbols_data)}")
+                    symbols_data = []
 
+                portfolio_info = {
+                    "portfolio_id": row[0],
+                    "portfolio_name": row[1],
+                    "portfolio_type": row[2],
+                    "symbols": symbols_data,
+                    "status": row[4],
+                    "total_invested": row[5] or 0,
+                    "current_units": row[6] or 0,
+                    "current_value": row[7] or 0,
+                    "next_investment_date": row[8].isoformat() if row[8] else None,
+                    "auto_rebalance": row[9] or False,
+                    "created_at": row[10].isoformat() if row[10] else None,
+                    "symbols_count": len(symbols_data)
+                }
+
+                enhanced_portfolios.append(portfolio_info)
+
+            except Exception as portfolio_error:
+                logger.error(f"Error processing portfolio {row[0]}: {portfolio_error}")
+                # Skip this portfolio but continue processing others
+                continue
+
+        logger.info(f"✅ Successfully fetched {len(enhanced_portfolios)} portfolios for user {user_id}")
         return enhanced_portfolios
 
     except Exception as e:
@@ -1145,11 +1215,11 @@ async def get_investment_signals(
         trading_db: AsyncSession = Depends(get_db),
         nsedata_db: AsyncSession = Depends(get_nsedata_db)
 ):
-    """Get investment signals for a SIP portfolio"""
+    """Get investment signals for ALL symbols in a SIP portfolio - FIXED FOR MULTI-SYMBOL"""
     try:
         # Verify portfolio ownership
         portfolio_query = text("""
-            SELECT symbols, config FROM sip_portfolios 
+            SELECT symbols, config, portfolio_type FROM sip_portfolios 
             WHERE portfolio_id = :portfolio_id AND user_id = :user_id
         """)
 
@@ -1162,36 +1232,229 @@ async def get_investment_signals(
         if not portfolio_data:
             raise HTTPException(status_code=404, detail="Portfolio not found")
 
-        symbols_json, config_json = portfolio_data
-        symbols_data = json.loads(symbols_json)
-        config = SIPConfig(**json.loads(config_json))
+        symbols_json, config_json, portfolio_type = portfolio_data
 
-        # Generate signals for first symbol (can be extended for multi-symbol)
-        symbol = symbols_data[0]['symbol'] if symbols_data else None
-        if not symbol:
-            raise HTTPException(status_code=400, detail="No symbols in portfolio")
+        # CRITICAL FIX: Safe JSON parsing with type checking
+        try:
+            # Parse symbols safely
+            if isinstance(symbols_json, str):
+                symbols_data = json.loads(symbols_json)
+            elif isinstance(symbols_json, list):
+                symbols_data = symbols_json  # Already parsed
+            else:
+                logger.error(f"Unexpected symbols_json type: {type(symbols_json)}")
+                raise ValueError(f"Invalid symbols data type: {type(symbols_json)}")
 
-        # Generate signals
-        strategy = EnhancedSIPStrategy(nsedata_session=nsedata_db)
+            # Parse config safely
+            if isinstance(config_json, str):
+                config_dict = json.loads(config_json)
+            elif isinstance(config_json, dict):
+                config_dict = config_json  # Already parsed
+            else:
+                logger.error(f"Unexpected config_json type: {type(config_json)}")
+                raise ValueError(f"Invalid config data type: {type(config_json)}")
+
+            config = SIPConfig(**config_dict)
+
+            logger.info(f"Successfully parsed portfolio data for {portfolio_id}")
+            logger.info(
+                f"Portfolio type: {portfolio_type}, Symbols count: {len(symbols_data) if isinstance(symbols_data, list) else 'N/A'}")
+
+        except Exception as parse_error:
+            logger.error(f"JSON parsing error for portfolio {portfolio_id}: {parse_error}")
+            raise HTTPException(status_code=500, detail=f"Portfolio data parsing failed: {str(parse_error)}")
+
+        # Validate symbols_data structure
+        if not isinstance(symbols_data, list) or not symbols_data:
+            logger.error(f"Invalid symbols_data structure: {symbols_data}")
+            raise HTTPException(status_code=400, detail="Invalid or empty symbols in portfolio")
+
+        # Create strategy instance with both sessions
+        strategy = EnhancedSIPStrategy(
+            nsedata_session=nsedata_db,
+            trading_session=trading_db
+        )
+
         end_date = datetime.now().strftime('%Y-%m-%d')
         start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
 
-        data = await strategy.fetch_data_from_db_async(symbol, start_date, end_date)
+        # FIXED: Process ALL symbols in the portfolio, not just the first one
+        all_signals = {}
+        successful_signals = 0
+        failed_signals = 0
 
-        if data.empty:
-            raise HTTPException(status_code=404, detail="No recent data available")
+        for symbol_config in symbols_data:
+            try:
+                # FIXED: Safe symbol extraction with validation
+                if isinstance(symbol_config, dict) and 'symbol' in symbol_config:
+                    symbol = symbol_config['symbol']
+                    allocation_pct = symbol_config.get('allocation_percentage', 100.0 / len(symbols_data))
+                elif isinstance(symbol_config, str):
+                    symbol = symbol_config  # Direct string symbol
+                    allocation_pct = 100.0 / len(symbols_data)  # Equal allocation
+                else:
+                    logger.error(f"Invalid symbol config structure: {symbol_config}")
+                    continue
 
-        signals = strategy.get_next_investment_signals(data, config)
+                if not symbol or not isinstance(symbol, str):
+                    logger.warning(f"Skipping invalid symbol: {symbol}")
+                    continue
 
-        # Save signal to database if investment is recommended
-        if signals.get('signal') not in ['NO_DATA', 'ERROR']:
-            await save_signal_with_gtt_order(portfolio_id, symbol, signals, trading_db, config)
+                logger.info(f"Processing signals for symbol: {symbol} ({allocation_pct}% allocation)")
 
-        return signals
+                # Generate signals for this symbol with timeout protection
+                try:
+                    logger.debug(f"Fetching data for {symbol} from {start_date} to {end_date}")
 
+                    # Fetch data with timeout protection
+                    data = await asyncio.wait_for(
+                        strategy.fetch_data_from_db_async(symbol, start_date, end_date),
+                        timeout=30.0
+                    )
+
+                    if data.empty:
+                        logger.warning(f"No data available for {symbol}")
+                        all_signals[symbol] = {
+                            "signal": "NO_DATA",
+                            "confidence": 0,
+                            "message": f"No recent data available for {symbol}",
+                            "symbol": symbol,
+                            "allocation_percentage": allocation_pct,
+                            "analysis_timestamp": datetime.now().isoformat()
+                        }
+                        failed_signals += 1
+                        continue
+
+                    logger.debug(f"Fetched {len(data)} data points for {symbol}")
+
+                    # Generate signals with timeout protection
+                    signals = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, strategy.get_next_investment_signals, data, config
+                        ),
+                        timeout=45.0
+                    )
+
+                    # Validate signals response
+                    if not isinstance(signals, dict):
+                        raise ValueError(f"Invalid signals response type: {type(signals)}")
+
+                    # Add metadata to signals
+                    signals['symbol'] = symbol
+                    signals['allocation_percentage'] = allocation_pct
+                    signals['portfolio_id'] = portfolio_id
+                    signals['data_points_used'] = len(data)
+
+                    # Adjust recommended amount based on allocation
+                    if 'recommended_amount' in signals:
+                        base_amount = signals['recommended_amount']
+                        allocated_amount = (base_amount * allocation_pct) / 100.0
+                        signals['allocated_amount'] = allocated_amount
+                        signals['base_amount'] = base_amount
+
+                    all_signals[symbol] = signals
+                    successful_signals += 1
+
+                    logger.info(
+                        f"✅ Generated signals for {symbol}: {signals.get('signal', 'UNKNOWN')} (confidence: {signals.get('confidence', 0)})")
+
+                    # Save signal to database if investment is recommended
+                    try:
+                        if signals.get('signal') not in ['NO_DATA', 'ERROR']:
+                            await save_signal_with_gtt_order(portfolio_id, symbol, signals, trading_db, config)
+                            logger.info(f"✅ Saved signal and GTT order for {symbol}")
+                    except Exception as save_error:
+                        logger.error(f"Error saving signal for {symbol}: {save_error}")
+                        # Don't fail the entire request if saving fails
+                        signals['save_warning'] = f"Signal generated but not saved: {str(save_error)}"
+
+                except asyncio.TimeoutError:
+                    logger.error(f"Timeout generating signals for {symbol}")
+                    all_signals[symbol] = {
+                        "signal": "ERROR",
+                        "confidence": 0,
+                        "message": f"Signal generation timeout for {symbol}",
+                        "symbol": symbol,
+                        "allocation_percentage": allocation_pct,
+                        "analysis_timestamp": datetime.now().isoformat()
+                    }
+                    failed_signals += 1
+                except Exception as signal_error:
+                    logger.error(f"Error generating signals for {symbol}: {signal_error}")
+                    all_signals[symbol] = {
+                        "signal": "ERROR",
+                        "confidence": 0,
+                        "message": f"Signal generation failed: {str(signal_error)}",
+                        "symbol": symbol,
+                        "allocation_percentage": allocation_pct,
+                        "analysis_timestamp": datetime.now().isoformat()
+                    }
+                    failed_signals += 1
+
+            except Exception as symbol_processing_error:
+                logger.error(f"Critical error processing symbol {symbol_config}: {symbol_processing_error}")
+                failed_signals += 1
+                continue
+
+        # Generate portfolio-level summary
+        portfolio_summary = {
+            "portfolio_id": portfolio_id,
+            "portfolio_type": portfolio_type or "single",
+            "total_symbols": len(symbols_data),
+            "successful_signals": successful_signals,
+            "failed_signals": failed_signals,
+            "overall_confidence": 0,
+            "overall_signal": "NORMAL",
+            "total_recommended_amount": 0,
+            "analysis_timestamp": datetime.now().isoformat()
+        }
+
+        # Calculate overall metrics
+        if successful_signals > 0:
+            confidences = [signals.get('confidence', 0) for signals in all_signals.values() if
+                           signals.get('confidence', 0) > 0]
+            if confidences:
+                portfolio_summary["overall_confidence"] = sum(confidences) / len(confidences)
+
+            # Determine overall signal strength
+            buy_signals = sum(1 for signals in all_signals.values() if signals.get('signal') in ['BUY', 'STRONG_BUY'])
+            weak_buy_signals = sum(1 for signals in all_signals.values() if signals.get('signal') == 'WEAK_BUY')
+
+            if buy_signals > len(symbols_data) * 0.5:
+                portfolio_summary["overall_signal"] = "BUY"
+            elif (buy_signals + weak_buy_signals) > len(symbols_data) * 0.3:
+                portfolio_summary["overall_signal"] = "WEAK_BUY"
+            elif portfolio_summary["overall_confidence"] < 0.3:
+                portfolio_summary["overall_signal"] = "AVOID"
+
+            # Calculate total recommended amount
+            total_amount = sum(signals.get('allocated_amount', signals.get('recommended_amount', 0))
+                               for signals in all_signals.values()
+                               if signals.get('signal') not in ['NO_DATA', 'ERROR'])
+            portfolio_summary["total_recommended_amount"] = total_amount
+
+        # ENHANCED RESPONSE: Return both individual signals and portfolio summary
+        response = {
+            "portfolio_summary": portfolio_summary,
+            "symbol_signals": all_signals,
+            "symbols_processed": list(all_signals.keys()),
+            "processing_stats": {
+                "successful": successful_signals,
+                "failed": failed_signals,
+                "success_rate": round((successful_signals / len(symbols_data)) * 100, 2) if symbols_data else 0
+            }
+        }
+
+        logger.info(
+            f"✅ Successfully processed {successful_signals}/{len(symbols_data)} symbols for portfolio {portfolio_id}")
+        return response
+
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        logger.error(f"Error getting investment signals: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Critical error getting investment signals for portfolio {portfolio_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Multi-symbol signal generation failed: {str(e)}")
 
 
 @sip_router.get("/signals")
@@ -1200,13 +1463,13 @@ async def get_all_signals(
         user_id: str = Depends(get_current_user),
         trading_db: AsyncSession = Depends(get_db)
 ):
-    """Get all investment signals for user's portfolios"""
+    """Get all investment signals for user's portfolios - ENHANCED FOR MULTI-SYMBOL"""
     try:
         base_query = """
             SELECT s.signal_id, s.symbol, s.signal_type, s.recommended_amount,
                    s.multiplier, s.current_price, s.drawdown_percent, 
                    s.signal_strength, s.gtt_trigger_price, s.created_at,
-                   p.portfolio_name, p.portfolio_type
+                   p.portfolio_name, p.portfolio_type, p.portfolio_id
             FROM sip_signals s
             JOIN sip_portfolios p ON s.portfolio_id = p.portfolio_id
             WHERE p.user_id = :user_id
@@ -1220,12 +1483,44 @@ async def get_all_signals(
             """
             params["now"] = datetime.now()
 
-        base_query += " ORDER BY s.created_at DESC"
+        base_query += " ORDER BY p.portfolio_name, s.symbol, s.created_at DESC"
 
         result = await trading_db.execute(text(base_query), params)
         signals = result.fetchall()
 
-        return [
+        # Group signals by portfolio for better organization
+        portfolio_signals = {}
+
+        for row in signals:
+            portfolio_id = row[12]  # portfolio_id from query
+            portfolio_name = row[10]  # portfolio_name
+            portfolio_type = row[11]  # portfolio_type
+
+            if portfolio_id not in portfolio_signals:
+                portfolio_signals[portfolio_id] = {
+                    "portfolio_id": portfolio_id,
+                    "portfolio_name": portfolio_name,
+                    "portfolio_type": portfolio_type,
+                    "signals": []
+                }
+
+            signal_data = {
+                "signal_id": row[0],
+                "symbol": row[1],
+                "signal_type": row[2],
+                "recommended_amount": row[3],
+                "multiplier": row[4],
+                "current_price": row[5],
+                "drawdown_percent": row[6],
+                "signal_strength": row[7],
+                "gtt_trigger_price": row[8],
+                "created_at": row[9].isoformat() if row[9] else None
+            }
+
+            portfolio_signals[portfolio_id]["signals"].append(signal_data)
+
+        # Also return flat list for backward compatibility
+        flat_signals = [
             {
                 "signal_id": row[0],
                 "symbol": row[1],
@@ -1238,13 +1533,87 @@ async def get_all_signals(
                 "gtt_trigger_price": row[8],
                 "created_at": row[9].isoformat() if row[9] else None,
                 "portfolio_name": row[10],
-                "portfolio_type": row[11]
+                "portfolio_type": row[11],
+                "portfolio_id": row[12]
             } for row in signals
         ]
 
+        return {
+            "signals": flat_signals,  # Backward compatibility
+            "portfolio_signals": list(portfolio_signals.values()),  # Enhanced grouping
+            "total_signals": len(signals),
+            "total_portfolios": len(portfolio_signals),
+            "active_only": active_only,
+            "timestamp": datetime.now().isoformat()
+        }
+
     except Exception as e:
         logger.error(f"Error fetching signals: {e}")
-        return []
+        return {
+            "signals": [],
+            "portfolio_signals": [],
+            "total_signals": 0,
+            "total_portfolios": 0,
+            "error": str(e)
+        }
+
+@sip_router.get("/signals/symbol/{symbol}")
+async def get_symbol_signals(
+        symbol: str,
+        active_only: bool = True,
+        user_id: str = Depends(get_current_user),
+        trading_db: AsyncSession = Depends(get_db)
+):
+    """Get all signals for a specific symbol across all portfolios"""
+    try:
+        base_query = """
+            SELECT s.signal_id, s.signal_type, s.recommended_amount,
+                   s.multiplier, s.current_price, s.drawdown_percent, 
+                   s.signal_strength, s.gtt_trigger_price, s.created_at,
+                   p.portfolio_name, p.portfolio_type, p.portfolio_id
+            FROM sip_signals s
+            JOIN sip_portfolios p ON s.portfolio_id = p.portfolio_id
+            WHERE p.user_id = :user_id AND s.symbol = :symbol
+        """
+        params = {"user_id": user_id, "symbol": symbol.upper()}
+
+        if active_only:
+            base_query += """ 
+                AND s.is_processed = FALSE 
+                AND s.expires_at > :now
+            """
+            params["now"] = datetime.now()
+
+        base_query += " ORDER BY s.created_at DESC"
+
+        result = await trading_db.execute(text(base_query), params)
+        signals = result.fetchall()
+
+        return {
+            "symbol": symbol.upper(),
+            "signals": [
+                {
+                    "signal_id": row[0],
+                    "signal_type": row[1],
+                    "recommended_amount": row[2],
+                    "multiplier": row[3],
+                    "current_price": row[4],
+                    "drawdown_percent": row[5],
+                    "signal_strength": row[6],
+                    "gtt_trigger_price": row[7],
+                    "created_at": row[8].isoformat() if row[8] else None,
+                    "portfolio_name": row[9],
+                    "portfolio_type": row[10],
+                    "portfolio_id": row[11]
+                } for row in signals
+            ],
+            "total_signals": len(signals),
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching signals for symbol {symbol}: {e}")
+        return {"symbol": symbol, "signals": [], "error": str(e)}
 
 
 # ============================================================================
@@ -1258,7 +1627,7 @@ async def execute_sip_investment(
         user_id: str = Depends(get_current_user),
         trading_db: AsyncSession = Depends(get_db)
 ):
-    """Execute SIP investment with minimum gap enforcement"""
+    """Execute SIP investment with minimum gap enforcement - FIXED VERSION"""
     try:
         # Verify portfolio and get details
         portfolio_query = text("""
@@ -1276,8 +1645,50 @@ async def execute_sip_investment(
             raise HTTPException(status_code=404, detail="Active portfolio not found")
 
         symbols_json, config_json = portfolio_data
-        symbols_data = json.loads(symbols_json)
-        config = SIPConfig(**json.loads(config_json))
+
+        # FIXED: Safe JSON parsing
+        try:
+            # Parse symbols safely
+            if isinstance(symbols_json, str):
+                symbols_data = json.loads(symbols_json)
+            elif isinstance(symbols_json, list):
+                symbols_data = symbols_json
+            else:
+                raise ValueError(f"Invalid symbols data type: {type(symbols_json)}")
+
+            # Parse config safely
+            if isinstance(config_json, str):
+                config_dict = json.loads(config_json)
+            elif isinstance(config_json, dict):
+                config_dict = config_json
+            else:
+                raise ValueError(f"Invalid config data type: {type(config_json)}")
+
+            config = SIPConfig(**config_dict)
+
+        except Exception as parse_error:
+            logger.error(f"JSON parsing error for portfolio {portfolio_id}: {parse_error}")
+            raise HTTPException(status_code=500, detail=f"Portfolio data parsing failed: {str(parse_error)}")
+
+        # Validate symbols data
+        if not isinstance(symbols_data, list) or not symbols_data:
+            raise HTTPException(status_code=400, detail="Invalid or empty symbols in portfolio")
+
+        # Create trades table if not exists
+        create_trades_table = text("""
+                        CREATE TABLE IF NOT EXISTS sip_actual_trades (
+                            trade_id VARCHAR PRIMARY KEY,
+                            portfolio_id VARCHAR NOT NULL,
+                            symbol VARCHAR NOT NULL,
+                            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            price FLOAT NOT NULL,
+                            units FLOAT NOT NULL,
+                            amount FLOAT NOT NULL,
+                            trade_type VARCHAR DEFAULT 'BUY',
+                            execution_status VARCHAR DEFAULT 'EXECUTED'
+                        )
+                    """)
+        await trading_db.execute(create_trades_table)
 
         # Check last investment date for minimum gap enforcement
         last_trade_query = text("""
@@ -1301,73 +1712,70 @@ async def execute_sip_investment(
                            f"Last investment was {days_since_last} days ago."
                 )
 
-        # Use provided amount or default from config
-        investment_amount = amount or config.fixed_investment
-
-        # Create actual trades table if it doesn't exist
-        create_trades_table = text("""
-            CREATE TABLE IF NOT EXISTS sip_actual_trades (
-                trade_id VARCHAR PRIMARY KEY,
-                portfolio_id VARCHAR NOT NULL,
-                symbol VARCHAR NOT NULL,
-                timestamp TIMESTAMP NOT NULL,
-                price FLOAT NOT NULL,
-                units FLOAT NOT NULL,
-                amount FLOAT NOT NULL,
-                trade_type VARCHAR DEFAULT 'Manual',
-                order_id VARCHAR,
-                execution_status VARCHAR DEFAULT 'executed',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await trading_db.execute(create_trades_table)
-
+        # Execute investments for each symbol
         executed_trades = []
         total_invested = 0
         total_units = 0
 
-        # Execute investment for each symbol in portfolio
         for symbol_config in symbols_data:
-            symbol = symbol_config['symbol']
-            allocation = symbol_config['allocation_percentage'] / 100.0
-            symbol_investment = investment_amount * allocation
+            try:
+                # Extract symbol safely
+                if isinstance(symbol_config, dict):
+                    symbol = symbol_config.get('symbol')
+                    allocation_pct = symbol_config.get('allocation_percentage', 100.0)
+                else:
+                    symbol = symbol_config  # Direct string
+                    allocation_pct = 100.0 / len(symbols_data)  # Equal allocation
 
-            # Get current price (placeholder - integrate with your market data API)
-            current_price = 150.0  # Replace with actual price fetch
-            units = symbol_investment / current_price
+                if not symbol:
+                    logger.warning(f"Skipping invalid symbol config: {symbol_config}")
+                    continue
 
-            # Log the trade
-            trade_id = f"tr_{portfolio_id}_{symbol}_{int(datetime.now().timestamp())}"
-            insert_trade = text("""
-                INSERT INTO sip_actual_trades 
-                (trade_id, portfolio_id, symbol, timestamp, price, units, amount, 
-                 trade_type, execution_status, created_at)
-                VALUES (:trade_id, :portfolio_id, :symbol, :timestamp, :price, :units, 
-                        :amount, :trade_type, :execution_status, :created_at)
-            """)
+                # Calculate investment amount for this symbol
+                base_amount = amount or config.fixed_investment
+                symbol_amount = (base_amount * allocation_pct) / 100.0
 
-            await trading_db.execute(insert_trade, {
-                'trade_id': trade_id,
-                'portfolio_id': portfolio_id,
-                'symbol': symbol,
-                'timestamp': datetime.now(),
-                'price': current_price,
-                'units': units,
-                'amount': symbol_investment,
-                'trade_type': 'Manual',
-                'execution_status': 'executed',
-                'created_at': datetime.now()
-            })
+                # Mock execution (replace with actual broker integration)
+                execution_price = 150.0  # Replace with actual market price
+                units_bought = symbol_amount / execution_price
 
-            executed_trades.append({
-                'symbol': symbol,
-                'amount': symbol_investment,
-                'units': units,
-                'price': current_price
-            })
+                # Record trade
+                trade_id = f"trade_{portfolio_id}_{symbol}_{int(datetime.now().timestamp())}"
 
-            total_invested += symbol_investment
-            total_units += units
+                insert_trade = text("""
+                    INSERT INTO sip_actual_trades 
+                    (trade_id, portfolio_id, symbol, timestamp, price, units, amount, trade_type)
+                    VALUES (:trade_id, :portfolio_id, :symbol, :timestamp, :price, :units, :amount, :trade_type)
+                """)
+
+                await trading_db.execute(insert_trade, {
+                    'trade_id': trade_id,
+                    'portfolio_id': portfolio_id,
+                    'symbol': symbol,
+                    'timestamp': datetime.now(),
+                    'price': execution_price,
+                    'units': units_bought,
+                    'amount': symbol_amount,
+                    'trade_type': 'BUY'
+                })
+
+                executed_trades.append({
+                    "symbol": symbol,
+                    "amount": symbol_amount,
+                    "price": execution_price,
+                    "units": units_bought,
+                    "trade_id": trade_id
+                })
+
+                total_invested += symbol_amount
+                total_units += units_bought
+
+            except Exception as symbol_error:
+                logger.error(f"Error executing trade for symbol {symbol_config}: {symbol_error}")
+                continue
+
+        if not executed_trades:
+            raise HTTPException(status_code=400, detail="No trades could be executed")
 
         # Update portfolio totals and next investment date
         next_investment_date = calculate_next_investment_date(current_date, config)
@@ -1392,6 +1800,8 @@ async def execute_sip_investment(
 
         await trading_db.commit()
 
+        logger.info(f"✅ Successfully executed {len(executed_trades)} trades for portfolio {portfolio_id}")
+
         return {
             "status": "success",
             "portfolio_id": portfolio_id,
@@ -1400,6 +1810,8 @@ async def execute_sip_investment(
             "next_investment_date": next_investment_date.isoformat()
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error executing SIP investment: {e}")
         await trading_db.rollback()
@@ -1416,7 +1828,7 @@ async def get_detailed_portfolio_analytics(
         user_id: str = Depends(get_current_user),
         trading_db: AsyncSession = Depends(get_db)
 ):
-    """Get comprehensive portfolio analytics"""
+    """Get comprehensive portfolio analytics - FIXED VERSION"""
     try:
         # Verify portfolio ownership
         portfolio_query = text("""
@@ -1435,7 +1847,18 @@ async def get_detailed_portfolio_analytics(
             raise HTTPException(status_code=404, detail="Portfolio not found")
 
         portfolio_name, symbols_json, total_invested, current_units, created_at = portfolio_data
-        symbols_data = json.loads(symbols_json)
+
+        # FIXED: Safe JSON parsing for symbols
+        try:
+            if isinstance(symbols_json, str):
+                symbols_data = json.loads(symbols_json)
+            elif isinstance(symbols_json, (list, dict)):
+                symbols_data = symbols_json
+            else:
+                symbols_data = []
+        except Exception as parse_error:
+            logger.error(f"Error parsing symbols for portfolio {portfolio_id}: {parse_error}")
+            symbols_data = []
 
         # Get trade history with detailed analytics
         trades_query = text("""
@@ -1453,16 +1876,25 @@ async def get_detailed_portfolio_analytics(
         total_current_value = 0
 
         for symbol_config in symbols_data:
-            symbol = symbol_config['symbol']
+            if isinstance(symbol_config, dict):
+                symbol = symbol_config.get('symbol')
+                allocation_pct = symbol_config.get('allocation_percentage', 0)
+            else:
+                symbol = symbol_config
+                allocation_pct = 100.0 / len(symbols_data) if symbols_data else 0
+
+            if not symbol:
+                continue
+
             symbol_trades = [t for t in trades if t[0] == symbol]
 
             if symbol_trades:
-                symbol_invested = sum(t[4] for t in symbol_trades)
-                symbol_units = sum(t[3] for t in symbol_trades)
+                symbol_invested = sum(float(t[4]) for t in symbol_trades)  # amount column
+                symbol_units = sum(float(t[3]) for t in symbol_trades)  # units column
                 avg_price = symbol_invested / symbol_units if symbol_units > 0 else 0
 
-                # Current value (placeholder price)
-                current_price = 150.0  # Replace with actual market price
+                # Current value (placeholder price - replace with actual market price)
+                current_price = 150.0
                 symbol_current_value = symbol_units * current_price
                 symbol_return = ((symbol_current_value / symbol_invested) - 1) * 100 if symbol_invested > 0 else 0
 
@@ -1474,7 +1906,7 @@ async def get_detailed_portfolio_analytics(
                     "current_value": symbol_current_value,
                     "return_percent": symbol_return,
                     "trades_count": len(symbol_trades),
-                    "allocation_percent": symbol_config['allocation_percentage']
+                    "allocation_percent": allocation_pct
                 }
 
                 total_current_value += symbol_current_value
@@ -1482,7 +1914,7 @@ async def get_detailed_portfolio_analytics(
         # Overall portfolio metrics
         total_return = ((total_current_value / total_invested) - 1) * 100 if total_invested > 0 else 0
 
-        days_invested = (datetime.now() - created_at).days
+        days_invested = (datetime.now() - created_at).days if created_at else 0
         years_invested = days_invested / 365.25
         cagr = (total_current_value / total_invested) ** (
                     1 / years_invested) - 1 if years_invested > 0 and total_invested > 0 else 0
@@ -1547,7 +1979,7 @@ async def get_portfolio_performance(
         user_id: str = Depends(get_current_user),
         trading_db: AsyncSession = Depends(get_db)
 ):
-    """Get performance metrics for a SIP portfolio"""
+    """Get performance metrics for a SIP portfolio - FIXED VERSION"""
     try:
         # Verify portfolio ownership
         portfolio_query = text("""
@@ -1566,48 +1998,38 @@ async def get_portfolio_performance(
             raise HTTPException(status_code=404, detail="Portfolio not found")
 
         symbols_json, total_invested, current_units, created_at = portfolio_data
-        symbols_data = json.loads(symbols_json)
 
-        # Get trade history
-        trades_query = text("""
-            SELECT timestamp, price, units, amount, trade_type
-            FROM sip_actual_trades 
-            WHERE portfolio_id = :portfolio_id
-            ORDER BY timestamp ASC
-        """)
+        # FIXED: Safe JSON parsing
+        try:
+            if isinstance(symbols_json, str):
+                symbols_data = json.loads(symbols_json)
+            elif isinstance(symbols_json, (list, dict)):
+                symbols_data = symbols_json
+            else:
+                symbols_data = []
+        except Exception as parse_error:
+            logger.error(f"Error parsing symbols for performance {portfolio_id}: {parse_error}")
+            symbols_data = []
 
-        result = await trading_db.execute(trades_query, {'portfolio_id': portfolio_id})
-        trades = result.fetchall()
+        # Calculate basic performance metrics
+        current_value = (current_units or 0) * 150.0  # Mock current price
+        total_return = ((current_value / (total_invested or 1)) - 1) * 100 if total_invested else 0
 
-        # Calculate performance metrics (using placeholder current price)
-        current_price = 150.0  # You'd fetch this from market data API
-        current_value = (current_units or 0) * current_price
-        total_invested = total_invested or 0
-
-        total_return = (current_value - total_invested) / total_invested if total_invested > 0 else 0
-
-        # Calculate CAGR
-        days_invested = (datetime.now() - created_at).days
-        years_invested = days_invested / 365.25
-        cagr = (current_value / total_invested) ** (
-                    1 / years_invested) - 1 if years_invested > 0 and total_invested > 0 else 0
-
-        # Average buy price
-        avg_buy_price = total_invested / current_units if current_units and current_units > 0 else 0
+        days_invested = (datetime.now() - created_at).days if created_at else 1
+        years_invested = max(days_invested / 365.25, 0.01)  # Prevent division by zero
+        cagr = ((current_value / (total_invested or 1)) ** (1 / years_invested) - 1) * 100 if total_invested else 0
 
         return {
             "portfolio_id": portfolio_id,
-            "symbols": symbols_data,
-            "total_invested": total_invested,
-            "current_units": current_units or 0,
-            "current_value": current_value,
-            "current_price": current_price,
-            "total_return_percent": total_return * 100,
-            "cagr_percent": cagr * 100,
-            "average_buy_price": avg_buy_price,
-            "num_investments": len(trades),
-            "days_invested": days_invested,
-            "unrealized_pnl": current_value - total_invested
+            "performance_summary": {
+                "total_invested": total_invested or 0,
+                "current_value": current_value,
+                "total_return_percent": total_return,
+                "cagr_percent": cagr,
+                "days_invested": days_invested
+            },
+            "symbols_count": len(symbols_data),
+            "last_updated": datetime.now().isoformat()
         }
 
     except Exception as e:
@@ -1830,7 +2252,7 @@ async def save_investment_report_to_db(
         report_data: Dict,
         trading_db: AsyncSession
 ):
-    """Save investment report to database (background task)"""
+    """Save investment report to database (background task) - FIXED VERSION"""
     try:
         # Create table if it doesn't exist
         create_table_query = text("""
@@ -1856,6 +2278,18 @@ async def save_investment_report_to_db(
             "avg_confidence": report_data.get("overall_metrics", {}).get("avg_confidence", 0)
         }
 
+        # FIXED: Ensure proper JSON serialization
+        try:
+            symbols_json = json.dumps(symbols)
+            report_data_json = json.dumps(report_data, default=str)  # Use default=str for datetime objects
+            summary_json = json.dumps(summary)
+        except Exception as serialize_error:
+            logger.error(f"JSON serialization error: {serialize_error}")
+            # Fallback serialization
+            symbols_json = json.dumps([str(s) for s in symbols])
+            report_data_json = json.dumps({"error": "Serialization failed", "original_error": str(serialize_error)})
+            summary_json = json.dumps({"error": "Summary serialization failed"})
+
         # Insert report
         insert_query = text("""
             INSERT INTO investment_reports 
@@ -1866,9 +2300,9 @@ async def save_investment_report_to_db(
         await trading_db.execute(insert_query, {
             'report_id': report_id,
             'user_id': user_id,
-            'symbols': json.dumps(symbols),
-            'report_data': json.dumps(report_data),
-            'report_summary': json.dumps(summary),
+            'symbols': symbols_json,
+            'report_data': report_data_json,
+            'report_summary': summary_json,
             'report_type': 'comprehensive',
             'generated_at': datetime.now()
         })
@@ -1879,6 +2313,8 @@ async def save_investment_report_to_db(
     except Exception as e:
         logger.error(f"Error saving investment report to DB: {e}")
         await trading_db.rollback()
+        raise  # Re-raise to handle in calling function
+
 
 @sip_router.post("/reports/investment", response_model=InvestmentReportResponse)
 async def generate_comprehensive_investment_report(
@@ -2008,7 +2444,7 @@ async def get_investment_report_history(
         user_id: str = Depends(get_current_user),
         trading_db: AsyncSession = Depends(get_db)
 ):
-    """Get user's investment report history"""
+    """Get user's investment report history - FIXED VERSION"""
     try:
         query = text("""
             SELECT report_id, symbols, report_summary, generated_at, report_type
@@ -2026,21 +2462,63 @@ async def get_investment_report_history(
 
         reports = result.fetchall()
 
-        return [
-            {
-                "report_id": row[0],
-                "symbols": json.loads(row[1]) if row[1] else [],
-                "summary": json.loads(row[2]) if row[2] else {},
-                "generated_at": row[3].isoformat() if row[3] else None,
-                "report_type": row[4]
-            }
-            for row in reports
-        ]
+        report_list = []
+
+        for row in reports:
+            try:
+                # FIXED: Safe JSON parsing for symbols column (row[1])
+                symbols_raw = row[1]
+                if symbols_raw is None:
+                    symbols_data = []
+                elif isinstance(symbols_raw, str):
+                    try:
+                        symbols_data = json.loads(symbols_raw)
+                    except json.JSONDecodeError:
+                        logger.error(f"Invalid JSON in symbols for report {row[0]}")
+                        symbols_data = []
+                elif isinstance(symbols_raw, list):
+                    symbols_data = symbols_raw  # Already parsed by PostgreSQL JSONB
+                else:
+                    logger.warning(f"Unexpected symbols type for report {row[0]}: {type(symbols_raw)}")
+                    symbols_data = []
+
+                # FIXED: Safe JSON parsing for report_summary column (row[2])
+                summary_raw = row[2]
+                if summary_raw is None:
+                    summary_data = {}
+                elif isinstance(summary_raw, str):
+                    try:
+                        summary_data = json.loads(summary_raw)
+                    except json.JSONDecodeError:
+                        logger.error(f"Invalid JSON in summary for report {row[0]}")
+                        summary_data = {}
+                elif isinstance(summary_raw, dict):
+                    summary_data = summary_raw  # Already parsed by PostgreSQL JSONB
+                else:
+                    logger.warning(f"Unexpected summary type for report {row[0]}: {type(summary_raw)}")
+                    summary_data = {}
+
+                report_item = {
+                    "report_id": row[0],
+                    "symbols": symbols_data,
+                    "summary": summary_data,
+                    "generated_at": row[3].isoformat() if row[3] else None,
+                    "report_type": row[4] or "comprehensive"
+                }
+
+                report_list.append(report_item)
+
+            except Exception as report_error:
+                logger.error(f"Error processing report {row[0]}: {report_error}")
+                # Skip this report but continue processing others
+                continue
+
+        logger.info(f"✅ Successfully fetched {len(report_list)} reports for user {user_id}")
+        return report_list
 
     except Exception as e:
         logger.error(f"Error fetching report history: {e}")
         return []
-
 
 @sip_router.get("/reports/{report_id}")
 async def get_investment_report_details(
@@ -2048,7 +2526,7 @@ async def get_investment_report_details(
         user_id: str = Depends(get_current_user),
         trading_db: AsyncSession = Depends(get_db)
 ):
-    """Get detailed investment report by ID"""
+    """Get detailed investment report by ID - FIXED VERSION"""
     try:
         query = text("""
             SELECT report_data, generated_at, symbols
@@ -2066,13 +2544,219 @@ async def get_investment_report_details(
         if not report_row:
             raise HTTPException(status_code=404, detail="Report not found")
 
+        # FIXED: Safe JSON parsing for all columns
+        try:
+            # Parse report_data (row[0])
+            report_data_raw = report_row[0]
+            if report_data_raw is None:
+                report_data = {}
+            elif isinstance(report_data_raw, str):
+                try:
+                    report_data = json.loads(report_data_raw)
+                except json.JSONDecodeError:
+                    logger.error(f"Invalid JSON in report_data for report {report_id}")
+                    report_data = {}
+            elif isinstance(report_data_raw, dict):
+                report_data = report_data_raw  # Already parsed
+            else:
+                logger.warning(f"Unexpected report_data type: {type(report_data_raw)}")
+                report_data = {}
+
+            # Parse symbols (row[2])
+            symbols_raw = report_row[2]
+            if symbols_raw is None:
+                symbols_data = []
+            elif isinstance(symbols_raw, str):
+                try:
+                    symbols_data = json.loads(symbols_raw)
+                except json.JSONDecodeError:
+                    logger.error(f"Invalid JSON in symbols for report {report_id}")
+                    symbols_data = []
+            elif isinstance(symbols_raw, list):
+                symbols_data = symbols_raw  # Already parsed
+            else:
+                logger.warning(f"Unexpected symbols type: {type(symbols_raw)}")
+                symbols_data = []
+
+            return {
+                "report_id": report_id,
+                "report_data": report_data,
+                "generated_at": report_row[1].isoformat() if report_row[1] else None,
+                "symbols": symbols_data
+            }
+
+        except Exception as parse_error:
+            logger.error(f"Error parsing report details for {report_id}: {parse_error}")
+            raise HTTPException(status_code=500, detail=f"Report data parsing failed: {str(parse_error)}")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching report details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@sip_router.get("/debug/portfolio/{portfolio_id}")
+async def debug_portfolio_structure(
+        portfolio_id: str,
+        user_id: str = Depends(get_current_user),
+        trading_db: AsyncSession = Depends(get_db)
+):
+    """Debug endpoint to check portfolio data structure"""
+    try:
+        portfolio_query = text("""
+            SELECT symbols, config FROM sip_portfolios 
+            WHERE portfolio_id = :portfolio_id AND user_id = :user_id
+        """)
+
+        result = await trading_db.execute(portfolio_query, {
+            'portfolio_id': portfolio_id,
+            'user_id': user_id
+        })
+        portfolio_data = result.fetchone()
+
+        if not portfolio_data:
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+
+        symbols_json, config_json = portfolio_data
+
         return {
-            "report_id": report_id,
-            "report_data": json.loads(report_row[0]) if report_row[0] else {},
-            "generated_at": report_row[1].isoformat() if report_row[1] else None,
-            "symbols": json.loads(report_row[2]) if report_row[2] else []
+            "portfolio_id": portfolio_id,
+            "raw_data": {
+                "symbols_json": {
+                    "type": str(type(symbols_json)),
+                    "value": symbols_json,
+                    "length": len(symbols_json) if hasattr(symbols_json, '__len__') else "N/A"
+                },
+                "config_json": {
+                    "type": str(type(config_json)),
+                    "value": config_json,
+                    "length": len(config_json) if hasattr(config_json, '__len__') else "N/A"
+                }
+            },
+            "parsed_data": {
+                "symbols_parsed": json.loads(symbols_json) if isinstance(symbols_json, str) else symbols_json,
+                "config_parsed": json.loads(config_json) if isinstance(config_json, str) else config_json
+            },
+            "timestamp": datetime.now().isoformat()
         }
 
     except Exception as e:
-        logger.error(f"Error fetching report details: {e}")
+        logger.error(f"Error debugging portfolio structure: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+def safe_json_parse(data, field_name: str = "data", default=None):
+    """Safely parse JSON data that might already be parsed"""
+    try:
+        if data is None:
+            return default or ([] if field_name in ['symbols', 'list'] else {})
+        elif isinstance(data, str):
+            if data.strip() == "":
+                return default or ([] if field_name in ['symbols', 'list'] else {})
+            return json.loads(data)
+        elif isinstance(data, (list, dict)):
+            return data  # Already parsed
+        else:
+            logger.warning(f"Unexpected {field_name} type: {type(data)}")
+            return default or ([] if field_name in ['symbols', 'list'] else {})
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error for {field_name}: {e}")
+        return default or ([] if field_name in ['symbols', 'list'] else {})
+    except Exception as e:
+        logger.error(f"Unexpected error parsing {field_name}: {e}")
+        return default or ([] if field_name in ['symbols', 'list'] else {})
+
+@sip_router.get("/debug/portfolio-list")
+async def debug_portfolio_list(
+        user_id: str = Depends(get_current_user),
+        trading_db: AsyncSession = Depends(get_db)
+):
+    """Debug endpoint to check portfolio list data structure"""
+    try:
+        base_query = """
+            SELECT portfolio_id, portfolio_name, symbols, status, created_at
+            FROM sip_portfolios 
+            WHERE user_id = :user_id
+            ORDER BY created_at DESC
+            LIMIT 5
+        """
+
+        result = await trading_db.execute(text(base_query), {"user_id": user_id})
+        portfolios = result.fetchall()
+
+        debug_data = []
+        for row in portfolios:
+            symbols_raw = row[2]  # symbols column
+
+            debug_info = {
+                "portfolio_id": row[0],
+                "portfolio_name": row[1],
+                "status": row[3],
+                "created_at": row[4].isoformat() if row[4] else None,
+                "symbols_raw_type": str(type(symbols_raw)),
+                "symbols_raw_value": str(symbols_raw)[:200] + "..." if len(str(symbols_raw)) > 200 else str(
+                    symbols_raw),
+                "symbols_parsed": safe_json_parse(symbols_raw, "symbols", [])
+            }
+            debug_data.append(debug_info)
+
+        return {
+            "debug_portfolios": debug_data,
+            "total_portfolios": len(portfolios),
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error in debug portfolio list: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@sip_router.get("/debug/portfolio/{portfolio_id}/symbols")
+async def debug_portfolio_symbols(
+        portfolio_id: str,
+        user_id: str = Depends(get_current_user),
+        trading_db: AsyncSession = Depends(get_db)
+):
+    """Debug endpoint to check which symbols are in a portfolio"""
+    try:
+        portfolio_query = text("""
+            SELECT symbols, config, portfolio_type, portfolio_name FROM sip_portfolios 
+            WHERE portfolio_id = :portfolio_id AND user_id = :user_id
+        """)
+
+        result = await trading_db.execute(portfolio_query, {
+            'portfolio_id': portfolio_id,
+            'user_id': user_id
+        })
+        portfolio_data = result.fetchone()
+
+        if not portfolio_data:
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+
+        symbols_json, config_json, portfolio_type, portfolio_name = portfolio_data
+
+        # Parse symbols safely
+        if isinstance(symbols_json, str):
+            symbols_data = json.loads(symbols_json)
+        else:
+            symbols_data = symbols_json
+
+        return {
+            "portfolio_id": portfolio_id,
+            "portfolio_name": portfolio_name,
+            "portfolio_type": portfolio_type,
+            "symbols_raw": symbols_json,
+            "symbols_parsed": symbols_data,
+            "symbols_list": [
+                {
+                    "symbol": s.get('symbol') if isinstance(s, dict) else s,
+                    "allocation": s.get('allocation_percentage') if isinstance(s, dict) else None,
+                    "config": s.get('config') if isinstance(s, dict) else None
+                } for s in symbols_data
+            ] if isinstance(symbols_data, list) else [],
+            "total_symbols": len(symbols_data) if isinstance(symbols_data, list) else 0,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error debugging portfolio symbols: {e}")
         raise HTTPException(status_code=500, detail=str(e))

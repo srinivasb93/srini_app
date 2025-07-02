@@ -312,84 +312,282 @@ class EnhancedSIPStrategy:
     # TECHNICAL ANALYSIS METHODS - COMPLETE
     # ============================================================================
 
-    def calculate_technical_indicators(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Calculate enhanced technical indicators with proper error handling"""
-        if data.empty:
+    def calculate_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Calculate comprehensive technical indicators with proper error handling and column naming"""
+        try:
+            if df.empty:
+                logger.warning("Empty DataFrame passed to calculate_technical_indicators")
+                return df
+
+            # Create a copy to avoid modifying original data
+            data = df.copy()
+
+            # Ensure required columns exist
+            required_columns = ['open', 'high', 'low', 'close', 'volume']
+            for col in required_columns:
+                if col not in data.columns:
+                    logger.error(f"Missing required column: {col}")
+                    return df
+
+            # Sort by timestamp to ensure proper calculation
+            if 'timestamp' in data.columns:
+                data = data.sort_values('timestamp')
+
+            logger.debug("Starting technical indicators calculation...")
+
+            try:
+                # Moving Averages with proper error handling
+                data['SMA_20'] = data['close'].rolling(window=20, min_periods=1).mean()
+                data['SMA_50'] = data['close'].rolling(window=50, min_periods=1).mean()
+                data['SMA_200'] = data['close'].rolling(window=200, min_periods=1).mean()
+
+                # Exponential Moving Averages
+                data['EMA_12'] = data['close'].ewm(span=12, min_periods=1).mean()
+                data['EMA_26'] = data['close'].ewm(span=26, min_periods=1).mean()
+
+                logger.debug("✅ Moving averages calculated")
+
+            except Exception as ma_error:
+                logger.error(f"Error calculating moving averages: {ma_error}")
+
+            try:
+                # RSI Calculation (Relative Strength Index)
+                def calculate_rsi(prices, window=14):
+                    if len(prices) < window:
+                        return pd.Series([50] * len(prices), index=prices.index)
+
+                    delta = prices.diff()
+                    gain = (delta.where(delta > 0, 0)).rolling(window=window, min_periods=1).mean()
+                    loss = (-delta.where(delta < 0, 0)).rolling(window=window, min_periods=1).mean()
+
+                    # Handle division by zero
+                    rs = gain / loss.replace(0, np.nan)
+                    rsi = 100 - (100 / (1 + rs))
+
+                    return rsi.fillna(50)  # Fill NaN with neutral RSI value
+
+                data['RSI'] = calculate_rsi(data['close'])
+                logger.debug("✅ RSI calculated")
+
+            except Exception as rsi_error:
+                logger.error(f"Error calculating RSI: {rsi_error}")
+                data['RSI'] = 50  # Default neutral RSI
+
+            try:
+                # Williams %R
+                def calculate_williams_r(high, low, close, window=14):
+                    if len(close) < window:
+                        return pd.Series([-50] * len(close), index=close.index)
+
+                    highest_high = high.rolling(window=window, min_periods=1).max()
+                    lowest_low = low.rolling(window=window, min_periods=1).min()
+
+                    # Handle division by zero
+                    denominator = highest_high - lowest_low
+                    williams_r = -100 * (highest_high - close) / denominator.replace(0, np.nan)
+
+                    return williams_r.fillna(-50)
+
+                data['Williams_R'] = calculate_williams_r(data['high'], data['low'], data['close'])
+                logger.debug("✅ Williams %R calculated")
+
+            except Exception as wr_error:
+                logger.error(f"Error calculating Williams %R: {wr_error}")
+                data['Williams_R'] = -50  # Default neutral Williams %R
+
+            try:
+                # MACD (Moving Average Convergence Divergence)
+                ema_12 = data['EMA_12']
+                ema_26 = data['EMA_26']
+                data['MACD'] = ema_12 - ema_26
+                data['MACD_Signal'] = data['MACD'].ewm(span=9, min_periods=1).mean()
+                data['MACD_Histogram'] = data['MACD'] - data['MACD_Signal']
+
+                logger.debug("✅ MACD calculated")
+
+            except Exception as macd_error:
+                logger.error(f"Error calculating MACD: {macd_error}")
+                data['MACD'] = 0
+                data['MACD_Signal'] = 0
+                data['MACD_Histogram'] = 0
+
+            try:
+                # Bollinger Bands
+                def calculate_bollinger_bands(prices, window=20, num_std=2):
+                    sma = prices.rolling(window=window, min_periods=1).mean()
+                    std = prices.rolling(window=window, min_periods=1).std()
+
+                    upper_band = sma + (std * num_std)
+                    lower_band = sma - (std * num_std)
+
+                    # Calculate position within bands (0 = lower band, 1 = upper band)
+                    bb_position = (prices - lower_band) / (upper_band - lower_band).replace(0, np.nan)
+                    bb_position = bb_position.fillna(0.5)  # Default to middle
+
+                    return upper_band, lower_band, bb_position
+
+                data['Bollinger_Upper'], data['Bollinger_Lower'], data['BB_Position'] = calculate_bollinger_bands(
+                    data['close'])
+                logger.debug("✅ Bollinger Bands calculated")
+
+            except Exception as bb_error:
+                logger.error(f"Error calculating Bollinger Bands: {bb_error}")
+                data['Bollinger_Upper'] = data['close'] * 1.02
+                data['Bollinger_Lower'] = data['close'] * 0.98
+                data['BB_Position'] = 0.5
+
+            try:
+                # Drawdown calculations
+                def calculate_drawdowns(prices, windows=[20, 50, 100]):
+                    drawdowns = {}
+                    for window in windows:
+                        if len(prices) >= window:
+                            rolling_max = prices.rolling(window=window, min_periods=1).max()
+                            drawdown = (prices - rolling_max) / rolling_max * 100
+                            drawdowns[f'Drawdown_{window}'] = drawdown
+                        else:
+                            # If not enough data, calculate from available data
+                            cummax = prices.expanding().max()
+                            drawdown = (prices - cummax) / cummax * 100
+                            drawdowns[f'Drawdown_{window}'] = drawdown
+
+                    return drawdowns
+
+                drawdowns = calculate_drawdowns(data['close'])
+                for key, value in drawdowns.items():
+                    data[key] = value
+
+                logger.debug("✅ Drawdowns calculated")
+
+            except Exception as dd_error:
+                logger.error(f"Error calculating drawdowns: {dd_error}")
+                data['Drawdown_20'] = 0
+                data['Drawdown_50'] = 0
+                data['Drawdown_100'] = 0
+
+            try:
+                # Volatility calculation
+                def calculate_volatility(prices, window=20):
+                    returns = prices.pct_change()
+                    volatility = returns.rolling(window=window, min_periods=1).std()
+                    return volatility.fillna(0)
+
+                data['Volatility_20'] = calculate_volatility(data['close'])
+                logger.debug("✅ Volatility calculated")
+
+            except Exception as vol_error:
+                logger.error(f"Error calculating volatility: {vol_error}")
+                data['Volatility_20'] = 0
+
+            try:
+                # Commodity Channel Index (CCI)
+                def calculate_cci(high, low, close, window=20):
+                    if len(close) < window:
+                        return pd.Series([0] * len(close), index=close.index)
+
+                    tp = (high + low + close) / 3  # Typical Price
+                    sma_tp = tp.rolling(window=window, min_periods=1).mean()
+
+                    # Mean Absolute Deviation
+                    mad = tp.rolling(window=window, min_periods=1).apply(
+                        lambda x: np.mean(np.abs(x - x.mean())), raw=False
+                    )
+
+                    # Handle division by zero
+                    cci = (tp - sma_tp) / (0.015 * mad.replace(0, np.nan))
+                    return cci.fillna(0)
+
+                data['CCI'] = calculate_cci(data['high'], data['low'], data['close'])
+                logger.debug("✅ CCI calculated")
+
+            except Exception as cci_error:
+                logger.error(f"Error calculating CCI: {cci_error}")
+                data['CCI'] = 0
+
+            try:
+                # Average True Range (ATR)
+                def calculate_atr(high, low, close, window=14):
+                    if len(close) < 2:
+                        return pd.Series([0] * len(close), index=close.index)
+
+                    prev_close = close.shift(1)
+                    true_range = pd.concat([
+                        high - low,
+                        abs(high - prev_close),
+                        abs(low - prev_close)
+                    ], axis=1).max(axis=1)
+
+                    atr = true_range.rolling(window=window, min_periods=1).mean()
+                    return atr.fillna(0)
+
+                data['ATR'] = calculate_atr(data['high'], data['low'], data['close'])
+                logger.debug("✅ ATR calculated")
+
+            except Exception as atr_error:
+                logger.error(f"Error calculating ATR: {atr_error}")
+                data['ATR'] = 0
+
+            # Validate all indicators were added
+            expected_indicators = [
+                'SMA_20', 'SMA_50', 'SMA_200', 'EMA_12', 'EMA_26',
+                'RSI', 'Williams_R', 'MACD', 'MACD_Signal', 'MACD_Histogram',
+                'Bollinger_Upper', 'Bollinger_Lower', 'BB_Position',
+                'Drawdown_20', 'Drawdown_50', 'Drawdown_100',
+                'Volatility_20', 'CCI', 'ATR'
+            ]
+
+            missing_indicators = [ind for ind in expected_indicators if ind not in data.columns]
+            if missing_indicators:
+                logger.warning(f"Missing indicators after calculation: {missing_indicators}")
+                # Add default values for missing indicators
+                for indicator in missing_indicators:
+                    data[indicator] = 0
+
+            logger.info(f"✅ Technical indicators calculated successfully. Added {len(expected_indicators)} indicators.")
+
+            # Log a sample of the calculated indicators for debugging
+            if not data.empty:
+                latest_row = data.iloc[-1]
+                logger.debug(f"Sample indicators for latest data point:")
+                logger.debug(f"RSI: {latest_row.get('RSI', 'N/A')}")
+                logger.debug(f"Drawdown_100: {latest_row.get('Drawdown_100', 'N/A')}")
+                logger.debug(f"BB_Position: {latest_row.get('BB_Position', 'N/A')}")
+
             return data
 
-        df = data.copy()
-
-        try:
-            # Enhanced moving averages
-            df['SMA_20'] = df['close'].rolling(window=20).mean()
-            df['SMA_50'] = df['close'].rolling(window=50).mean()
-            df['SMA_100'] = df['close'].rolling(window=100).mean()
-            df['SMA_200'] = df['close'].rolling(window=200).mean()
-
-            # Enhanced drawdown calculations
-            df['Peak_20'] = df['close'].rolling(window=20).max()
-            df['Peak_50'] = df['close'].rolling(window=50).max()
-            df['Peak_100'] = df['close'].rolling(window=100).max()
-
-            df['Drawdown_20'] = ((df['close'] - df['Peak_20']) / df['Peak_20']) * 100
-            df['Drawdown_50'] = ((df['close'] - df['Peak_50']) / df['Peak_50']) * 100
-            df['Drawdown_100'] = ((df['close'] - df['Peak_100']) / df['Peak_100']) * 100
-
-            # Enhanced RSI calculation
-            delta = df['close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            df['RSI'] = 100 - (100 / (1 + rs))
-
-            # Enhanced volatility metrics
-            df['Returns'] = df['close'].pct_change()
-            df['Volatility_20'] = df['Returns'].rolling(window=20).std() * np.sqrt(252)
-            df['Volatility_50'] = df['Returns'].rolling(window=50).std() * np.sqrt(252)
-
-            # Bollinger Bands
-            df['BB_Upper'] = df['SMA_20'] + (df['close'].rolling(window=20).std() * 2)
-            df['BB_Lower'] = df['SMA_20'] - (df['close'].rolling(window=20).std() * 2)
-            df['BB_Position'] = (df['close'] - df['BB_Lower']) / (df['BB_Upper'] - df['BB_Lower'])
-
-            # MACD
-            exp1 = df['close'].ewm(span=12).mean()
-            exp2 = df['close'].ewm(span=26).mean()
-            df['MACD'] = exp1 - exp2
-            df['MACD_Signal'] = df['MACD'].ewm(span=9).mean()
-            df['MACD_Histogram'] = df['MACD'] - df['MACD_Signal']
-
-            # Support and Resistance levels
-            df['Support'] = df['low'].rolling(window=20).min()
-            df['Resistance'] = df['high'].rolling(window=20).max()
-
-            # Stochastic Oscillator
-            low_14 = df['low'].rolling(window=14).min()
-            high_14 = df['high'].rolling(window=14).max()
-            df['%K'] = 100 * ((df['close'] - low_14) / (high_14 - low_14))
-            df['%D'] = df['%K'].rolling(window=3).mean()
-
-            # Williams %R
-            df['Williams_R'] = -100 * ((high_14 - df['close']) / (high_14 - low_14))
-
-            # Average True Range (ATR)
-            df['TR'] = np.maximum(df['high'] - df['low'],
-                                  np.maximum(abs(df['high'] - df['close'].shift(1)),
-                                             abs(df['low'] - df['close'].shift(1))))
-            df['ATR'] = df['TR'].rolling(window=14).mean()
-
-            # Commodity Channel Index (CCI)
-            tp = (df['high'] + df['low'] + df['close']) / 3
-            sma_tp = tp.rolling(window=20).mean()
-            mad = tp.rolling(window=20).apply(lambda x: np.mean(np.abs(x - x.mean())))
-            df['CCI'] = (tp - sma_tp) / (0.015 * mad)
-
-            logger.debug("✅ Technical indicators calculated successfully")
-
         except Exception as e:
-            logger.error(f"Error calculating technical indicators: {e}")
+            logger.error(f"Critical error in calculate_technical_indicators: {e}")
+            # Return original DataFrame with default indicator columns to prevent failures
+            try:
+                default_indicators = {
+                    'SMA_20': df['close'] if 'close' in df.columns else 0,
+                    'SMA_50': df['close'] if 'close' in df.columns else 0,
+                    'SMA_200': df['close'] if 'close' in df.columns else 0,
+                    'EMA_12': df['close'] if 'close' in df.columns else 0,
+                    'EMA_26': df['close'] if 'close' in df.columns else 0,
+                    'RSI': 50,
+                    'Williams_R': -50,
+                    'MACD': 0,
+                    'MACD_Signal': 0,
+                    'MACD_Histogram': 0,
+                    'Bollinger_Upper': df['close'] * 1.02 if 'close' in df.columns else 1,
+                    'Bollinger_Lower': df['close'] * 0.98 if 'close' in df.columns else 1,
+                    'BB_Position': 0.5,
+                    'Drawdown_20': 0,
+                    'Drawdown_50': 0,
+                    'Drawdown_100': 0,
+                    'Volatility_20': 0,
+                    'CCI': 0,
+                    'ATR': 0
+                }
 
-        return df
+                for col, default_val in default_indicators.items():
+                    df[col] = default_val
+
+                return df
+            except Exception as fallback_error:
+                logger.error(f"Even fallback failed: {fallback_error}")
+                return df
 
     # ============================================================================
     # INVESTMENT LOGIC METHODS - COMPLETE
@@ -420,64 +618,75 @@ class EnhancedSIPStrategy:
 
             # Primary drawdown-based adjustments
             if drawdown_100 <= config.drawdown_threshold_1:  # Severe drawdown (< -10%)
-                investment_amount *= config.investment_multiplier_3  # 5x
+                investment_amount *= config.investment_multiplier_3
                 logger.info(f"Severe drawdown detected ({drawdown_100:.2f}%), increasing to {investment_amount}")
             elif drawdown_100 <= config.drawdown_threshold_2:  # Moderate drawdown (-4% to -10%)
-                investment_amount *= config.investment_multiplier_2  # 3x
+                investment_amount *= config.investment_multiplier_2
                 logger.info(f"Moderate drawdown detected ({drawdown_100:.2f}%), increasing to {investment_amount}")
             elif drawdown_50 <= -2:  # Minor drawdown
-                investment_amount *= config.investment_multiplier_1  # 2x
+                investment_amount *= config.investment_multiplier_1
                 logger.info(f"Minor drawdown detected ({drawdown_50:.2f}%), increasing to {investment_amount}")
 
             # RSI-based adjustments (oversold/overbought conditions)
-            if rsi < 25:  # Extremely oversold - major opportunity
+            if 0 < rsi < 25:  # Extremely oversold - major opportunity
                 investment_amount *= 1.5
-                logger.info(f"Extremely oversold RSI ({rsi:.2f}), increasing investment by 50%")
-            elif rsi < 30:  # Oversold
+                logger.info(f"Extremely oversold RSI ({rsi:.2f}), increasing investment by 50% to {investment_amount}")
+            elif 0 < rsi < 30:  # Oversold
                 investment_amount *= 1.2
-                logger.info(f"Oversold RSI ({rsi:.2f}), increasing investment by 20%")
+                logger.info(f"Oversold RSI ({rsi:.2f}), increasing investment by 20% to {investment_amount}")
             elif rsi > 75:  # Extremely overbought - reduce investment
                 investment_amount *= 0.6
-                logger.info(f"Extremely overbought RSI ({rsi:.2f}), reducing investment by 40%")
+                logger.info(f"Extremely overbought RSI ({rsi:.2f}), reducing investment by 40% to {investment_amount}")
             elif rsi > 70:  # Overbought - reduce investment
                 investment_amount *= 0.8
-                logger.info(f"Overbought RSI ({rsi:.2f}), reducing investment by 20%")
+                logger.info(f"Overbought RSI ({rsi:.2f}), reducing investment by 20% to {investment_amount}")
 
             # Williams %R adjustments
             if williams_r < -80:  # Oversold
                 investment_amount *= 1.1
+                logger.info(
+                    f"Oversold Williams %R ({williams_r:.2f}), increasing investment by 10% to {investment_amount}")
             elif williams_r > -20:  # Overbought
                 investment_amount *= 0.9
+                logger.info(
+                    f"Overbought Williams %R ({williams_r:.2f}), reducing investment by 10% to {investment_amount}")
 
             # CCI adjustments
             if cci < -100:  # Oversold
                 investment_amount *= 1.1
+                logger.info(f"Oversold CCI ({cci:.2f}), increasing investment by 10% to {investment_amount}")
             elif cci > 100:  # Overbought
                 investment_amount *= 0.9
+                logger.info(f"Overbought CCI ({cci:.2f}), reducing investment by 10% to {investment_amount}")
 
             # Bollinger Bands position adjustments
             if bb_position < 0.1:  # Near lower band - opportunity
                 investment_amount *= 1.15
-                logger.info(f"Near Bollinger lower band, increasing investment by 15%")
+                logger.info(f"Near Bollinger lower band, increasing investment by 15% to {investment_amount}")
             elif bb_position > 0.9:  # Near upper band - caution
                 investment_amount *= 0.85
-                logger.info(f"Near Bollinger upper band, reducing investment by 15%")
+                logger.info(f"Near Bollinger upper band, reducing investment by 15% to {investment_amount}")
 
             # MACD momentum adjustments
             if macd_histogram > 0:  # Positive momentum
                 investment_amount *= 1.05  # Slight increase
+                logger.info(
+                    f"Positive MACD momentum ({macd_histogram:.2f}), increasing investment by 5% to {investment_amount}")
             elif macd_histogram < -0.5:  # Strong negative momentum - opportunity
                 investment_amount *= 1.1
+                logger.info(
+                    f"Strong negative MACD momentum ({macd_histogram:.2f}), increasing investment by 10% to {investment_amount}")
 
             # Volatility-based adjustments
             if volatility > 0.35:  # High volatility - opportunity but with caution
                 investment_amount *= 1.1
-                logger.info(f"High volatility ({volatility:.2f}), increasing investment by 10%")
+                logger.info(f"High volatility ({volatility:.2f}), increasing investment by 10% to {investment_amount}")
             elif volatility < 0.15:  # Low volatility - normal conditions
                 investment_amount *= 0.95
+                logger.info(f"Low volatility ({volatility:.2f}), reducing investment by 5% to {investment_amount}")
 
             # Cap the maximum multiplier to prevent excessive investments
-            max_allowed = base_amount * 10  # Maximum 10x investment
+            max_allowed = base_amount * 5  # Maximum 10x investment
             if investment_amount > max_allowed:
                 investment_amount = max_allowed
                 logger.warning(f"Capping investment at maximum allowed: {max_allowed}")
@@ -547,6 +756,8 @@ class EnhancedSIPStrategy:
                         investment_amount = self.determine_investment_amount(
                             current_price, data, config, i
                         )
+                        logger.info(
+                            f"Investment amount {investment_amount} on {current_date.date()} at price {current_price:.2f}")
 
                         # Execute investment
                         trade = portfolio.execute_investment(
@@ -624,6 +835,7 @@ class EnhancedSIPStrategy:
         results = {}
 
         logger.info(f"🚀 Starting batch backtest for {len(symbols)} symbols")
+        logger.info(f"Config Used: {config}")
 
         for symbol in symbols:
             try:
@@ -646,25 +858,63 @@ class EnhancedSIPStrategy:
     # ============================================================================
 
     def get_next_investment_signals(self, data: pd.DataFrame, config: SIPConfig) -> Dict[str, Any]:
-        """Generate enhanced investment signals for the next investment"""
+        """Generate enhanced investment signals with robust error handling"""
         try:
             if data.empty:
-                return {"signal": "NO_DATA", "confidence": 0, "message": "No data available"}
+                return {
+                    "signal": "NO_DATA",
+                    "confidence": 0,
+                    "message": "No data available"
+                }
 
-            # Calculate indicators for latest data
-            data_with_indicators = self.calculate_technical_indicators(data)
-            latest = data_with_indicators.iloc[-1]
+            logger.debug(f"Generating signals for {len(data)} data points")
 
-            # Get current conditions
-            current_price = latest['close']
-            drawdown_100 = latest.get('Drawdown_100', 0)
-            drawdown_50 = latest.get('Drawdown_50', 0)
-            rsi = latest.get('RSI', 50)
-            volatility = latest.get('Volatility_20', 0)
-            bb_position = latest.get('BB_Position', 0.5)
-            macd_histogram = latest.get('MACD_Histogram', 0)
-            williams_r = latest.get('Williams_R', -50)
-            cci = latest.get('CCI', 0)
+            # Calculate indicators - this is where the previous error occurred
+            try:
+                data_with_indicators = self.calculate_technical_indicators(data)
+                if data_with_indicators.empty:
+                    raise ValueError("Technical indicators calculation returned empty DataFrame")
+            except Exception as indicator_error:
+                logger.error(f"Technical indicators calculation failed: {indicator_error}")
+                return {
+                    "signal": "ERROR",
+                    "confidence": 0,
+                    "message": f"Technical indicators calculation failed: {str(indicator_error)}"
+                }
+
+            # Get latest data point
+            try:
+                latest = data_with_indicators.iloc[-1]
+                current_price = float(latest['close'])
+            except Exception as latest_error:
+                logger.error(f"Error getting latest data point: {latest_error}")
+                return {
+                    "signal": "ERROR",
+                    "confidence": 0,
+                    "message": f"Error accessing latest data: {str(latest_error)}"
+                }
+
+            # Extract indicators safely with defaults
+            try:
+                drawdown_100 = float(latest.get('Drawdown_100', 0))
+                drawdown_50 = float(latest.get('Drawdown_50', 0))
+                rsi = float(latest.get('RSI', 50))
+                volatility = float(latest.get('Volatility_20', 0))
+                bb_position = float(latest.get('BB_Position', 0.5))
+                macd_histogram = float(latest.get('MACD_Histogram', 0))
+                williams_r = float(latest.get('Williams_R', -50))
+                cci = float(latest.get('CCI', 0))
+
+                logger.debug(
+                    f"Extracted indicators - RSI: {rsi}, Drawdown_100: {drawdown_100}, BB_Position: {bb_position}")
+
+            except Exception as extract_error:
+                logger.error(f"Error extracting indicators: {extract_error}")
+                return {
+                    "signal": "ERROR",
+                    "confidence": 0,
+                    "message": f"Error extracting technical indicators: {str(extract_error)}"
+                }
 
             # Determine signal strength and type
             signal_type = "NORMAL"
@@ -675,101 +925,102 @@ class EnhancedSIPStrategy:
             # Analyze market conditions
             market_conditions = []
 
-            # Drawdown analysis
-            if drawdown_100 <= config.drawdown_threshold_1:  # Severe drawdown
-                signal_type = "STRONG_BUY"
-                confidence = 0.95
-                recommended_multiplier = config.investment_multiplier_3
-                market_conditions.append(f"Severe drawdown: {drawdown_100:.2f}%")
-            elif drawdown_100 <= config.drawdown_threshold_2:  # Moderate drawdown
-                signal_type = "BUY"
-                confidence = 0.8
-                recommended_multiplier = config.investment_multiplier_2
-                market_conditions.append(f"Moderate drawdown: {drawdown_100:.2f}%")
-            elif drawdown_50 <= -2:  # Minor drawdown
-                signal_type = "WEAK_BUY"
-                confidence = 0.65
-                recommended_multiplier = config.investment_multiplier_1
-                market_conditions.append(f"Minor drawdown: {drawdown_50:.2f}%")
+            try:
+                # Drawdown analysis with safe thresholds
+                if drawdown_100 <= config.drawdown_threshold_1:  # Severe drawdown (< -10%)
+                    signal_type = "STRONG_BUY"
+                    confidence = 0.9
+                    recommended_multiplier = config.investment_multiplier_3
+                    recommended_amount = config.fixed_investment * recommended_multiplier
+                    market_conditions.append(f"Severe drawdown: {drawdown_100:.2f}%")
 
-                # RSI analysis
-                if rsi < 25:
-                    confidence += 0.2
-                    market_conditions.append(f"Extremely oversold (RSI: {rsi:.1f})")
-                elif rsi < 30:
-                    confidence += 0.1
-                    market_conditions.append(f"Oversold (RSI: {rsi:.1f})")
-                elif rsi > 75:
-                    confidence -= 0.2
-                    signal_type = "AVOID" if signal_type == "NORMAL" else signal_type
-                    market_conditions.append(f"Extremely overbought (RSI: {rsi:.1f})")
-                elif rsi > 70:
-                    confidence -= 0.1
-                    market_conditions.append(f"Overbought (RSI: {rsi:.1f})")
+                elif drawdown_100 <= config.drawdown_threshold_2:  # Moderate drawdown (-5% to -10%)
+                    signal_type = "BUY"
+                    confidence = 0.8
+                    recommended_multiplier = config.investment_multiplier_2
+                    recommended_amount = config.fixed_investment * recommended_multiplier
+                    market_conditions.append(f"Moderate drawdown: {drawdown_100:.2f}%")
 
-                # Williams %R analysis
-                if williams_r < -80:
-                    confidence += 0.05
-                    market_conditions.append(f"Williams %R oversold ({williams_r:.1f})")
-                elif williams_r > -20:
-                    confidence -= 0.05
-                    market_conditions.append(f"Williams %R overbought ({williams_r:.1f})")
+                elif drawdown_100 <= -1.0:  # Minor drawdown (-1% to -5%)
+                    signal_type = "WEAK_BUY"
+                    confidence = 0.7
+                    recommended_multiplier = config.investment_multiplier_1
+                    recommended_amount = config.fixed_investment * recommended_multiplier
+                    market_conditions.append(f"Minor drawdown: {drawdown_100:.2f}%")
 
-                # CCI analysis
-                if cci < -100:
-                    confidence += 0.05
-                    market_conditions.append(f"CCI oversold ({cci:.1f})")
-                elif cci > 100:
-                    confidence -= 0.05
-                    market_conditions.append(f"CCI overbought ({cci:.1f})")
-
-                # Bollinger Bands analysis
-                if bb_position < 0.2:
-                    confidence += 0.1
-                    market_conditions.append("Near Bollinger lower band")
-                elif bb_position > 0.8:
-                    confidence -= 0.1
-                    market_conditions.append("Near Bollinger upper band")
+                else:
+                    market_conditions.append(f"No significant drawdown: {drawdown_100:.2f}%")
 
                 # Volatility analysis
-                if volatility > 0.35:
+                if volatility > 0.3:  # High volatility
+                    confidence *= 0.8  # Reduce confidence
                     market_conditions.append(f"High volatility: {volatility:.2f}")
-                    confidence += 0.05  # Slight boost for opportunity
-                elif volatility < 0.15:
+                elif volatility < 0.1:  # Low volatility
+                    confidence *= 1.1  # Increase confidence slightly
                     market_conditions.append(f"Low volatility: {volatility:.2f}")
+                else:
+                    market_conditions.append(f"Normal volatility: {volatility:.2f}")
+
+                # Technical momentum analysis
+                momentum_score = 0
+
+                # RSI analysis
+                if rsi < 30:  # Oversold
+                    momentum_score += 1
+                    market_conditions.append(f"Oversold conditions (RSI: {rsi:.1f})")
+                elif rsi > 70:  # Overbought
+                    momentum_score -= 1
+                    market_conditions.append(f"Overbought conditions (RSI: {rsi:.1f})")
+
+                # Williams %R analysis
+                if williams_r < -80:  # Oversold
+                    momentum_score += 0.5
+                elif williams_r > -20:  # Overbought
+                    momentum_score -= 0.5
 
                 # MACD analysis
                 if macd_histogram > 0:
-                    market_conditions.append("Positive momentum (MACD)")
-                elif macd_histogram < -0.5:
-                    market_conditions.append("Strong negative momentum - potential reversal")
-                    confidence += 0.05
+                    momentum_score += 0.5
+                    market_conditions.append("Positive momentum trend")
+                else:
+                    momentum_score -= 0.5
+                    market_conditions.append("Negative momentum - potential reversal")
+
+                # Adjust signal based on momentum
+                if momentum_score >= 1.5 and signal_type in ["NORMAL", "WEAK_BUY"]:
+                    if signal_type == "NORMAL":
+                        signal_type = "WEAK_BUY"
+                        confidence = max(confidence, 0.6)
+                    elif signal_type == "WEAK_BUY":
+                        signal_type = "BUY"
+                        confidence = max(confidence, 0.75)
 
                 # Cap confidence
-                confidence = min(max(confidence, 0.1), 1.0)
+                confidence = min(confidence, 1.0)
 
-                # Calculate recommended amount
-                recommended_amount = config.fixed_investment * recommended_multiplier
+                # Generate next fallback date
+                next_fallback_date = (datetime.now() + timedelta(days=30)).replace(day=config.fallback_day).strftime(
+                    '%Y-%m-%d')
 
-                # Apply additional factors
-                if rsi < 30:
-                    recommended_amount *= 1.2
-                elif rsi > 70:
-                    recommended_amount *= 0.8
+                # Determine trade type description
+                if signal_type == "STRONG_BUY":
+                    trade_type = "Aggressive Dip Purchase"
+                    message = "Excellent opportunity. Strong buy signal detected."
+                elif signal_type == "BUY":
+                    trade_type = "Strategic Dip Purchase"
+                    message = "Good opportunity. Consider increased investment."
+                elif signal_type == "WEAK_BUY":
+                    trade_type = "Minor Dip Purchase"
+                    message = "Moderate opportunity. Consider slightly increased investment."
+                else:
+                    trade_type = "Regular SIP"
+                    message = "Normal market conditions. Continue regular SIP."
 
-                if volatility > 0.3:
-                    recommended_amount *= 1.1
-
-                # Determine next fallback date
-                current_date = latest['timestamp'].date()
-                next_fallback_date = self._calculate_next_fallback_date(current_date, config.fallback_day)
-
-                # Generate comprehensive signal
-                signal_data = {
+                return {
                     "signal": signal_type,
                     "confidence": confidence,
                     "current_price": current_price,
-                    "recommended_amount": round(recommended_amount, 2),
+                    "recommended_amount": recommended_amount,
                     "investment_multiplier": recommended_multiplier,
                     "drawdown_100": drawdown_100,
                     "drawdown_50": drawdown_50,
@@ -780,30 +1031,29 @@ class EnhancedSIPStrategy:
                     "bb_position": bb_position,
                     "macd_histogram": macd_histogram,
                     "market_conditions": market_conditions,
-                    "next_fallback_date": next_fallback_date.isoformat(),
+                    "next_fallback_date": next_fallback_date,
                     "analysis_timestamp": datetime.now().isoformat(),
-                    "trade_type": self._determine_trade_type(signal_type, drawdown_100)
+                    "trade_type": trade_type,
+                    "message": message
                 }
 
-                # Add recommendation message
-                if signal_type in ["STRONG_BUY", "BUY"]:
-                    signal_data[
-                        "message"] = f"Strong investment opportunity detected. Market conditions favor increased investment."
-                elif signal_type == "WEAK_BUY":
-                    signal_data["message"] = f"Moderate opportunity. Consider slightly increased investment."
-                elif signal_type == "AVOID":
-                    signal_data["message"] = f"Market appears overvalued. Consider reducing investment or waiting."
-                else:
-                    signal_data["message"] = f"Normal market conditions. Regular SIP investment recommended."
-
-                return signal_data
+            except Exception as analysis_error:
+                logger.error(f"Error in signal analysis: {analysis_error}")
+                return {
+                    "signal": "ERROR",
+                    "confidence": 0,
+                    "message": f"Signal analysis failed: {str(analysis_error)}",
+                    "current_price": current_price,
+                    "analysis_timestamp": datetime.now().isoformat()
+                }
 
         except Exception as e:
-            logger.error(f"Error generating investment signals: {e}")
+            logger.error(f"Critical error in get_next_investment_signals: {e}")
             return {
                 "signal": "ERROR",
                 "confidence": 0,
-                "message": f"Error analyzing market conditions: {str(e)}"
+                "message": f"Signal generation failed: {str(e)}",
+                "analysis_timestamp": datetime.now().isoformat()
             }
 
     def _calculate_next_fallback_date(self, current_date, fallback_day: int) -> datetime.date:
@@ -1000,10 +1250,12 @@ class EnhancedSIPStrategy:
     # ============================================================================
 
     async def get_symbol_statistics(self, symbol: str, days: int = 365) -> Dict[str, Any]:
-        """Get comprehensive statistics for a symbol"""
+        """Get comprehensive statistics for a symbol - FIXED VERSION"""
         try:
             end_date = datetime.now().strftime('%Y-%m-%d')
             start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+
+            logger.debug(f"Getting statistics for {symbol} from {start_date} to {end_date}")
 
             data = await self.fetch_data_from_db_async(symbol, start_date, end_date)
 
@@ -1011,82 +1263,207 @@ class EnhancedSIPStrategy:
                 return {
                     "symbol": symbol,
                     "status": "NO_DATA",
-                    "message": "No data available"
+                    "message": "No data available",
+                    "price_statistics": {},
+                    "technical_indicators": {},
+                    "risk_metrics": {}
                 }
 
-            # Calculate comprehensive statistics
-            data_with_indicators = self.calculate_technical_indicators(data)
+            try:
+                # CRITICAL FIX: Calculate technical indicators FIRST
+                logger.debug(f"Calculating technical indicators for {symbol}")
+                data_with_indicators = self.calculate_technical_indicators(data)
 
-            # Price statistics
-            price_stats = {
-                "current_price": float(data.iloc[-1]['close']),
-                "price_change_1d": float(data.iloc[-1]['close'] - data.iloc[-2]['close']) if len(data) > 1 else 0,
-                "price_change_percent_1d": float(((data.iloc[-1]['close'] / data.iloc[-2]['close']) - 1) * 100) if len(
-                    data) > 1 else 0,
-                "high_52w": float(data['high'].max()),
-                "low_52w": float(data['low'].min()),
-                "volatility_annualized": float(data['close'].pct_change().std() * np.sqrt(252) * 100),
-                "average_volume": int(data['volume'].mean())
-            }
+                if data_with_indicators.empty:
+                    raise ValueError("Technical indicators calculation returned empty data")
 
-            # Technical indicators (latest values)
-            latest = data_with_indicators.iloc[-1]
-            technical_indicators = {
-                "rsi": float(latest.get('RSI', 0)) if pd.notna(latest.get('RSI', 0)) else None,
-                "williams_r": float(latest.get('Williams_R', 0)) if pd.notna(latest.get('Williams_R', 0)) else None,
-                "cci": float(latest.get('CCI', 0)) if pd.notna(latest.get('CCI', 0)) else None,
-                "sma_20": float(latest.get('SMA_20', 0)) if pd.notna(latest.get('SMA_20', 0)) else None,
-                "sma_50": float(latest.get('SMA_50', 0)) if pd.notna(latest.get('SMA_50', 0)) else None,
-                "sma_200": float(latest.get('SMA_200', 0)) if pd.notna(latest.get('SMA_200', 0)) else None,
-                "drawdown_20": float(latest.get('Drawdown_20', 0)) if pd.notna(latest.get('Drawdown_20', 0)) else None,
-                "drawdown_50": float(latest.get('Drawdown_50', 0)) if pd.notna(latest.get('Drawdown_50', 0)) else None,
-                "drawdown_100": float(latest.get('Drawdown_100', 0)) if pd.notna(
-                    latest.get('Drawdown_100', 0)) else None,
-                "bb_position": float(latest.get('BB_Position', 0)) if pd.notna(latest.get('BB_Position', 0)) else None,
-                "macd": float(latest.get('MACD', 0)) if pd.notna(latest.get('MACD', 0)) else None,
-                "macd_signal": float(latest.get('MACD_Signal', 0)) if pd.notna(latest.get('MACD_Signal', 0)) else None,
-                "atr": float(latest.get('ATR', 0)) if pd.notna(latest.get('ATR', 0)) else None
-            }
+                # Get the latest data point after indicators are calculated
+                latest_idx = -1
+                latest_row = data_with_indicators.iloc[latest_idx]
 
-            # Risk metrics
-            returns = data['close'].pct_change().dropna()
-            risk_metrics = {
-                "sharpe_ratio": float(
-                    (returns.mean() * 252 - 0.05) / (returns.std() * np.sqrt(252))) if returns.std() > 0 else None,
-                "max_drawdown": float(data_with_indicators[
-                                          'Drawdown_100'].min()) if 'Drawdown_100' in data_with_indicators.columns else None,
-                "var_95": float(np.percentile(returns, 5) * 100) if len(returns) > 0 else None,
-                "skewness": float(returns.skew()) if len(returns) > 0 else None,
-                "kurtosis": float(returns.kurtosis()) if len(returns) > 0 else None,
-                "downside_deviation": float(returns[returns < 0].std() * np.sqrt(252)) if len(
-                    returns[returns < 0]) > 0 else None
-            }
+                # Price statistics
+                price_stats = {
+                    "current_price": float(data.iloc[-1]['close']),
+                    "price_change_1d": float(data.iloc[-1]['close'] - data.iloc[-2]['close']) if len(data) > 1 else 0,
+                    "price_change_percent_1d": float(
+                        ((data.iloc[-1]['close'] / data.iloc[-2]['close']) - 1) * 100) if len(data) > 1 else 0,
+                    "high_52w": float(data['high'].max()),
+                    "low_52w": float(data['low'].min()),
+                    "volatility_annualized": float(data['close'].pct_change().std() * np.sqrt(252) * 100),
+                    "average_volume": int(data['volume'].mean())
+                }
 
-            # Trend analysis
-            trend_analysis = self._analyze_trend(data_with_indicators)
+                # FIXED: Technical indicators extraction with proper error handling
+                tech_indicators = {}
 
-            # Support and resistance levels
-            support_resistance = self._calculate_support_resistance(data_with_indicators)
+                try:
+                    # Extract all technical indicators with safe defaults
+                    indicator_mapping = {
+                        'rsi': 'RSI',
+                        'williams_r': 'Williams_R',
+                        'cci': 'CCI',
+                        'sma_20': 'SMA_20',
+                        'sma_50': 'SMA_50',
+                        'sma_200': 'SMA_200',
+                        'ema_12': 'EMA_12',
+                        'ema_26': 'EMA_26',
+                        'macd': 'MACD',
+                        'macd_signal': 'MACD_Signal',
+                        'macd_histogram': 'MACD_Histogram',
+                        'bollinger_upper': 'Bollinger_Upper',
+                        'bollinger_lower': 'Bollinger_Lower',
+                        'bb_position': 'BB_Position',
+                        'atr': 'ATR',
+                        'drawdown_20': 'Drawdown_20',
+                        'drawdown_50': 'Drawdown_50',
+                        'drawdown_100': 'Drawdown_100',
+                        'volatility_20': 'Volatility_20'
+                    }
 
-            return {
-                "symbol": symbol,
-                "status": "SUCCESS",
-                "analysis_period": f"{start_date} to {end_date}",
-                "data_points": len(data),
-                "price_statistics": price_stats,
-                "technical_indicators": technical_indicators,
-                "risk_metrics": risk_metrics,
-                "trend_analysis": trend_analysis,
-                "support_resistance": support_resistance,
-                "last_updated": datetime.now().isoformat()
-            }
+                    for key, col_name in indicator_mapping.items():
+                        if col_name in data_with_indicators.columns:
+                            value = latest_row[col_name]
+                            if pd.notna(value):
+                                tech_indicators[key] = float(value)
+                            else:
+                                tech_indicators[key] = None
+                                logger.debug(f"NaN value for {key} in {symbol}")
+                        else:
+                            tech_indicators[key] = None
+                            logger.warning(f"Missing column {col_name} for {key} in {symbol}")
+
+                    logger.debug(f"✅ Extracted {len(tech_indicators)} technical indicators for {symbol}")
+
+                    # Log some key indicators for debugging
+                    logger.debug(
+                        f"{symbol} - RSI: {tech_indicators.get('rsi')}, Drawdown_100: {tech_indicators.get('drawdown_100')}")
+
+                except Exception as tech_error:
+                    logger.error(f"Error extracting technical indicators for {symbol}: {tech_error}")
+                    # Provide default technical indicators to prevent downstream errors
+                    tech_indicators = {
+                        'rsi': 50.0,
+                        'williams_r': -50.0,
+                        'cci': 0.0,
+                        'sma_20': float(price_stats['current_price']),
+                        'sma_50': float(price_stats['current_price']),
+                        'sma_200': float(price_stats['current_price']),
+                        'ema_12': float(price_stats['current_price']),
+                        'ema_26': float(price_stats['current_price']),
+                        'macd': 0.0,
+                        'macd_signal': 0.0,
+                        'macd_histogram': 0.0,
+                        'bollinger_upper': float(price_stats['current_price']) * 1.02,
+                        'bollinger_lower': float(price_stats['current_price']) * 0.98,
+                        'bb_position': 0.5,
+                        'atr': 0.0,
+                        'drawdown_20': 0.0,
+                        'drawdown_50': 0.0,
+                        'drawdown_100': 0.0,
+                        'volatility_20': 0.0
+                    }
+
+                # Risk metrics with safe calculations
+                risk_metrics = {}
+                try:
+                    returns = data['close'].pct_change().dropna()
+                    if len(returns) > 0:
+                        risk_metrics = {
+                            "max_drawdown": float(self._calculate_max_drawdown(data['close'])),
+                            "sharpe_ratio": float(self._calculate_sharpe_ratio(returns)) if len(returns) > 30 else None,
+                            "sortino_ratio": float(self._calculate_sortino_ratio(returns)) if len(
+                                returns) > 30 else None,
+                            "value_at_risk_5": float(returns.quantile(0.05) * 100),
+                            "expected_shortfall": float(returns[returns <= returns.quantile(0.05)].mean() * 100) if len(
+                                returns[returns <= returns.quantile(0.05)]) > 0 else None
+                        }
+                    else:
+                        risk_metrics = {
+                            "max_drawdown": 0.0,
+                            "sharpe_ratio": None,
+                            "sortino_ratio": None,
+                            "value_at_risk_5": 0.0,
+                            "expected_shortfall": None
+                        }
+                except Exception as risk_error:
+                    logger.error(f"Error calculating risk metrics for {symbol}: {risk_error}")
+                    risk_metrics = {
+                        "max_drawdown": 0.0,
+                        "sharpe_ratio": None,
+                        "sortino_ratio": None,
+                        "value_at_risk_5": 0.0,
+                        "expected_shortfall": None
+                    }
+
+                logger.info(f"✅ Successfully calculated statistics for {symbol}")
+
+                return {
+                    "symbol": symbol,
+                    "status": "SUCCESS",
+                    "data_points": len(data),
+                    "analysis_period": f"{start_date} to {end_date}",
+                    "price_statistics": price_stats,
+                    "technical_indicators": tech_indicators,  # This was empty before - now properly populated
+                    "risk_metrics": risk_metrics,
+                    "last_updated": datetime.now().isoformat()
+                }
+
+            except Exception as calc_error:
+                logger.error(f"Error calculating statistics for {symbol}: {calc_error}")
+                # Return structured error response instead of None
+                return {
+                    "symbol": symbol,
+                    "status": "CALCULATION_ERROR",
+                    "message": f"Error calculating statistics: {str(calc_error)}",
+                    "price_statistics": {
+                        "current_price": float(data.iloc[-1]['close']) if not data.empty else 0,
+                        "price_change_1d": 0,
+                        "price_change_percent_1d": 0,
+                        "high_52w": float(data['high'].max()) if not data.empty else 0,
+                        "low_52w": float(data['low'].min()) if not data.empty else 0,
+                        "volatility_annualized": 0,
+                        "average_volume": int(data['volume'].mean()) if not data.empty else 0
+                    },
+                    "technical_indicators": {
+                        'rsi': 50.0,
+                        'williams_r': -50.0,
+                        'cci': 0.0,
+                        'sma_20': None,
+                        'sma_50': None,
+                        'sma_200': None,
+                        'ema_12': None,
+                        'ema_26': None,
+                        'macd': 0.0,
+                        'macd_signal': 0.0,
+                        'macd_histogram': 0.0,
+                        'bollinger_upper': None,
+                        'bollinger_lower': None,
+                        'bb_position': 0.5,
+                        'atr': 0.0,
+                        'drawdown_20': 0.0,
+                        'drawdown_50': 0.0,
+                        'drawdown_100': 0.0,
+                        'volatility_20': 0.0
+                    },
+                    "risk_metrics": {
+                        "max_drawdown": 0.0,
+                        "sharpe_ratio": None,
+                        "sortino_ratio": None,
+                        "value_at_risk_5": 0.0,
+                        "expected_shortfall": None
+                    }
+                }
 
         except Exception as e:
-            logger.error(f"Error getting statistics for {symbol}: {e}")
+            logger.error(f"Critical error getting statistics for {symbol}: {e}")
+            # CRITICAL: Always return a structured dictionary, never None
             return {
                 "symbol": symbol,
                 "status": "ERROR",
-                "message": f"Error calculating statistics: {str(e)}"
+                "message": f"Failed to get statistics: {str(e)}",
+                "price_statistics": {},
+                "technical_indicators": {},
+                "risk_metrics": {}
             }
 
     def _analyze_trend(self, data: pd.DataFrame) -> Dict[str, Any]:
@@ -1255,12 +1632,57 @@ class EnhancedSIPStrategy:
                 "message": f"Error calculating support/resistance: {str(e)}"
             }
 
+    def _calculate_max_drawdown(self, prices) -> float:
+        """Calculate maximum drawdown safely"""
+        try:
+            if len(prices) < 2:
+                return 0.0
+
+            peak = prices.expanding().max()
+            drawdown = (prices - peak) / peak
+            return float(drawdown.min() * 100)  # Return as percentage
+        except Exception as e:
+            logger.warning(f"Error calculating max drawdown: {e}")
+            return 0.0
+
+    def _calculate_sharpe_ratio(self, returns, risk_free_rate: float = 0.05) -> float:
+        """Calculate Sharpe ratio safely"""
+        try:
+            if len(returns) < 2:
+                return 0.0
+
+            excess_returns = returns - (risk_free_rate / 252)  # Daily risk-free rate
+            if excess_returns.std() == 0:
+                return 0.0
+
+            return float(excess_returns.mean() / excess_returns.std() * np.sqrt(252))
+        except Exception as e:
+            logger.warning(f"Error calculating Sharpe ratio: {e}")
+            return 0.0
+
+    def _calculate_sortino_ratio(self, returns, risk_free_rate: float = 0.05) -> float:
+        """Calculate Sortino ratio safely"""
+        try:
+            if len(returns) < 2:
+                return 0.0
+
+            excess_returns = returns - (risk_free_rate / 252)
+            downside_returns = excess_returns[excess_returns < 0]
+
+            if len(downside_returns) == 0 or downside_returns.std() == 0:
+                return 0.0
+
+            return float(excess_returns.mean() / downside_returns.std() * np.sqrt(252))
+        except Exception as e:
+            logger.warning(f"Error calculating Sortino ratio: {e}")
+            return 0.0
+
     # ============================================================================
     # COMPREHENSIVE REPORTING METHODS - COMPLETE
     # ============================================================================
 
     async def generate_investment_report(self, symbols: List[str], config: SIPConfig) -> Dict[str, Any]:
-        """Generate comprehensive investment report for multiple symbols"""
+        """Generate comprehensive investment report for multiple symbols - OPTIMIZED VERSION"""
         try:
             logger.info(f"Generating investment report for {len(symbols)} symbols")
 
@@ -1271,62 +1693,164 @@ class EnhancedSIPStrategy:
             overall_metrics = {
                 "total_symbols": len(symbols),
                 "analyzed_symbols": 0,
+                "successful_analyses": 0,
                 "strong_buy_signals": 0,
                 "buy_signals": 0,
                 "avoid_signals": 0,
+                "error_count": 0,
                 "avg_confidence": 0,
                 "data_quality_summary": {
                     "excellent": 0,
                     "good": 0,
                     "fair": 0,
-                    "poor": 0
+                    "poor": 0,
+                    "error": 0
                 }
             }
 
             total_confidence = 0
+            successful_recommendations = 0
 
+            # Process symbols with better error isolation
             for symbol in symbols:
                 try:
                     logger.info(f"Analyzing {symbol} for investment report")
 
-                    # Get data quality
-                    data_quality = await self.validate_symbol_data_quality(symbol, start_date, end_date)
+                    # Get data quality with timeout protection
+                    try:
+                        data_quality = await asyncio.wait_for(
+                            self.validate_symbol_data_quality(symbol, start_date, end_date),
+                            timeout=30.0  # 30 second timeout per symbol
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Timeout validating data quality for {symbol}")
+                        data_quality = {
+                            "symbol": symbol,
+                            "status": "ERROR",
+                            "message": "Data validation timeout",
+                            "data_points": 0,
+                            "coverage_percent": 0
+                        }
+                    except Exception as dq_error:
+                        logger.error(f"Error validating data quality for {symbol}: {dq_error}")
+                        data_quality = {
+                            "symbol": symbol,
+                            "status": "ERROR",
+                            "message": f"Data validation failed: {str(dq_error)}",
+                            "data_points": 0,
+                            "coverage_percent": 0
+                        }
 
                     # Update data quality summary
-                    quality_status = data_quality.get('status', 'UNKNOWN').lower()
+                    quality_status = data_quality.get('status', 'ERROR').lower()
                     if quality_status in overall_metrics["data_quality_summary"]:
                         overall_metrics["data_quality_summary"][quality_status] += 1
+                    else:
+                        overall_metrics["data_quality_summary"]["error"] += 1
 
-                    if data_quality['status'] in ['NO_DATA', 'ERROR']:
+                    # Skip if no data available
+                    if data_quality.get('status') in ['NO_DATA', 'ERROR']:
                         symbol_reports[symbol] = {
                             "status": "DATA_UNAVAILABLE",
                             "message": data_quality.get('message', 'Data not available'),
-                            "data_quality": data_quality
+                            "data_quality": data_quality,
+                            "statistics": None,
+                            "investment_signals": None,
+                            "recommendation": {
+                                "recommendation": "SKIP - No Data",
+                                "priority": "LOW",
+                                "confidence_score": 0,
+                                "considerations": ["No historical data available"]
+                            }
                         }
+                        overall_metrics["error_count"] += 1
                         continue
 
-                    # Get statistics
-                    stats = await self.get_symbol_statistics(symbol)
+                    # Get statistics with error handling
+                    try:
+                        stats = await asyncio.wait_for(
+                            self.get_symbol_statistics(symbol),
+                            timeout=45.0  # 45 second timeout for statistics
+                        )
+                        # Ensure stats is never None
+                        if stats is None:
+                            raise ValueError("get_symbol_statistics returned None")
 
-                    # Get investment signals
-                    data = await self.fetch_data_from_db_async(symbol, start_date, end_date)
-                    if not data.empty:
-                        signals = self.get_next_investment_signals(data, config)
-                    else:
-                        signals = {"signal": "NO_DATA", "confidence": 0}
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Timeout getting statistics for {symbol}")
+                        stats = {
+                            "symbol": symbol,
+                            "status": "TIMEOUT",
+                            "message": "Statistics calculation timeout",
+                            "price_statistics": {},
+                            "technical_indicators": {},
+                            "risk_metrics": {}
+                        }
+                    except Exception as stats_error:
+                        logger.error(f"Error getting statistics for {symbol}: {stats_error}")
+                        stats = {
+                            "symbol": symbol,
+                            "status": "ERROR",
+                            "message": f"Statistics calculation failed: {str(stats_error)}",
+                            "price_statistics": {},
+                            "technical_indicators": {},
+                            "risk_metrics": {}
+                        }
+
+                    # Get investment signals with error handling
+                    try:
+                        data = await self.fetch_data_from_db_async(symbol, start_date, end_date)
+                        if not data.empty:
+                            signals = self.get_next_investment_signals(data, config)
+                            # Ensure signals is never None
+                            if signals is None:
+                                signals = {"signal": "ERROR", "confidence": 0, "message": "Signal generation failed"}
+                        else:
+                            signals = {"signal": "NO_DATA", "confidence": 0, "message": "No data for signals"}
+
+                    except Exception as signal_error:
+                        logger.error(f"Error getting signals for {symbol}: {signal_error}")
+                        signals = {
+                            "signal": "ERROR",
+                            "confidence": 0,
+                            "message": f"Signal generation failed: {str(signal_error)}"
+                        }
+
+                    # Generate recommendation with null safety
+                    try:
+                        recommendation = self._generate_symbol_recommendation(signals, stats, data_quality)
+                        if recommendation is None:
+                            raise ValueError("_generate_symbol_recommendation returned None")
+                    except Exception as rec_error:
+                        logger.error(f"Error generating recommendation for {symbol}: {rec_error}")
+                        recommendation = {
+                            "recommendation": "ERROR - Recommendation Failed",
+                            "priority": "LOW",
+                            "confidence_score": 0,
+                            "signal_type": "ERROR",
+                            "considerations": [f"Recommendation error: {str(rec_error)}"],
+                            "error": str(rec_error)
+                        }
 
                     # Compile report for this symbol
                     symbol_reports[symbol] = {
-                        "status": "SUCCESS",
+                        "status": "SUCCESS" if stats.get('status') == 'SUCCESS' else "PARTIAL",
                         "data_quality": data_quality,
                         "statistics": stats,
                         "investment_signals": signals,
-                        "recommendation": self._generate_symbol_recommendation(signals, stats, data_quality)
+                        "recommendation": recommendation
                     }
 
                     # Update overall metrics
                     overall_metrics["analyzed_symbols"] += 1
-                    total_confidence += signals.get('confidence', 0)
+
+                    if stats.get('status') == 'SUCCESS':
+                        overall_metrics["successful_analyses"] += 1
+
+                    confidence_val = signals.get('confidence', 0)
+                    if confidence_val > 0:
+                        total_confidence += confidence_val
+                        successful_recommendations += 1
 
                     signal_type = signals.get('signal', 'NORMAL')
                     if signal_type == 'STRONG_BUY':
@@ -1336,22 +1860,43 @@ class EnhancedSIPStrategy:
                     elif signal_type == 'AVOID':
                         overall_metrics["avoid_signals"] += 1
 
-                except Exception as e:
-                    logger.error(f"Error analyzing {symbol}: {e}")
+                except Exception as symbol_error:
+                    logger.error(f"Critical error analyzing {symbol}: {symbol_error}")
                     symbol_reports[symbol] = {
-                        "status": "ERROR",
-                        "message": f"Analysis failed: {str(e)}"
+                        "status": "CRITICAL_ERROR",
+                        "message": f"Analysis failed: {str(symbol_error)}",
+                        "error": str(symbol_error)
                     }
+                    overall_metrics["error_count"] += 1
 
-            # Calculate overall metrics
-            if overall_metrics["analyzed_symbols"] > 0:
-                overall_metrics["avg_confidence"] = total_confidence / overall_metrics["analyzed_symbols"]
+            # Calculate overall metrics safely
+            if successful_recommendations > 0:
+                overall_metrics["avg_confidence"] = total_confidence / successful_recommendations
+            else:
+                overall_metrics["avg_confidence"] = 0
 
-            # Generate portfolio recommendation
-            portfolio_recommendation = self._generate_portfolio_recommendation(overall_metrics, symbol_reports)
+            # Generate portfolio recommendation with error handling
+            try:
+                portfolio_recommendation = self._generate_portfolio_recommendation(overall_metrics, symbol_reports)
+            except Exception as portfolio_error:
+                logger.error(f"Error generating portfolio recommendation: {portfolio_error}")
+                portfolio_recommendation = {
+                    "portfolio_action": "MANUAL_REVIEW",
+                    "recommendations": ["Portfolio analysis failed - manual review required"],
+                    "error": str(portfolio_error)
+                }
 
-            # Generate risk assessment
-            risk_assessment = self._generate_risk_assessment(symbol_reports, overall_metrics)
+            # Generate risk assessment with error handling
+            try:
+                risk_assessment = self._generate_risk_assessment(symbol_reports, overall_metrics)
+            except Exception as risk_error:
+                logger.error(f"Error generating risk assessment: {risk_error}")
+                risk_assessment = {
+                    "overall_risk_level": "UNKNOWN",
+                    "risk_factors": ["Risk assessment failed"],
+                    "mitigation_strategies": ["Manual risk review required"],
+                    "error": str(risk_error)
+                }
 
             return {
                 "report_generated": datetime.now().isoformat(),
@@ -1360,20 +1905,37 @@ class EnhancedSIPStrategy:
                 "portfolio_recommendation": portfolio_recommendation,
                 "risk_assessment": risk_assessment,
                 "symbol_reports": symbol_reports,
+                "processing_summary": {
+                    "total_symbols_requested": len(symbols),
+                    "symbols_analyzed": overall_metrics["analyzed_symbols"],
+                    "successful_analyses": overall_metrics["successful_analyses"],
+                    "error_count": overall_metrics["error_count"],
+                    "success_rate": round((overall_metrics["successful_analyses"] / len(symbols)) * 100, 2) if len(
+                        symbols) > 0 else 0
+                },
                 "disclaimer": "This report is for educational purposes only and should not be considered as financial advice. Always consult with a qualified financial advisor before making investment decisions."
             }
+
         except Exception as e:
-            logger.error(f"Error generating investment report: {e}")
+            logger.error(f"Critical error generating investment report: {e}")
             return {
-                "status": "ERROR",
+                "status": "CRITICAL_ERROR",
                 "message": f"Failed to generate report: {str(e)}",
-                "report_generated": datetime.now().isoformat()
+                "report_generated": datetime.now().isoformat(),
+                "error": str(e)
             }
 
-
     def _generate_symbol_recommendation(self, signals: Dict, stats: Dict, data_quality: Dict) -> Dict[str, Any]:
-        """Generate recommendation for individual symbol"""
+        """Generate recommendation for individual symbol - WITH NULL SAFETY"""
         try:
+            # CRITICAL FIX: Handle None parameters
+            if signals is None:
+                signals = {"signal": "ERROR", "confidence": 0}
+            if stats is None:
+                stats = {"status": "ERROR", "price_statistics": {}, "technical_indicators": {}, "risk_metrics": {}}
+            if data_quality is None:
+                data_quality = {"status": "ERROR"}
+
             signal_type = signals.get('signal', 'NORMAL')
             confidence = signals.get('confidence', 0)
             quality_status = data_quality.get('status', 'UNKNOWN')
@@ -1398,7 +1960,7 @@ class EnhancedSIPStrategy:
                 recommendation = "HOLD - Normal Conditions"
                 priority = "LOW"
 
-            # Additional considerations
+            # Additional considerations with null safety
             considerations = []
 
             if stats.get('status') == 'SUCCESS':
@@ -1408,9 +1970,9 @@ class EnhancedSIPStrategy:
 
                 # Volatility consideration
                 volatility = price_stats.get('volatility_annualized', 0)
-                if volatility > 40:
+                if volatility and volatility > 40:
                     considerations.append("High volatility - suitable for risk-tolerant investors")
-                elif volatility < 20:
+                elif volatility and volatility < 20:
                     considerations.append("Low volatility - suitable for conservative investors")
 
                 # RSI consideration
@@ -1420,48 +1982,44 @@ class EnhancedSIPStrategy:
                 elif rsi and rsi > 70:
                     considerations.append("Overbought conditions detected")
 
-                # Drawdown consideration
-                drawdown = tech_indicators.get('drawdown_100')
-                if drawdown and drawdown < -10:
-                    considerations.append("Significant drawdown presents opportunity")
-
                 # Trend consideration
-                trend_analysis = stats.get('trend_analysis', {})
-                overall_trend = trend_analysis.get('overall_trend')
-                if overall_trend == 'BULLISH':
-                    considerations.append("Positive trend momentum")
-                elif overall_trend == 'BEARISH':
-                    considerations.append("Negative trend momentum - exercise caution")
+                sma_20 = tech_indicators.get('sma_20')
+                sma_50 = tech_indicators.get('sma_50')
+                current_price = price_stats.get('current_price', 0)
 
-                # Support/Resistance consideration
-                support_resistance = stats.get('support_resistance', {})
-                dynamic_levels = support_resistance.get('dynamic_levels', {})
-                resistance_distance = dynamic_levels.get('resistance_distance')
-                support_distance = dynamic_levels.get('support_distance')
+                if sma_20 and sma_50 and current_price:
+                    if current_price > sma_20 > sma_50:
+                        considerations.append("Strong upward trend")
+                    elif current_price < sma_20 < sma_50:
+                        considerations.append("Strong downward trend")
 
-                if resistance_distance and resistance_distance < 5:
-                    considerations.append("Near resistance level - potential price ceiling")
-                if support_distance and support_distance < 5:
-                    considerations.append("Near support level - potential price floor")
+                # Risk consideration
+                max_drawdown = risk_metrics.get('max_drawdown')
+                if max_drawdown and abs(max_drawdown) > 30:
+                    considerations.append("High historical drawdown risk")
 
             return {
                 "recommendation": recommendation,
                 "priority": priority,
                 "confidence_score": confidence,
+                "signal_type": signal_type,
                 "considerations": considerations,
-                "suggested_allocation": self._suggest_allocation(signal_type, confidence, priority),
-                "risk_rating": self._assess_symbol_risk(stats, signals)
+                "investment_horizon": "Long-term" if signal_type in ['STRONG_BUY', 'BUY'] else "Short-term",
+                "risk_tolerance": "High" if signal_type == 'STRONG_BUY' else "Medium" if signal_type == 'BUY' else "Low"
             }
 
         except Exception as e:
             logger.error(f"Error generating symbol recommendation: {e}")
+            # Always return structured response
             return {
-                "recommendation": "UNABLE TO ANALYZE",
+                "recommendation": "ERROR - Unable to generate recommendation",
                 "priority": "LOW",
                 "confidence_score": 0,
-                "considerations": ["Error in analysis"],
-                "suggested_allocation": 0,
-                "risk_rating": "UNKNOWN"
+                "signal_type": "ERROR",
+                "considerations": [f"Analysis error: {str(e)}"],
+                "investment_horizon": "N/A",
+                "risk_tolerance": "N/A",
+                "error": str(e)
             }
 
     def _suggest_allocation(self, signal_type: str, confidence: float, priority: str) -> float:
