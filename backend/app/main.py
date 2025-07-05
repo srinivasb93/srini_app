@@ -1,6 +1,9 @@
 import sys
 import os
 import logging
+import signal
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
 
 # Ensure consistent import path - add this RIGHT after your existing path manipulation
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -8,7 +11,14 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 # Configure logging BEFORE any other imports
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO,  # Changed from DEBUG to reduce noise
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('logs/trading_app.log', mode='a')
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Now import everything else in the same order as before
@@ -28,6 +38,7 @@ from uuid import uuid4
 
 from backend.app.database import (
     init_databases,
+    cleanup_databases,
     db_manager,
     get_db,
     get_nsedata_db
@@ -65,51 +76,177 @@ from schemas import (
 )
 from auth import UserManager, oauth2_scheme
 
+# Initialize global variables that existing functions depend on
+order_monitor = None
+order_manager = None
+user_apis = {}
+background_tasks = []
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan - clean startup and shutdown"""
+    """Simplified lifespan with reliable startup and shutdown"""
+    global order_monitor, order_manager, user_apis, background_tasks
+
     logger.info("🚀 Starting Modern Trading Platform...")
+    startup_tasks = []
 
     try:
-        # Initialize multi-database system
+        # Step 1: Initialize databases
+        logger.info("🔧 Initializing database system...")
         await init_databases()
-        logger.info("✅ Multi-database system initialized")
+        logger.info("✅ Databases initialized successfully")
 
-        # Log available databases
-        available_databases = list(db_manager.db_configs.keys())
-        logger.info(f"📊 Available databases: {available_databases}")
+        # Step 2: Initialize services
+        logger.info("🔄 Initializing services...")
+        order_monitor = OrderMonitor()
+        order_manager = OrderManager(monitor=order_monitor)
+        user_apis = {}
+        logger.info("✅ Services initialized")
 
-        # Test database connections
-        for db_name in available_databases:
-            session_factory = db_manager.get_session_factory(db_name)
-            if session_factory:
-                async with session_factory() as session:
-                    await session.execute(text("SELECT 1"))
-                logger.info(f"✅ {db_name} database connection verified")
+        # Step 3: Start background services with error handling
+        logger.info("🚀 Starting background services...")
 
-        # Start background services
-        asyncio.create_task(order_monitor.run_scheduled_tasks(user_apis=user_apis))
-        asyncio.create_task(order_manager.start(user_apis=user_apis))
+        async def safe_monitor_task():
+            try:
+                await order_monitor.run_scheduled_tasks(user_apis=user_apis)
+            except Exception as e:
+                logger.error(f"OrderMonitor error: {e}")
+
+        async def safe_manager_task():
+            try:
+                await order_manager.start(user_apis=user_apis)
+            except Exception as e:
+                logger.error(f"OrderManager error: {e}")
+
+        # Create tasks with error handling
+        monitor_task = asyncio.create_task(safe_monitor_task(), name="monitor")
+        manager_task = asyncio.create_task(safe_manager_task(), name="manager")
+        startup_tasks = [monitor_task, manager_task]
+        background_tasks = startup_tasks.copy()
+
         logger.info("✅ Background services started")
+        logger.info("🎯 Trading platform is ready!")
 
-        yield  # Application runs here
+        # Store in app state
+        app.state.order_monitor = order_monitor
+        app.state.order_manager = order_manager
+        app.state.user_apis = user_apis
+
+        # Application runs here
+        yield
 
     except Exception as e:
         logger.error(f"❌ Startup failed: {e}")
+        # Cancel any tasks that were started
+        for task in startup_tasks:
+            if not task.done():
+                task.cancel()
         raise
     finally:
-        logger.info("🛑 Shutting down application...")
+        # Simple, reliable shutdown
+        logger.info("🛑 Shutting down...")
 
-        # Cleanup background tasks
-        await order_monitor.cancel_all_tasks()
+        try:
+            # Step 1: Stop services
+            if order_monitor:
+                order_monitor.running = False
+            if order_manager:
+                order_manager.running = False
 
-        # Close database connections
-        for engine in db_manager.engines.values():
-            if engine:
-                await engine.dispose()
+            # Step 2: Cancel background tasks quickly
+            for task in background_tasks:
+                if not task.done():
+                    task.cancel()
 
-        logger.info("✅ Cleanup completed")
+            # Step 3: Wait briefly for cancellation (don't hang)
+            if background_tasks:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*background_tasks, return_exceptions=True),
+                        timeout=2.0  # Short timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Tasks didn't cancel in time - proceeding")
+
+            # Step 4: Close databases
+            await cleanup_databases()
+
+            logger.info("✅ Shutdown completed")
+
+        except Exception as e:
+            logger.error(f"Shutdown error: {e}")
+
+async def enhanced_cleanup():
+    """Enhanced cleanup that properly handles all resources"""
+    global order_monitor, order_manager, user_apis, background_tasks
+
+    logger.info("🛑 Starting enhanced application cleanup...")
+
+    try:
+        # Step 1: Cancel background tasks
+        if background_tasks:
+            logger.info(f"🔄 Cancelling {len(background_tasks)} background tasks...")
+
+            for task in background_tasks:
+                if not task.done():
+                    task.cancel()
+                    logger.debug(f"Cancelled task: {task.get_name()}")
+
+            # Wait for tasks to complete with timeout
+            if background_tasks:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*background_tasks, return_exceptions=True),
+                        timeout=5.0
+                    )
+                    logger.info("✅ Background tasks cancelled successfully")
+                except asyncio.TimeoutError:
+                    logger.warning("⚠️ Some background tasks did not complete within timeout")
+
+        # Step 2: Cleanup service objects
+        if order_monitor:
+            try:
+                await order_monitor.cancel_all_tasks()
+                logger.info("✅ Order monitor cleaned up")
+            except Exception as e:
+                logger.warning(f"Error cleaning up order monitor: {e}")
+
+        # Step 3: Cancel any remaining asyncio tasks
+        current_task = asyncio.current_task()
+        remaining_tasks = [
+            task for task in asyncio.all_tasks()
+            if task != current_task and not task.done()
+        ]
+
+        if remaining_tasks:
+            logger.info(f"🔄 Cancelling {len(remaining_tasks)} remaining tasks...")
+            for task in remaining_tasks:
+                task.cancel()
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*remaining_tasks, return_exceptions=True),
+                    timeout=3.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Some tasks did not respond to cancellation")
+
+        # Step 4: Close database connections (most critical)
+        logger.info("🔄 Closing database connections...")
+        await cleanup_databases()
+        logger.info("✅ Database connections closed successfully")
+
+        # Step 5: Clear global references
+        order_monitor = None
+        order_manager = None
+        user_apis.clear()
+        background_tasks.clear()
+
+        logger.info("✅ Enhanced cleanup completed successfully")
+
+    except Exception as e:
+        logger.error(f"❌ Error during enhanced cleanup: {e}")
 
 app = FastAPI(
     title="Modern Algorithmic Trading Platform",
@@ -124,7 +261,9 @@ app = FastAPI(
         {"name": "gtt-orders", "description": "Good Till Triggered (GTT) order endpoints"},
         {"name": "algo-trading", "description": "Algorithmic trading endpoints"},
         {"name": "analytics", "description": "Analytics and indicators"},
-        {"name": "mutual-funds", "description": "Mutual fund operations"}
+        {"name": "mutual-funds", "description": "Mutual fund operations"},
+        {"name": "sip-strategy", "description": "SIP strategy endpoints"},
+        {"name": "system", "description": "System health and monitoring"}
     ]
 )
 
@@ -137,16 +276,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# Request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all HTTP requests for monitoring"""
+    start_time = asyncio.get_event_loop().time()
+
+    try:
+        response = await call_next(request)
+        process_time = asyncio.get_event_loop().time() - start_time
+
+        # Log only slow requests or errors to reduce noise
+        if process_time > 1.0 or response.status_code >= 400:
+            logger.warning(
+                f"{request.method} {request.url.path} "
+                f"- Status: {response.status_code} "
+                f"- Time: {process_time:.3f}s"
+            )
+
+        response.headers["X-Process-Time"] = str(process_time)
+        return response
+
+    except Exception as e:
+        process_time = asyncio.get_event_loop().time() - start_time
+        logger.error(
+            f"{request.method} {request.url.path} "
+            f"- Error: {str(e)} "
+            f"- Time: {process_time:.3f}s"
+        )
+        raise
+
 # Include routers
-app.include_router(sip_router)
+app.include_router(sip_router, tags=["sip-strategy"])
 app.include_router(data.router, prefix="/api", tags=["data"])
-
-# Initialize OrderMonitor and OrderManager
-order_monitor = OrderMonitor()
-order_manager = OrderManager(monitor=order_monitor)
-
-# User-specific APIs storage
-user_apis = {}
 
 # Custom in-memory rate limiter
 class InMemoryRateLimiter:
@@ -181,14 +344,29 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
 
 
 async def initialize_user_apis(user_id: str, db: AsyncSession, force_reinitialize: bool = False):
-    """Initialize trading APIs for user"""
+    """Initialize trading APIs for user - enhanced with better error handling"""
+    global user_apis
+
+    # Check if already initialized and not forcing reinitialize
     if user_id in user_apis and not force_reinitialize:
         return user_apis[user_id]
 
     try:
+        logger.info(f"Initializing APIs for user {user_id}")
+
+        # Initialize Upstox APIs
         upstox_apis = await init_upstox_api(db, user_id)
+
+        # Initialize Zerodha APIs
         kite_apis = await init_zerodha_api(db, user_id)
-        user_apis[user_id] = {"upstox": upstox_apis, "zerodha": kite_apis}
+
+        # Store in global user_apis
+        user_apis[user_id] = {
+            "upstox": upstox_apis,
+            "zerodha": kite_apis
+        }
+
+        logger.info(f"✅ APIs initialized successfully for user {user_id}")
 
     except TokenExpiredError as e:
         logger.info(f"Token expired for user {user_id}: {e.message}")
@@ -203,140 +381,85 @@ async def initialize_user_apis(user_id: str, db: AsyncSession, force_reinitializ
     return user_apis[user_id]
 
 
-@app.on_event("startup")
-async def startup_event():
-    logger.info("=== APPLICATION STARTUP BEGINNING ===")
-
+@app.get("/health", tags=["system"])
+async def health_check():
+    """Comprehensive application health check"""
     try:
-        # Import database module
-        import database
+        # Check database health
+        db_health = await db_manager.health_check()
 
-        # Initialize database
-        logger.info("🔧 Initializing database...")
-        session_factory_result, engine_result = await database.init_engine()
+        # Determine overall status
+        overall_status = "healthy"
+        unhealthy_databases = []
 
-        # CRITICAL: Set the session factory in ALL possible database modules
-        logger.info("🔧 Setting session factory globally...")
+        for db_name, status in db_health.items():
+            if status.get('status') != 'healthy':
+                overall_status = "unhealthy"
+                unhealthy_databases.append(db_name)
 
-        # Set in main database module
-        database.session_factory = session_factory_result
-        database.engine = engine_result
-
-        # Try to set in other possible database imports
-        try:
-            from backend.app import database as backend_db
-            backend_db.session_factory = session_factory_result
-            backend_db.engine = engine_result
-            logger.info("✅ Set session factory in backend.app.database")
-        except:
-            pass
-
-        try:
-            import backend.app.database as backend_app_db
-            backend_app_db.session_factory = session_factory_result
-            backend_app_db.engine = engine_result
-            logger.info("✅ Set session factory in backend.app.database (alt import)")
-        except:
-            pass
-
-        logger.info(f"✅ Database initialization completed successfully")
-
-        # Test database access
-        async for test_session in database.get_db():
-            result = await test_session.execute(text("SELECT 1"))
-            test_value = result.fetchone()
-            logger.info(f"✅ Database access test successful: {test_value[0]}")
-            break
-
-    except Exception as e:
-        logger.error(f"❌ Database initialization failed: {e}")
-        raise
-
-    try:
-        # Start background tasks
-        asyncio.create_task(order_monitor.run_scheduled_tasks(user_apis=user_apis))
-        asyncio.create_task(order_manager.start(user_apis=user_apis))
-        logger.info("✅ Background tasks scheduled successfully")
-
-    except Exception as e:
-        logger.error(f"❌ Background tasks failed: {e}")
-
-    logger.info("=== APPLICATION STARTUP COMPLETED ===")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await order_monitor.cancel_all_tasks()
-    logger.info("Application shutdown")
-
-
-# ============================================================================
-# CORE ENDPOINTS
-# ============================================================================
-
-@app.get("/")
-async def root():
-    """Root endpoint with system status"""
-    try:
-        # Get database status
-        db_status = {}
-        for db_name in db_manager.db_configs.keys():
-            session_factory = db_manager.get_session_factory(db_name)
-            db_status[db_name] = "healthy" if session_factory else "disconnected"
+        # Check global services
+        services_status = {
+            "order_monitor": "initialized" if order_monitor else "not_initialized",
+            "order_manager": "initialized" if order_manager else "not_initialized",
+            "user_apis_count": len(user_apis),
+            "background_tasks_count": len(background_tasks)
+        }
 
         return {
-            "message": "Modern Algorithmic Trading Platform",
-            "version": "3.0.0",
-            "status": "operational",
-            "architecture": "multi-database",
-            "databases": db_status,
-            "features": [
-                "Multi-database architecture",
-                "Enhanced SIP strategies",
-                "Real-time order management",
-                "Advanced backtesting",
-                "Portfolio optimization",
-                "Risk management"
-            ],
-            "timestamp": datetime.now().isoformat()
+            "status": overall_status,
+            "timestamp": datetime.now().isoformat(),
+            "version": "2.1.0",
+            "databases": db_health,
+            "services": services_status,
+            "unhealthy_databases": unhealthy_databases,
+            "active_asyncio_tasks": len([task for task in asyncio.all_tasks() if not task.done()]),
+            "environment": os.getenv("ENVIRONMENT", "development")
         }
+
     except Exception as e:
-        logger.error(f"Root endpoint error: {e}")
-        raise HTTPException(status_code=500, detail="System error")
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "error",
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        }
 
 
-@app.get("/health")
-async def health_check():
-    """Comprehensive health check"""
-    health_status = {
-        "api": "healthy",
-        "databases": {},
-        "services": {}
+@app.get("/", tags=["system"])
+async def root():
+    """Root endpoint with basic application information"""
+    return {
+        "message": "Modern Algorithmic Trading Platform",
+        "version": "2.1.0",
+        "status": "running",
+        "timestamp": datetime.now().isoformat(),
+        "docs_url": "/docs",
+        "health_check_url": "/health",
+        "features": [
+            "Enhanced database connection management",
+            "Proper resource cleanup",
+            "Global service compatibility",
+            "Comprehensive monitoring"
+        ]
     }
 
-    # Test database connections
-    for db_name in db_manager.db_configs.keys():
-        try:
-            session_factory = db_manager.get_session_factory(db_name)
-            if session_factory:
-                async with session_factory() as session:
-                    await session.execute(text("SELECT 1"))
-                health_status["databases"][db_name] = "healthy"
-            else:
-                health_status["databases"][db_name] = "disconnected"
-        except Exception as e:
-            health_status["databases"][db_name] = f"error: {str(e)}"
+# ============================================================================
+# APPLICATION STARTUP/SHUTDOWN EVENTS
+# ============================================================================
 
-    # Check services
-    health_status["services"]["order_manager"] = "running"
-    health_status["services"]["order_monitor"] = "running"
+@app.on_event("startup")
+async def log_startup():
+    """Log startup completion"""
+    logger.info("🎉 FastAPI application startup completed")
+    logger.info(f"📊 Global services status:")
+    logger.info(f"   • order_monitor: {'✅ Ready' if order_monitor else '❌ Not initialized'}")
+    logger.info(f"   • order_manager: {'✅ Ready' if order_manager else '❌ Not initialized'}")
+    logger.info(f"   • user_apis: {len(user_apis)} users")
 
-    # Overall status
-    all_dbs_healthy = all(status == "healthy" for status in health_status["databases"].values())
-    health_status["overall"] = "healthy" if all_dbs_healthy else "degraded"
-
-    return health_status
-
+@app.on_event("shutdown")
+async def log_shutdown():
+    """Log shutdown initiation"""
+    logger.info("👋 FastAPI application shutdown initiated")
 
 @app.get("/system/info")
 async def get_system_info():
@@ -1594,23 +1717,20 @@ async def general_exception_handler(request, exc):
         }
     )
 
-
-# ============================================================================
-# DEVELOPMENT UTILITIES
-# ============================================================================
-
 if __name__ == "__main__":
     import uvicorn
 
-    # Development configuration
+    # Configuration for development
     config = {
-        "host": os.getenv("HOST", "0.0.0.0"),
-        "port": int(os.getenv("PORT", 8000)),
-        "reload": os.getenv("DEBUG", "true").lower() == "true",
-        "log_level": "info"
+        "app": "main:app",
+        "host": "0.0.0.0",
+        "port": 8000,
+        "reload": os.getenv("ENVIRONMENT", "development") == "development",
+        "log_level": "info",
+        "access_log": True,
+        "use_colors": True,
+        "loop": "asyncio"
     }
 
-    logger.info(f"🚀 Starting development server: http://{config['host']}:{config['port']}")
-    logger.info(f"📚 API Documentation: http://{config['host']}:{config['port']}/docs")
-
-    uvicorn.run("main:app", **config)
+    logger.info(f"Starting server with config: {config}")
+    uvicorn.run(**config)

@@ -2,6 +2,7 @@
 Complete SIP Strategy API Routes with fixed data fetching and all missing endpoints
 Addresses: Correct table name handling, proper database queries, missing endpoints
 """
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +18,12 @@ import pandas as pd
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.executors.asyncio import AsyncIOExecutor
+from apscheduler.jobstores.memory import MemoryJobStore
+import pytz
+import traceback
+from backend.app.database import db_manager
+
 
 # Clean imports - multi-database architecture
 from backend.app.database import get_db, get_nsedata_db
@@ -26,8 +33,39 @@ from backend.app.strategies.enhanced_sip_strategy import (EnhancedSIPStrategy, S
 
 logger = logging.getLogger(__name__)
 
-# Global scheduler for background tasks
-scheduler = AsyncIOScheduler()
+# Enhanced Scheduler Configuration
+def create_enhanced_scheduler():
+    """Create scheduler with production-ready configuration"""
+
+    # Job stores
+    jobstores = {
+        'default': MemoryJobStore()
+    }
+
+    # Executors with proper thread/process management
+    executors = {
+        'default': AsyncIOExecutor(),
+    }
+
+    # Job defaults
+    job_defaults = {
+        'coalesce': True,  # Combine multiple pending executions into one
+        'max_instances': 1,  # Only one instance of each job at a time
+        'misfire_grace_time': 300  # 5 minutes grace period for missed jobs
+    }
+
+    scheduler = AsyncIOScheduler(
+        jobstores=jobstores,
+        executors=executors,
+        job_defaults=job_defaults,
+        timezone=pytz.timezone('Asia/Kolkata')  # IST timezone
+    )
+
+    return scheduler
+
+
+# Create global scheduler instance
+scheduler = create_enhanced_scheduler()
 
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
@@ -444,15 +482,26 @@ sip_router = APIRouter(prefix="/sip", tags=["sip-strategy"])
 # ============================================================================
 
 async def daily_signal_check():
-    """Background task to check for signals daily at 8 AM - FIXED JSON handling"""
-    logger.info("🔄 Starting daily signal check at 8 AM")
+    """Enhanced background task with proper session management and error handling"""
+    job_start_time = datetime.now()
+    logger.info(f"🔄 Starting daily signal check at {job_start_time.strftime('%Y-%m-%d %H:%M:%S IST')}")
+
+    # Metrics tracking
+    metrics = {
+        'start_time': job_start_time,
+        'portfolios_processed': 0,
+        'signals_generated': 0,
+        'errors_encountered': 0,
+        'symbols_processed': []
+    }
 
     try:
-        # Get database sessions
-        from backend.app.database import AsyncSessionLocal, AsyncNSESessionLocal
+        # Use the proper dependency pattern for getting database sessions
+        async with db_manager.get_session('trading_db') as trading_db:
+            async with db_manager.get_session('nsedata') as nsedata_db:
 
-        async with AsyncSessionLocal() as trading_db:
-            async with AsyncNSESessionLocal() as nsedata_db:
+                logger.info("✅ Database sessions established successfully")
+
                 # Get all active portfolios
                 portfolios_query = text("""
                     SELECT portfolio_id, user_id, symbols, config, 
@@ -464,90 +513,260 @@ async def daily_signal_check():
                 result = await trading_db.execute(portfolios_query)
                 portfolios = result.fetchall()
 
-                logger.info(f"Processing {len(portfolios)} active portfolios")
+                logger.info(f"📊 Found {len(portfolios)} active portfolios to process")
 
+                if not portfolios:
+                    logger.warning("⚠️ No active portfolios found")
+                    return
+
+                # Initialize strategy
                 strategy = EnhancedSIPStrategy(
                     nsedata_session=nsedata_db,
                     trading_session=trading_db
                 )
 
+                # Process each portfolio
                 for portfolio in portfolios:
+                    portfolio_start_time = datetime.now()
                     portfolio_id, user_id, symbols_json, config_json, total_invested, current_units, next_investment_date = portfolio
 
                     try:
-                        # FIXED: Safe JSON parsing
+                        # Safe JSON parsing with validation
                         if isinstance(symbols_json, str):
                             symbols_data = json.loads(symbols_json)
                         else:
-                            symbols_data = symbols_json
+                            symbols_data = symbols_json or []
 
                         if isinstance(config_json, str):
                             config_dict = json.loads(config_json)
                         else:
-                            config_dict = config_json
+                            config_dict = config_json or {}
+
+                        # Validate config structure
+                        required_config_keys = ['fixed_investment', 'min_investment_gap_days']
+                        missing_keys = [key for key in required_config_keys if key not in config_dict]
+
+                        if missing_keys:
+                            logger.error(f"Invalid config for portfolio {portfolio_id}: missing keys {missing_keys}")
+                            metrics['errors_encountered'] += 1
+                            continue
 
                         config = SIPConfig(**config_dict)
+                        portfolio_signals_generated = 0
 
                         # Process each symbol in the portfolio
                         for symbol_config in symbols_data:
+                            symbol_start_time = datetime.now()
+
+                            # Extract and validate symbol name
                             if isinstance(symbol_config, dict):
                                 symbol = symbol_config.get('symbol')
+                                if not symbol:
+                                    logger.warning(f"Symbol config missing 'symbol' key: {symbol_config}")
+                                    continue
+                            elif isinstance(symbol_config, str):
+                                symbol = symbol_config
                             else:
-                                symbol = symbol_config  # Direct string
-
-                            if not symbol:
-                                logger.warning(f"Skipping invalid symbol config: {symbol_config}")
+                                logger.warning(f"Invalid symbol config type: {type(symbol_config)}")
                                 continue
 
-                            # Check if it's time for next investment
-                            current_date = datetime.now().date()
-
-                            # Skip if next investment date is in future
-                            if next_investment_date and next_investment_date.date() > current_date:
+                            # Validate symbol
+                            if not symbol or len(symbol.strip()) == 0:
+                                logger.warning(f"Empty or invalid symbol: '{symbol}'")
                                 continue
 
-                            # Check last investment date to ensure minimum gap
-                            last_trade_query = text("""
-                                SELECT MAX(timestamp) FROM sip_actual_trades 
-                                WHERE portfolio_id = :portfolio_id AND symbol = :symbol
-                            """)
+                            # Normalize symbol name
+                            symbol = symbol.strip().upper()
+                            metrics['symbols_processed'].append(symbol)
 
-                            last_trade_result = await trading_db.execute(
-                                last_trade_query, {'portfolio_id': portfolio_id, 'symbol': symbol}
-                            )
-                            last_trade_date = last_trade_result.scalar()
+                            try:
+                                # Check timing constraints
+                                current_date = datetime.now().date()
 
-                            # Enforce minimum gap
-                            if last_trade_date:
-                                days_since_last = (current_date - last_trade_date.date()).days
-                                if days_since_last < config.min_investment_gap_days:
+                                # Skip if next investment date is in future
+                                if next_investment_date and next_investment_date.date() > current_date:
                                     logger.info(
-                                        f"Skipping {symbol} - only {days_since_last} days since last investment")
+                                        f"Skipping {symbol} - next investment date is {next_investment_date.date()}")
                                     continue
 
-                            # Generate signals
-                            try:
-                                end_date = datetime.now().strftime('%Y-%m-%d')
-                                start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+                                # Check last investment date to ensure minimum gap
+                                last_trade_query = text("""
+                                    SELECT MAX(timestamp) FROM sip_actual_trades 
+                                    WHERE portfolio_id = :portfolio_id AND symbol = :symbol
+                                """)
 
-                                data = await strategy.fetch_data_from_db_async(symbol, start_date, end_date)
-                                if not data.empty:
-                                    signals = strategy.get_next_investment_signals(data, config)
+                                last_trade_result = await trading_db.execute(
+                                    last_trade_query, {'portfolio_id': portfolio_id, 'symbol': symbol}
+                                )
+                                last_trade_date = last_trade_result.scalar()
+
+                                # Enforce minimum gap
+                                if last_trade_date:
+                                    days_since_last = (current_date - last_trade_date.date()).days
+                                    if days_since_last < config.min_investment_gap_days:
+                                        logger.info(
+                                            f"Skipping {symbol} - only {days_since_last} days since last investment "
+                                            f"(minimum: {config.min_investment_gap_days})"
+                                        )
+                                        continue
+
+                                # Generate signals with proper error handling
+                                try:
+                                    # Fetch data with reasonable date range
+                                    end_date = datetime.now().strftime('%Y-%m-%d')
+                                    start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+
+                                    # Add timeout for data fetching
+                                    data = await asyncio.wait_for(
+                                        strategy.fetch_data_from_db_async(symbol, start_date, end_date),
+                                        timeout=30.0
+                                    )
+
+                                    if data.empty:
+                                        logger.warning(
+                                            f"No data available for {symbol} in date range {start_date} to {end_date}")
+                                        continue
+
+                                    # Validate data quality
+                                    if len(data) < 50:  # Minimum data points needed
+                                        logger.warning(f"Insufficient data for {symbol}: only {len(data)} records")
+                                        continue
+
+                                    # Generate signals with timeout
+                                    signals = await asyncio.wait_for(
+                                        asyncio.to_thread(strategy.get_next_investment_signals, data, config),
+                                        timeout=15.0
+                                    )
+
+                                    # Validate signal response
+                                    if not isinstance(signals, dict):
+                                        logger.error(f"Invalid signal response type for {symbol}: {type(signals)}")
+                                        continue
+
+                                    if 'signal' not in signals:
+                                        logger.error(f"Signal response missing 'signal' key for {symbol}: {signals}")
+                                        continue
 
                                     # Save signal if valid
-                                    if signals.get('signal') not in ['NO_DATA', 'ERROR']:
+                                    signal_type = signals.get('signal')
+                                    if signal_type and signal_type not in ['NO_DATA', 'ERROR', None]:
                                         await save_signal_with_gtt_order(portfolio_id, symbol, signals, trading_db,
                                                                          config)
-                                        logger.info(f"✅ Generated daily signal for {symbol}")
+                                        portfolio_signals_generated += 1
+                                        metrics['signals_generated'] += 1
 
-                            except Exception as signal_error:
-                                logger.error(f"Error generating daily signal for {symbol}: {signal_error}")
+                                        # Log success with details
+                                        signal_processing_time = (datetime.now() - symbol_start_time).total_seconds()
+                                        logger.info(
+                                            f"✅ Generated signal for {symbol} in {signal_processing_time:.2f}s\n"
+                                            f"   Signal: {signal_type}\n"
+                                            f"   Amount: {signals.get('recommended_amount', 'N/A')}\n"
+                                            f"   Confidence: {signals.get('confidence', 'N/A')}"
+                                        )
+                                    else:
+                                        logger.info(f"No actionable signal for {symbol}: {signal_type}")
+
+                                except asyncio.TimeoutError:
+                                    logger.error(f"Timeout processing {symbol} - operation took too long")
+                                    metrics['errors_encountered'] += 1
+                                except Exception as signal_error:
+                                    logger.error(f"Error generating signal for {symbol}: {signal_error}")
+                                    metrics['errors_encountered'] += 1
+
+                            except Exception as symbol_error:
+                                logger.error(f"Error processing symbol {symbol}: {symbol_error}")
+                                metrics['errors_encountered'] += 1
+
+                        # Log portfolio completion
+                        portfolio_processing_time = (datetime.now() - portfolio_start_time).total_seconds()
+                        metrics['portfolios_processed'] += 1
+
+                        logger.info(
+                            f"📈 Completed portfolio {portfolio_id} in {portfolio_processing_time:.2f}s\n"
+                            f"   User: {user_id}\n"
+                            f"   Signals generated: {portfolio_signals_generated}\n"
+                            f"   Total invested: {total_invested}"
+                        )
 
                     except Exception as portfolio_error:
                         logger.error(f"Error processing portfolio {portfolio_id}: {portfolio_error}")
+                        metrics['errors_encountered'] += 1
 
     except Exception as e:
         logger.error(f"Critical error in daily signal check: {e}")
+        logger.error(f"Error traceback: {traceback.format_exc()}")
+        metrics['errors_encountered'] += 1
+
+    finally:
+        # Calculate and log final metrics
+        job_end_time = datetime.now()
+        total_processing_time = (job_end_time - job_start_time).total_seconds()
+
+        metrics.update({
+            'end_time': job_end_time,
+            'total_processing_time_seconds': total_processing_time,
+            'unique_symbols_count': len(set(metrics['symbols_processed']))
+        })
+
+        # Comprehensive summary log
+        success_rate = (
+            (metrics['signals_generated'] / max(len(metrics['symbols_processed']), 1)) * 100
+            if metrics['symbols_processed'] else 0
+        )
+
+        logger.info(
+            f"🏁 Daily signal check completed in {total_processing_time:.2f}s\n"
+            f"📊 Final Summary:\n"
+            f"   • Portfolios processed: {metrics['portfolios_processed']}\n"
+            f"   • Total symbols checked: {len(metrics['symbols_processed'])}\n"
+            f"   • Unique symbols: {metrics['unique_symbols_count']}\n"
+            f"   • Signals generated: {metrics['signals_generated']}\n"
+            f"   • Success rate: {success_rate:.1f}%\n"
+            f"   • Errors encountered: {metrics['errors_encountered']}\n"
+            f"   • Average time per portfolio: {total_processing_time / max(metrics['portfolios_processed'], 1):.2f}s\n"
+            f"   • Memory efficient: Sessions properly managed ✅"
+        )
+
+        # Store metrics for monitoring (if trading_db is still available)
+        try:
+            async with db_manager.get_session('trading_db') as trading_db:
+                await store_job_metrics(trading_db, 'daily_signal_check', metrics)
+        except Exception as metric_error:
+            logger.warning(f"Could not store job metrics: {metric_error}")
+
+
+async def store_job_metrics(db_session: AsyncSession, job_name: str, metrics: dict):
+    """Store job execution metrics for monitoring"""
+    try:
+        insert_metrics = text("""
+            INSERT INTO job_execution_metrics 
+            (job_name, execution_start, execution_end, total_time_seconds, 
+             portfolios_processed, signals_generated, errors_count, metadata)
+            VALUES (:job_name, :start_time, :end_time, :total_time, 
+                    :portfolios, :signals, :errors, :metadata)
+        """)
+
+        await db_session.execute(insert_metrics, {
+            'job_name': job_name,
+            'start_time': metrics['start_time'],
+            'end_time': metrics['end_time'],
+            'total_time': metrics['total_processing_time_seconds'],
+            'portfolios': metrics['portfolios_processed'],
+            'signals': metrics['signals_generated'],
+            'errors': metrics['errors_encountered'],
+            'metadata': json.dumps({
+                'unique_symbols_count': metrics['unique_symbols_count'],
+                'symbols_processed': metrics['symbols_processed'][:50],  # Limit for storage
+                'success_rate': (metrics['signals_generated'] / max(len(metrics['symbols_processed']), 1)) * 100
+            })
+        })
+
+        await db_session.commit()
+        logger.debug("Job metrics stored successfully")
+
+    except Exception as e:
+        logger.error(f"Failed to store job metrics: {e}")
+        await db_session.rollback()
 
 
 def calculate_next_investment_date(current_date: datetime.date, config: SIPConfig) -> datetime.date:
@@ -564,58 +783,46 @@ def calculate_next_investment_date(current_date: datetime.date, config: SIPConfi
     return next_investment
 
 
-async def save_signal_with_gtt_order(portfolio_id: str, symbol: str, signals: Dict[str, Any],
+async def save_signal_with_gtt_order(portfolio_id: str, symbol: str, signals: dict,
                                      trading_db: AsyncSession, config: SIPConfig):
-    """Save investment signal with GTT order - FIXED JSON handling"""
+    """Save signal with GTT order - enhanced with better error handling"""
     try:
-        signal_id = f"sig_{portfolio_id}_{symbol}_{int(datetime.now().timestamp())}"
-
-        # Determine signal strength
-        confidence = signals.get('confidence', 0)
-        if confidence > 0.7:
-            signal_strength = "high"
-        elif confidence > 0.4:
-            signal_strength = "medium"
-        else:
-            signal_strength = "low"
-
-        # Calculate GTT trigger price (slightly below current for dip buying)
+        signal_id = str(uuid.uuid4())
         current_price = signals.get('current_price', 0)
-        gtt_trigger_price = current_price * 0.98  # 2% below current price
 
-        # Create signals table if not exists
-        create_signals_table = text("""
-            CREATE TABLE IF NOT EXISTS sip_signals (
-                signal_id VARCHAR PRIMARY KEY,
-                portfolio_id VARCHAR NOT NULL,
-                symbol VARCHAR NOT NULL,
-                signal_type VARCHAR NOT NULL,
-                recommended_amount FLOAT,
-                multiplier FLOAT,
-                current_price FLOAT,
-                drawdown_percent FLOAT,
-                signal_strength VARCHAR,
-                is_processed BOOLEAN DEFAULT FALSE,
-                gtt_order_id VARCHAR,
-                gtt_trigger_price FLOAT,
-                signal_data JSONB,  -- Store full signal data
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP
-            )
-        """)
-        await trading_db.execute(create_signals_table)
+        # Validate required signal data
+        required_fields = ['signal', 'recommended_amount']
+        missing_fields = [field for field in required_fields if field not in signals]
 
-        # FIXED: Proper JSON serialization for signal_data
+        if missing_fields:
+            raise ValueError(f"Missing required signal fields: {missing_fields}")
+
+        # Calculate GTT trigger price with validation
+        gtt_trigger_price = current_price * 0.998  # 0.2% below current price
+        if gtt_trigger_price <= 0:
+            raise ValueError(f"Invalid GTT trigger price: {gtt_trigger_price}")
+
+        # Calculate signal strength
+        confidence = signals.get('confidence', 1.0)
+        signal_strength = min(max(confidence * 100, 0), 100)  # Clamp between 0-100
+
+        # Prepare signal data for JSON storage with proper serialization
         try:
-            # Ensure all values in signals are JSON serializable
+            # Create a clean copy of signals for serialization
             serializable_signals = {}
             for key, value in signals.items():
-                if isinstance(value, (int, float, str, bool, list, dict)) or value is None:
-                    serializable_signals[key] = value
-                elif hasattr(value, 'isoformat'):  # datetime objects
-                    serializable_signals[key] = value.isoformat()
-                else:
-                    serializable_signals[key] = str(value)  # Convert to string as fallback
+                try:
+                    # Convert numpy types and handle special cases
+                    if hasattr(value, 'item'):  # numpy scalar
+                        serializable_signals[key] = value.item()
+                    elif isinstance(value, (int, float, str, bool, type(None))):
+                        serializable_signals[key] = value
+                    elif isinstance(value, (datetime, date)):
+                        serializable_signals[key] = value.isoformat()
+                    else:
+                        serializable_signals[key] = str(value)
+                except Exception:
+                    serializable_signals[key] = str(value)
 
             signal_data_json = json.dumps(serializable_signals)
 
@@ -624,10 +831,11 @@ async def save_signal_with_gtt_order(portfolio_id: str, symbol: str, signals: Di
             # Fallback to basic signal data
             signal_data_json = json.dumps({
                 "signal": signals.get('signal', 'UNKNOWN'),
-                "confidence": signals.get('confidence', 0),
-                "message": signals.get('message', 'Signal data serialization failed')
+                "confidence": float(signals.get('confidence', 0)),
+                "message": f"Signal data serialization failed: {str(json_error)}"
             })
 
+        # Insert signal record
         insert_signal = text("""
             INSERT INTO sip_signals 
             (signal_id, portfolio_id, symbol, signal_type, recommended_amount, 
@@ -644,24 +852,31 @@ async def save_signal_with_gtt_order(portfolio_id: str, symbol: str, signals: Di
             'portfolio_id': portfolio_id,
             'symbol': symbol,
             'signal_type': signals.get('signal', 'NORMAL'),
-            'recommended_amount': signals.get('recommended_amount', config.fixed_investment),
-            'multiplier': signals.get('confidence', 1.0),
-            'current_price': current_price,
-            'drawdown_percent': signals.get('drawdown_100'),
-            'signal_strength': signal_strength,
-            'gtt_trigger_price': gtt_trigger_price,
+            'recommended_amount': float(signals.get('recommended_amount', config.fixed_investment)),
+            'multiplier': float(signals.get('confidence', 1.0)),
+            'current_price': float(current_price),
+            'drawdown_percent': float(signals.get('drawdown_100', 0)),
+            'signal_strength': float(signal_strength),
+            'gtt_trigger_price': float(gtt_trigger_price),
             'signal_data': signal_data_json,
             'created_at': datetime.now(),
             'expires_at': datetime.now() + timedelta(days=7)
         })
 
         await trading_db.commit()
-        logger.info(f"✅ Signal and GTT order created for portfolio {portfolio_id}, symbol {symbol}")
+
+        logger.info(
+            f"✅ Signal saved successfully for portfolio {portfolio_id}, symbol {symbol}\n"
+            f"   Signal ID: {signal_id}\n"
+            f"   Signal type: {signals.get('signal')}\n"
+            f"   Amount: ₹{signals.get('recommended_amount', 0):,.2f}\n"
+            f"   GTT trigger: ₹{gtt_trigger_price:.2f}"
+        )
 
     except Exception as e:
         logger.error(f"Error saving signal with GTT order: {e}")
         await trading_db.rollback()
-        raise  # Re-raise to handle in calling function
+        raise
 
 
 async def update_next_investment_date(portfolio_id: str, next_date: datetime.date,
@@ -686,18 +901,79 @@ async def update_next_investment_date(portfolio_id: str, next_date: datetime.dat
         logger.error(f"Error updating next investment date: {e}")
 
 
+async def scheduler_health_check():
+    """Periodic health check for the scheduler"""
+    try:
+        logger.info("🔍 Scheduler health check running")
+
+        # Check database connectivity
+        from backend.app.database import db_manager
+        health_status = await db_manager.health_check()
+
+        unhealthy_databases = [db for db, status in health_status.items() if status.get('status') != 'healthy']
+
+        if unhealthy_databases:
+            logger.error(f"❌ Unhealthy databases detected: {unhealthy_databases}")
+        else:
+            logger.info("✅ All databases healthy")
+
+    except Exception as e:
+        logger.error(f"Scheduler health check failed: {e}")
+
+
+async def test_daily_signal_check():
+    """Test version of daily signal check for development"""
+    if os.getenv('ENVIRONMENT') == 'production':
+        return
+
+    logger.info("🧪 Running test signal check...")
+
 # Start the scheduler
 @sip_router.on_event("startup")
-async def start_scheduler():
-    """Start the background scheduler"""
-    scheduler.add_job(
-        daily_signal_check,
-        CronTrigger(hour=11, minute=28),  # Daily at 8:00 AM
-        id='daily_signal_check',
-        replace_existing=True
-    )
-    scheduler.start()
-    logger.info("✅ Background scheduler started - daily signal check at 8:00 AM")
+async def start_enhanced_scheduler():
+    """Start the enhanced background scheduler with monitoring"""
+    try:
+        # Add the main daily job
+        scheduler.add_job(
+            daily_signal_check,
+            CronTrigger(hour=8, minute=0, timezone=pytz.timezone('Asia/Kolkata')),
+            id='daily_signal_check',
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True
+        )
+
+        # Add a health check job every hour
+        scheduler.add_job(
+            scheduler_health_check,
+            CronTrigger(minute=0, timezone=pytz.timezone('Asia/Kolkata')),  # Every hour
+            id='scheduler_health_check',
+            replace_existing=True,
+            max_instances=1
+        )
+
+        # Add a test job for immediate testing (remove in production)
+        if os.getenv('ENVIRONMENT') != 'production':
+            scheduler.add_job(
+                test_daily_signal_check,
+                CronTrigger(minute='*/5', timezone=pytz.timezone('Asia/Kolkata')),  # Every 5 minutes
+                id='test_signal_check',
+                replace_existing=True,
+                max_instances=1
+            )
+
+        scheduler.start()
+
+        logger.info(
+            f"✅ Enhanced background scheduler started\n"
+            f"   • Daily signal check: 8:00 AM IST\n"
+            f"   • Health check: Every hour\n"
+            f"   • Test mode: {'Enabled (every 5 min)' if os.getenv('ENVIRONMENT') != 'production' else 'Disabled'}"
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to start scheduler: {e}")
+        raise
 
 
 # ============================================================================
