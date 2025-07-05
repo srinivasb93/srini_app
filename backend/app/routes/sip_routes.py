@@ -131,7 +131,7 @@ class SIPSymbolConfig(BaseModel):
 class SIPConfigRequest(BaseModel):
     """Enhanced SIP Configuration with monthly investment limits"""
     fixed_investment: float = 5000
-    max_amount_in_a_month: Optional[float] = None  # Defaults to 4x fixed_investment
+    max_amount_in_a_month: Optional[float] = 20000
     drawdown_threshold_1: float = -10.0
     drawdown_threshold_2: float = -4.0
     investment_multiplier_1: float = 2.0

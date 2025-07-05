@@ -103,13 +103,20 @@ class OrderMonitor:
             logger.info("Order queue initialized")
 
     async def run_scheduled_tasks(self, user_apis: Dict[str, Dict[str, Any]]):
-        """Run periodic tasks for syncing order statuses and monitoring GTT orders - PROPER FIX"""
+        """CORRECTED: Proper database session handling for long-running tasks"""
         logger.info("Starting OrderMonitor scheduled tasks")
         try:
             while self.running:
                 try:
-                    # CORRECT: Use the get_db dependency function properly as an async generator
-                    async for db in get_db():
+                    # CORRECT WAY: Use the session factory directly, not the dependency
+                    session_factory = db_manager.get_session_factory('trading_db')
+                    if not session_factory:
+                        logger.error("Database session factory not available")
+                        await asyncio.sleep(self.polling_interval)
+                        continue
+
+                    # Create a new session for this iteration
+                    async with session_factory() as db:
                         try:
                             # Process user APIs if available
                             if user_apis:
@@ -129,11 +136,12 @@ class OrderMonitor:
                             else:
                                 logger.debug("No user APIs to process")
 
+                            # Commit any changes
+                            await db.commit()
+
                         except Exception as processing_error:
                             logger.error(f"Error in scheduled tasks processing: {processing_error}")
-
-                        # Important: Break after processing to avoid staying in the generator loop
-                        break
+                            await db.rollback()
 
                 except Exception as session_error:
                     logger.error(f"Error with database session: {session_error}")
@@ -153,9 +161,8 @@ class OrderMonitor:
 
     async def sync_order_statuses(self, upstox_api: Optional[Any], zerodha_api: Optional[Any],
                                   db: AsyncSession) -> bool:
-        """Sync order statuses with proper error handling"""
+        """Sync order statuses - same as before, this part was correct"""
         try:
-            # Only proceed if we have at least one API
             if not (upstox_api or zerodha_api):
                 logger.debug("No APIs available for order status sync")
                 return True
@@ -193,18 +200,12 @@ class OrderMonitor:
                                     f"Order {order.order_id} for {order.trading_symbol} is {order.status}",
                                     user.email
                                 )
-                except Exception as order_error:
-                    logger.error(f"Error syncing order {order.order_id}: {order_error}")
+                except Exception as e:
+                    logger.error(f"Error syncing status for order {order.order_id}: {str(e)}")
 
-            await db.commit()
             return True
-
         except Exception as e:
-            logger.error(f"Error in sync_order_statuses: {e}")
-            try:
-                await db.rollback()
-            except:
-                pass  # Session might already be closed
+            logger.error(f"Error in sync_order_statuses: {str(e)}")
             return False
 
     async def monitor_order(self, order_id: str, instrument_token: str, trading_symbol: str, transaction_type: str,
@@ -408,23 +409,12 @@ class OrderMonitor:
         await async_execute_query(db, text(query), {"order_id": order_id})
 
     async def cancel_all_tasks(self):
-        """Cancel all monitoring tasks"""
         self.running = False
         for task in self.monitor_tasks:
             if not task.done():
                 task.cancel()
-
-        if self.monitor_tasks:
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*self.monitor_tasks, return_exceptions=True),
-                    timeout=2.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Some monitor tasks didn't cancel in time")
-
-        self.monitor_tasks.clear()
-        logger.info("All OrderMonitor tasks cancelled")
+        await asyncio.gather(*[task for task in self.monitor_tasks if not task.done()], return_exceptions=True)
+        self.monitor_tasks = []
 
     async def delete_gtt_order(self, api: Optional[Any], gtt_id: str, db: AsyncSession):
         try:
@@ -457,17 +447,21 @@ class OrderManager:
         logger.info("OrderManager initialized")
 
     async def start(self, user_apis=None):
-        """Start OrderManager with proper database session handling - PROPER FIX"""
+        """CORRECTED: Start OrderManager with proper database session handling"""
         logger.info("OrderManager starting...")
         try:
-            # Load scheduled orders first using the correct pattern
-            async for db in get_db():
+            # Load scheduled orders first using the correct session pattern
+            session_factory = db_manager.get_session_factory('trading_db')
+            if not session_factory:
+                logger.error("Database session factory not available")
+                return
+
+            async with session_factory() as db:
                 try:
                     await self._load_scheduled_orders(db)
                     logger.info("Scheduled orders loaded successfully")
                 except Exception as load_error:
                     logger.error(f"Error loading scheduled orders: {load_error}")
-                break  # Important: Break after one iteration
 
             # Start the continuous processing loop
             await self._process_scheduled_orders_loop(user_apis)
@@ -476,6 +470,7 @@ class OrderManager:
             logger.error(f"Error starting OrderManager: {e}")
 
     async def _load_scheduled_orders(self, db: AsyncSession):
+        """Load scheduled orders - same as before"""
         try:
             stmt = select(ScheduledOrder).where(ScheduledOrder.status == "PENDING")
             result = await db.execute(stmt)
@@ -487,31 +482,98 @@ class OrderManager:
             self.scheduled_order_queue = []
 
     async def _process_scheduled_orders_loop(self, user_apis: Dict[str, Dict[str, Any]]):
-        """Continuous loop for processing scheduled orders - PROPER FIX"""
-        logger.info("Starting scheduled orders processing loop")
+        """CORRECTED: Process scheduled orders with proper session management"""
         try:
             while self.running:
                 try:
-                    # Create a fresh database session for each iteration using the correct pattern
-                    async for db in get_db():
+                    # CORRECT WAY: Use session factory directly
+                    session_factory = db_manager.get_session_factory('trading_db')
+                    if not session_factory:
+                        logger.error("Database session factory not available")
+                        await asyncio.sleep(60)
+                        continue
+
+                    async with session_factory() as db:
                         try:
-                            await self._process_scheduled_orders(db, user_apis)
+                            query = """
+                                SELECT * FROM scheduled_orders 
+                                WHERE status = :status
+                            """
+                            scheduled_orders = await async_fetch_query(db, text(query), {"status": "PENDING"})
+                            now = datetime.now()
+
+                            for order in scheduled_orders:
+                                try:
+                                    # Parse schedule_datetime if it's a string
+                                    schedule_datetime = order["schedule_datetime"]
+                                    if isinstance(schedule_datetime, str):
+                                        schedule_datetime = datetime.strptime(schedule_datetime, "%Y-%m-%d %H:%M:%S")
+
+                                    # Check if it's time to execute
+                                    if schedule_datetime <= now:
+                                        user_id = order["user_id"]
+                                        upstox_api = user_apis.get(user_id, {}).get("upstox", {}).get("order")
+                                        zerodha_api = user_apis.get(user_id, {}).get("zerodha", {}).get("kite")
+
+                                        api = upstox_api if order["broker"] == "Upstox" else zerodha_api
+                                        if not api:
+                                            logger.warning(
+                                                f"API not initialized for user {user_id}, broker {order['broker']}")
+                                            continue
+
+                                        response = await place_order(
+                                            api=api,
+                                            instrument_token=order["instrument_token"],
+                                            trading_symbol=order["trading_symbol"],
+                                            transaction_type=order["transaction_type"],
+                                            quantity=order["quantity"],
+                                            price=order["price"],
+                                            order_type=order["order_type"],
+                                            trigger_price=order["trigger_price"],
+                                            is_amo=order["is_amo"],
+                                            product_type=order["product_type"],
+                                            validity="DAY",
+                                            stop_loss=order["stop_loss"],
+                                            target=order["target"],
+                                            broker=order["broker"],
+                                            db=db,
+                                            upstox_apis=user_apis.get(user_id, {}).get("upstox", {}),
+                                            kite_apis=user_apis.get(user_id, {}).get("zerodha", {}),
+                                            user_id=user_id
+                                        )
+
+                                        update_query = """
+                                            UPDATE scheduled_orders 
+                                            SET status = 'EXECUTED' 
+                                            WHERE scheduled_order_id = :order_id
+                                        """
+                                        await async_execute_query(db, text(update_query),
+                                                                  {"order_id": order["scheduled_order_id"]})
+                                        logger.info(f"Scheduled order {order['scheduled_order_id']} executed")
+
+                                except Exception as e:
+                                    logger.error(
+                                        f"Error processing scheduled order {order['scheduled_order_id']}: {str(e)}")
+
+                            # Commit all changes
+                            await db.commit()
+
                         except Exception as processing_error:
-                            logger.error(f"Error processing scheduled orders: {processing_error}")
-                        break  # Important: Break after one iteration
+                            logger.error(f"Error in scheduled order processing: {processing_error}")
+                            await db.rollback()
 
                 except Exception as session_error:
-                    logger.error(f"Error with database session in processing loop: {session_error}")
+                    logger.error(f"Error with database session in scheduled orders: {session_error}")
 
-                # Wait before next iteration
-                await asyncio.sleep(60)  # Check every minute
+                # Wait before next iteration (check every minute)
+                await asyncio.sleep(60)
 
         except asyncio.CancelledError:
             logger.info("Scheduled order processing cancelled")
             self.running = False
             raise
         except Exception as e:
-            logger.error(f"Critical error in scheduled orders loop: {e}")
+            logger.error(f"Unexpected error in _process_scheduled_orders_loop: {str(e)}")
             self.running = False
 
     async def _process_scheduled_orders(self, db: AsyncSession, user_apis: Dict[str, Dict[str, Any]]):

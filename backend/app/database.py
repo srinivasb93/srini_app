@@ -405,19 +405,20 @@ db_manager = DatabaseManager()
 # Enhanced dependency functions
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """Get database session for trading_db with proper lifecycle management"""
-    async with db_manager.get_session('trading_db') as session:
+    # FIXED: Don't wrap the generator in async with - just delegate to it
+    async for session in db_manager.get_session('trading_db'):
         yield session
-
 
 async def get_nsedata_db() -> AsyncGenerator[AsyncSession, None]:
     """Get database session for nsedata with proper lifecycle management"""
-    async with db_manager.get_session('nsedata') as session:
+    # FIXED: Don't wrap the generator in async with - just delegate to it
+    async for session in db_manager.get_session('nsedata'):
         yield session
-
 
 async def get_database_session(database_name: str) -> AsyncGenerator[AsyncSession, None]:
     """Generic function to get session for any database"""
-    async with db_manager.get_session(database_name) as session:
+    # FIXED: Don't wrap the generator in async with - just delegate to it
+    async for session in db_manager.get_session(database_name):
         yield session
 
 
