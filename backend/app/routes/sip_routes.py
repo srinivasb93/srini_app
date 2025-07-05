@@ -692,7 +692,7 @@ async def start_scheduler():
     """Start the background scheduler"""
     scheduler.add_job(
         daily_signal_check,
-        CronTrigger(hour=8, minute=0),  # Daily at 8:00 AM
+        CronTrigger(hour=11, minute=28),  # Daily at 8:00 AM
         id='daily_signal_check',
         replace_existing=True
     )
@@ -1121,7 +1121,7 @@ async def get_sip_backtest_history(
         enhanced_results = []
         for row in backtest_results:
             try:
-                monthly_summary = json.loads(row[13]) if row[13] else {}
+                monthly_summary = safe_json_parse(row[13])
             except (json.JSONDecodeError, TypeError):
                 monthly_summary = {}
 
@@ -1168,6 +1168,207 @@ async def get_sip_backtest_history(
         return []
 
 
+async def calculate_enhanced_opportunity_cost(
+        symbol: str,
+        skipped_investments: List[Dict],
+        trades: List[Dict],
+        start_date: date,
+        end_date: date,
+        user_id: str,
+        trading_db: AsyncSession
+) -> Dict[str, float]:
+    """
+    Enhanced opportunity cost calculation with multiple fallback methods
+    """
+    try:
+        total_skipped_amount = sum(
+            skip.get('intended_amount', 0)
+            for skip in skipped_investments
+            if isinstance(skip, dict)
+        )
+
+        if total_skipped_amount <= 0:
+            return None
+
+        # Method 1: Try to get final price from trades
+        final_price_from_trades = None
+        if isinstance(trades, list) and trades:
+            for trade in reversed(trades):  # Start from the last trade
+                if isinstance(trade, dict) and trade.get('price', 0) > 0:
+                    final_price_from_trades = float(trade['price'])
+                    break
+
+        # Method 2: Fetch current/recent market price from database
+        final_price_from_db = await get_final_price_from_market_data(
+            symbol, end_date, trading_db
+        )
+
+        # Method 3: Use average price from successful trades as fallback
+        avg_trade_price = None
+        if isinstance(trades, list) and trades:
+            valid_prices = [
+                float(trade['price'])
+                for trade in trades
+                if isinstance(trade, dict) and trade.get('price', 0) > 0
+            ]
+            if valid_prices:
+                avg_trade_price = sum(valid_prices) / len(valid_prices)
+
+        # Select the best final price (priority order)
+        final_price = (
+                final_price_from_trades or
+                final_price_from_db or
+                avg_trade_price or
+                0
+        )
+
+        if final_price <= 0:
+            logger.warning(f"Could not determine final price for {symbol}, skipping opportunity cost calculation")
+            return {
+                "total_skipped_amount": total_skipped_amount,
+                "estimated_final_value": 0,
+                "opportunity_cost": -total_skipped_amount,
+                "opportunity_cost_percent": -100,
+                "final_price_used": 0,
+                "price_source": "unavailable",
+                "calculation_method": "total_loss_assumed"
+            }
+
+        # Calculate estimated units that would have been purchased
+        estimated_units = 0
+        skipped_with_prices = 0
+        skipped_without_prices = 0
+
+        for skip in skipped_investments:
+            if isinstance(skip, dict):
+                intended_amount = skip.get('intended_amount', 0)
+                skip_price = skip.get('current_price', 0) or skip.get('price', 0)
+
+                if skip_price > 0:
+                    estimated_units += intended_amount / skip_price
+                    skipped_with_prices += 1
+                else:
+                    # For skipped investments without price, use average price from trades
+                    if avg_trade_price and avg_trade_price > 0:
+                        estimated_units += intended_amount / avg_trade_price
+                    skipped_without_prices += 1
+
+        # Calculate final estimated value
+        estimated_final_value = estimated_units * final_price
+        opportunity_cost = estimated_final_value - total_skipped_amount
+        opportunity_cost_percent = (opportunity_cost / total_skipped_amount) * 100 if total_skipped_amount > 0 else 0
+
+        # Determine price source for transparency
+        if final_price_from_trades:
+            price_source = "final_trade"
+        elif final_price_from_db:
+            price_source = "market_data"
+        elif avg_trade_price:
+            price_source = "average_trade_price"
+        else:
+            price_source = "unknown"
+
+        return {
+            "total_skipped_amount": round(total_skipped_amount, 2),
+            "estimated_final_value": round(estimated_final_value, 2),
+            "opportunity_cost": round(opportunity_cost, 2),
+            "opportunity_cost_percent": round(opportunity_cost_percent, 2),
+            "estimated_units": round(estimated_units, 4),
+            "final_price_used": round(final_price, 2),
+            "price_source": price_source,
+            "skipped_investments_count": len(skipped_investments),
+            "skipped_with_prices": skipped_with_prices,
+            "skipped_without_prices": skipped_without_prices,
+            "calculation_method": "enhanced_multi_source"
+        }
+
+    except Exception as e:
+        logger.error(f"Error calculating enhanced opportunity cost: {e}")
+        return {
+            "total_skipped_amount": total_skipped_amount,
+            "estimated_final_value": 0,
+            "opportunity_cost": -total_skipped_amount,
+            "opportunity_cost_percent": -100,
+            "error": str(e),
+            "calculation_method": "error_fallback"
+        }
+
+
+async def get_final_price_from_market_data(
+        symbol: str,
+        end_date: date,
+        trading_db: AsyncSession
+) -> Optional[float]:
+    """
+    Get the final/recent price from market data as fallback
+    """
+    try:
+        # Try to get price from the market data around the end date
+        from backend.app.database import get_nsedata_db
+
+        # Get nsedata session
+        nsedata_db = None
+        try:
+            # This is a simplified approach - you might need to adjust based on your setup
+            nsedata_db = get_nsedata_db()
+        except:
+            return None
+
+        if not nsedata_db:
+            return None
+
+        # Query for price around the end date
+        price_query = text(f"""
+            SELECT close
+            FROM "{symbol.upper()}"
+            WHERE timestamp <= :end_date
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """)
+
+        async with nsedata_db() as session:
+            result = await session.execute(price_query, {"end_date": end_date})
+            price_row = result.fetchone()
+
+            if price_row and price_row[0]:
+                return float(price_row[0])
+
+    except Exception as e:
+        logger.warning(f"Could not fetch final price from market data for {symbol}: {e}")
+
+    return None
+
+
+# Additional helper function to validate skipped investments data
+def validate_skipped_investments_data(skipped_investments: List[Dict]) -> Dict[str, Any]:
+    """
+    Validate and analyze the structure of skipped investments data
+    """
+    if not isinstance(skipped_investments, list):
+        return {"valid": False, "reason": "Not a list"}
+
+    total_count = len(skipped_investments)
+    valid_count = 0
+    with_price_count = 0
+    without_price_count = 0
+
+    for skip in skipped_investments:
+        if isinstance(skip, dict):
+            valid_count += 1
+            if skip.get('current_price', 0) > 0 or skip.get('price', 0) > 0:
+                with_price_count += 1
+            else:
+                without_price_count += 1
+
+    return {
+        "valid": True,
+        "total_count": total_count,
+        "valid_dict_count": valid_count,
+        "with_price_count": with_price_count,
+        "without_price_count": without_price_count,
+        "data_quality": "good" if with_price_count > total_count * 0.7 else "poor"
+    }
+
 @sip_router.get("/analytics/monthly-limits/{symbol}")
 async def get_monthly_limits_analytics(
         symbol: str,
@@ -1176,14 +1377,14 @@ async def get_monthly_limits_analytics(
         user_id: str = Depends(get_current_user),
         trading_db: AsyncSession = Depends(get_db)
 ):
-    """Get detailed analytics for monthly investment limits for a specific symbol"""
+    """Get detailed analytics for monthly investment limits for a specific symbol - ENHANCED VERSION"""
     try:
         # Base query for getting backtest results with monthly data
         query = """
             SELECT backtest_id, total_investment, final_portfolio_value,
                    max_amount_in_a_month, monthly_limit_exceeded, 
                    price_threshold_skipped, monthly_summary, trades,
-                   skipped_investments, created_at
+                   skipped_investments, created_at, start_date, end_date
             FROM sip_backtest_results 
             WHERE user_id = :user_id AND symbol = :symbol
         """
@@ -1218,38 +1419,33 @@ async def get_monthly_limits_analytics(
         opportunity_cost_analysis = []
 
         for row in backtest_data:
-            monthly_summary = json.loads(row[6]) if row[6] else {}
-            trades = json.loads(row[7]) if row[7] else []
-            skipped_investments = json.loads(row[8]) if row[8] else []
+            # Use safe_json_parse for all JSON fields
+            monthly_summary = safe_json_parse(row[6])  # monthly_summary
+            trades = safe_json_parse(row[7])  # trades
+            skipped_investments = safe_json_parse(row[8])  # skipped_investments
 
             # Calculate monthly utilization
             for month, data in monthly_summary.items():
-                utilization_percent = (data.get('total_invested', 0) / row[3]) * 100 if row[3] > 0 else 0
-                monthly_utilization_data.append({
-                    "month": month,
-                    "utilization_percent": round(utilization_percent, 2),
-                    "amount_invested": data.get('total_invested', 0),
-                    "monthly_limit": row[3],
-                    "num_investments": data.get('num_investments', 0)
-                })
+                if isinstance(data, dict):
+                    utilization_percent = (data.get('total_invested', 0) / row[3]) * 100 if row[3] > 0 else 0
+                    monthly_utilization_data.append({
+                        "month": month,
+                        "utilization_percent": round(utilization_percent, 2),
+                        "amount_invested": data.get('total_invested', 0),
+                        "monthly_limit": row[3],
+                        "num_investments": data.get('num_investments', 0)
+                    })
 
-            # Calculate opportunity cost for skipped investments
-            total_skipped_amount = sum(skip.get('intended_amount', 0) for skip in skipped_investments)
-            if total_skipped_amount > 0 and trades:
-                # Use final portfolio value to estimate opportunity cost
-                final_price = trades[-1].get('price', 0) if trades else 0
-                if final_price > 0:
-                    estimated_units = sum(skip.get('intended_amount', 0) / skip.get('price', 1)
-                                          for skip in skipped_investments if skip.get('price', 0) > 0)
-                    estimated_value = estimated_units * final_price
-                    opportunity_cost = estimated_value - total_skipped_amount
+            # ENHANCED OPPORTUNITY COST CALCULATION
+            if isinstance(skipped_investments, list) and skipped_investments:
+                opportunity_cost_result = await calculate_enhanced_opportunity_cost(
+                    symbol, skipped_investments, trades, row[10], row[11], user_id, trading_db
+                )
 
+                if opportunity_cost_result:
                     opportunity_cost_analysis.append({
                         "backtest_id": row[0],
-                        "total_skipped_amount": total_skipped_amount,
-                        "estimated_final_value": estimated_value,
-                        "opportunity_cost": opportunity_cost,
-                        "opportunity_cost_percent": (opportunity_cost / total_skipped_amount) * 100
+                        **opportunity_cost_result
                     })
 
         # Calculate overall statistics
@@ -1323,6 +1519,24 @@ def _generate_monthly_limit_recommendations(avg_utilization: float,
     return recommendations
 
 
+# Additional function to handle config_used parsing
+def safe_parse_config(config_data):
+    """Safely parse config data that might already be a Python object"""
+    if config_data is None:
+        return {}
+    elif isinstance(config_data, dict):
+        return config_data
+    elif isinstance(config_data, str):
+        try:
+            return json.loads(config_data)
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse config JSON: {config_data}")
+            return {}
+    else:
+        logger.warning(f"Unexpected config data type: {type(config_data)}")
+        return {}
+
+# Fixed optimize config function
 @sip_router.post("/optimize-config")
 async def optimize_sip_config(
         symbol: str,
@@ -1332,9 +1546,7 @@ async def optimize_sip_config(
         trading_db: AsyncSession = Depends(get_db)
 ):
     """
-    Optimize SIP configuration based on historical performance and user preferences
-
-    This endpoint analyzes past backtest results and suggests optimal configuration
+    Optimize SIP configuration based on historical performance and user preferences - FIXED VERSION
     """
     try:
         # Get historical performance data
@@ -1354,7 +1566,7 @@ async def optimize_sip_config(
             # Return default optimized config for new users
             return _get_default_optimized_config(risk_tolerance)
 
-        # Analyze historical performance
+        # Analyze historical performance with fixed JSON parsing
         analysis = _analyze_historical_performance(historical_data, target_monthly_utilization)
 
         # Generate optimized configuration
@@ -1389,7 +1601,7 @@ def _analyze_historical_performance(historical_data: List, target_utilization: f
             total_returns.append(return_pct)
 
         # Analyze monthly utilization
-        monthly_summary = json.loads(row[7]) if row[7] else {}
+        monthly_summary = safe_json_parse(row[7])
         for month_data in monthly_summary.values():
             if row[4] > 0:  # max_amount_in_a_month > 0
                 utilization = (month_data.get('total_invested', 0) / row[4]) * 100
