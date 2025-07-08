@@ -3,13 +3,12 @@ Complete SIP Strategy API Routes with fixed data fetching and all missing endpoi
 Addresses: Correct table name handling, proper database queries, missing endpoints
 """
 import os
-
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text, desc
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta, date
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, validator, Field
 import json
 import logging
 import uuid
@@ -23,13 +22,14 @@ from apscheduler.jobstores.memory import MemoryJobStore
 import pytz
 import traceback
 from backend.app.database import db_manager
+from dataclasses import asdict
 
 
 # Clean imports - multi-database architecture
 from backend.app.database import get_db, get_nsedata_db
 from backend.app.auth import UserManager, oauth2_scheme
-from backend.app.strategies.enhanced_sip_strategy import (EnhancedSIPStrategy, SIPConfig, Trade,
-                                                          EnhancedSIPStrategyWithLimits)
+from backend.app.strategies.enhanced_sip_strategy import (
+    EnhancedSIPStrategy, SIPConfig, Trade, SIPResults)
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,23 @@ def parse_date_string(date_str: str) -> date:
     except Exception as e:
         logger.error(f"Error parsing date '{date_str}': {e}")
         raise ValueError(f"Invalid date format: {date_str}")
+
+def convert_request_to_sip_config(request_config) -> SIPConfig:
+    """Convert request config to SIPConfig with all necessary fields"""
+    return SIPConfig(
+        fixed_investment=getattr(request_config, 'fixed_investment', 5000),
+        max_amount_in_a_month=getattr(request_config, 'max_amount_in_a_month', None),
+        price_reduction_threshold=getattr(request_config, 'price_reduction_threshold', 3.0),
+        drawdown_threshold_1=getattr(request_config, 'drawdown_threshold_1', -10.0),
+        drawdown_threshold_2=getattr(request_config, 'drawdown_threshold_2', -4.0),
+        investment_multiplier_1=getattr(request_config, 'investment_multiplier_1', 2.0),
+        investment_multiplier_2=getattr(request_config, 'investment_multiplier_2', 3.0),
+        investment_multiplier_3=getattr(request_config, 'investment_multiplier_3', 5.0),
+        rolling_window=getattr(request_config, 'rolling_window', 100),
+        fallback_day=getattr(request_config, 'fallback_day', 22),
+        min_investment_gap_days=getattr(request_config, 'min_investment_gap_days', 5),
+        enable_monthly_limits=True
+    )
 
 
 class SIPSymbolConfig(BaseModel):
@@ -278,6 +295,44 @@ class InvestmentReportResponse(BaseModel):
     risk_assessment: Dict[str, Any]
     symbol_reports: Dict[str, Any]
     disclaimer: str
+
+
+class MonthlyReportRequest(BaseModel):
+    start_date: str = Field(..., description="Start date in YYYY-MM-DD format")
+    end_date: str = Field(..., description="End date in YYYY-MM-DD format")
+    config: Optional[SIPConfigRequest] = None
+    monthly_limit: Optional[float] = Field(25000, description="Monthly investment limit")
+
+    @validator('start_date', 'end_date')
+    def validate_date_format(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+            return v
+        except ValueError:
+            raise ValueError('Date must be in YYYY-MM-DD format')
+
+
+class BatchMonthlyReportRequest(BaseModel):
+    symbols: List[str] = Field(..., description="List of symbols to analyze")
+    start_date: str = Field(..., description="Start date in YYYY-MM-DD format")
+    end_date: str = Field(..., description="End date in YYYY-MM-DD format")
+    config: SIPConfigRequest
+
+    @validator('symbols')
+    def validate_symbols(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError('At least one symbol must be provided')
+        if len(v) > 50:  # Reasonable limit
+            raise ValueError('Maximum 50 symbols allowed per batch')
+        return v
+
+    @validator('start_date', 'end_date')
+    def validate_date_format(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+            return v
+        except ValueError:
+            raise ValueError('Date must be in YYYY-MM-DD format')
 
 
 class BenchmarkSIPCalculator:
@@ -1181,7 +1236,7 @@ async def run_sip_backtest(
         nsedata_db: AsyncSession = Depends(get_nsedata_db)
 ):
     """
-    Enhanced SIP strategy backtest with benchmark comparison
+    Run enhanced SIP backtest with limits and benchmark comparison
 
     NEW FEATURES:
     1. Includes regular SIP benchmark (₹5000 on 15th of every month)
@@ -1190,10 +1245,13 @@ async def run_sip_backtest(
     """
     try:
         # Create enhanced strategy
-        strategy = EnhancedSIPStrategyWithLimits(
+        strategy = EnhancedSIPStrategy(
             nsedata_session=nsedata_db,
             trading_session=trading_db
         )
+
+        # Convert request config to SIPConfig with monthly limits
+        config = convert_request_to_sip_config(request.config)
 
         # Create benchmark calculator
         benchmark_calculator = BenchmarkSIPCalculator(
@@ -1216,7 +1274,7 @@ async def run_sip_backtest(
                     symbol,
                     request.start_date,
                     request.end_date,
-                    request.config
+                    config
                 )
 
                 # Run benchmark calculation
@@ -1228,11 +1286,25 @@ async def run_sip_backtest(
                 )
 
                 if strategy_result and benchmark_result:
+                    strategy_dict = asdict(strategy_result)  # Convert dataclass to dict
+
+                    # Convert Trade objects to dictionaries
+                    strategy_dict['trades'] = [asdict(trade) for trade in strategy_result.trades]
+
+                    # Ensure all datetime objects are converted to strings
+                    for trade in strategy_dict['trades']:
+                        if hasattr(trade['timestamp'], 'isoformat'):
+                            trade['timestamp'] = trade['timestamp'].isoformat()
+
+                    # Generate monthly report
+                    monthly_report = strategy.generate_monthly_investment_report(strategy_result)
+
                     # Combine strategy and benchmark results
                     combined_result = {
-                        **strategy_result,
+                        **strategy_dict,  # Now it's a proper dictionary
                         'benchmark': benchmark_result,
-                        'comparison': _calculate_comparison_metrics(strategy_result, benchmark_result)
+                        'comparison': _calculate_comparison_metrics(strategy_result, benchmark_result),
+                        'monthly_report': monthly_report  # Add monthly report
                     }
 
                     results.append(combined_result)
@@ -1242,6 +1314,13 @@ async def run_sip_backtest(
 
             except Exception as symbol_error:
                 logger.error(f"❌ Error processing {symbol}: {symbol_error}")
+                # Add error details to results for debugging
+                results.append({
+                    "symbol": symbol,
+                    "status": "error",
+                    "error_message": str(symbol_error),
+                    "error_type": type(symbol_error).__name__
+                })
                 continue
 
         if not results:
@@ -1250,11 +1329,43 @@ async def run_sip_backtest(
                 detail="No valid results generated for any of the specified symbols"
             )
 
+        # Filter out error results for the final response
+        successful_results = [r for r in results if r.get('status') != 'error']
+        error_results = [r for r in results if r.get('status') == 'error']
+
+        if not successful_results:
+            # If all results failed, provide detailed error information
+            error_details = {
+                "message": "All symbols failed to process",
+                "errors": error_results,
+                "total_symbols": len(request.symbols),
+                "failed_symbols": len(error_results)
+            }
+            raise HTTPException(status_code=400, detail=error_details)
+
         # Save results to database (background task)
-        background_tasks.add_task(
-            save_enhanced_backtest_results,
-            results, user_id, request, trading_db
-        )
+        try:
+            background_tasks.add_task(
+                save_enhanced_backtest_results,
+                successful_results, user_id, request, trading_db
+            )
+        except Exception as save_error:
+            logger.error(f"Error saving result: {save_error}")
+
+        response_data = {
+            "status": "success",
+            "results": successful_results,
+            "summary": {
+                "total_symbols": len(request.symbols),
+                "successful_analyses": len(successful_results),
+                "failed_analyses": len(error_results),
+                "analysis_timestamp": datetime.now().isoformat()
+            }
+        }
+
+        # Include error details if any symbols failed
+        if error_results:
+            response_data["errors"] = error_results
 
         logger.info(f"✅ Enhanced backtest with benchmark completed for {len(results)} symbols")
         return results
@@ -1305,7 +1416,7 @@ async def save_enhanced_backtest_results(
 
         # Insert results with benchmark data
         for result in results:
-            backtest_id = str(uuid.uuid4())
+            backtest_id = f"bt_{user_id}_{result.get('symbol', 'unknown')}_{int(datetime.now().timestamp())}"
 
             # Prepare data for insertion
             insert_query = text("""
@@ -1338,7 +1449,7 @@ async def save_enhanced_backtest_results(
                 'total_investment': float(result['total_investment']),
                 'final_portfolio_value': float(result['final_portfolio_value']),
                 'total_return_percent': float(result['total_return_percent']),
-                'cagr': float(result['cagr_percent']) / 100,
+                'cagr': float(result['cagr']) / 100,
                 'num_trades': int(result['num_trades']),
                 'num_skipped': int(result.get('num_skipped', 0)),
                 'monthly_limit_exceeded': int(result.get('monthly_limit_exceeded', 0)),
@@ -2030,7 +2141,7 @@ async def run_batch_backtest_with_limits(
     Run batch backtests with different configurations and benchmark comparison
     """
     try:
-        strategy = EnhancedSIPStrategyWithLimits(
+        strategy = EnhancedSIPStrategy(
             nsedata_session=nsedata_db,
             trading_session=trading_db
         )
@@ -2048,6 +2159,7 @@ async def run_batch_backtest_with_limits(
 
         for config in configs:
             config_results = []
+            config = convert_request_to_sip_config(config)
 
             for symbol in symbols:
                 try:
@@ -3353,11 +3465,10 @@ async def get_portfolio_performance(
 
 
 @sip_router.get("/strategies/compare/{symbol}")
-async def compare_strategies(
+async def compare_sip_strategies(
         symbol: str,
         start_date: str = "2020-01-01",
         end_date: Optional[str] = None,
-        user_id: str = Depends(get_current_user),
         nsedata_db: AsyncSession = Depends(get_nsedata_db)
 ):
     """Compare different SIP strategy configurations with benchmark"""
@@ -3372,27 +3483,36 @@ async def compare_strategies(
         strategies = {
             "Conservative": SIPConfig(
                 fixed_investment=5000,
+                max_amount_in_a_month=20000,  # Add monthly limit
+                price_reduction_threshold=5.0,  # Higher threshold
                 drawdown_threshold_1=-15.0,
                 drawdown_threshold_2=-8.0,
                 investment_multiplier_1=1.5,
                 investment_multiplier_2=2.0,
-                investment_multiplier_3=2.5
+                investment_multiplier_3=2.5,
+                enable_monthly_limits=True
             ),
             "Balanced": SIPConfig(
                 fixed_investment=5000,
+                max_amount_in_a_month=25000,  # Add monthly limit
+                price_reduction_threshold=3.0,  # Default threshold
                 drawdown_threshold_1=-10.0,
                 drawdown_threshold_2=-5.0,
                 investment_multiplier_1=2.0,
                 investment_multiplier_2=3.0,
-                investment_multiplier_3=4.0
+                investment_multiplier_3=4.0,
+                enable_monthly_limits=True
             ),
             "Aggressive": SIPConfig(
                 fixed_investment=5000,
+                max_amount_in_a_month=30000,  # Add monthly limit
+                price_reduction_threshold=1.0,  # Lower threshold
                 drawdown_threshold_1=-5.0,
                 drawdown_threshold_2=-2.0,
                 investment_multiplier_1=3.0,
                 investment_multiplier_2=5.0,
-                investment_multiplier_3=8.0
+                investment_multiplier_3=8.0,
+                enable_monthly_limits=True
             )
         }
 
@@ -3467,7 +3587,10 @@ async def quick_sip_test(
             drawdown_threshold_2=-4.0,
             investment_multiplier_1=2.0,
             investment_multiplier_2=3.0,
-            investment_multiplier_3=5.0
+            investment_multiplier_3=5.0,
+            max_amount_in_a_month=25000,
+            price_reduction_threshold=3.0,
+            enable_monthly_limits=True
         )
 
         strategy = EnhancedSIPStrategy(nsedata_session=nsedata_db)
@@ -3943,57 +4066,83 @@ async def get_investment_report_details(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _calculate_comparison_metrics(strategy_result: Dict, benchmark_result: Dict) -> Dict:
-    """Calculate comparison metrics between strategy and benchmark"""
+def _calculate_comparison_metrics(strategy_result: SIPResults, benchmark_result: dict) -> dict:
+    """Calculate comparison metrics between strategy and benchmark results"""
     try:
-        strategy_return = strategy_result.get('total_return_percent', 0)
-        benchmark_return = benchmark_result.get('total_return_percent', 0)
+        # Extract values from strategy result (SIPResults dataclass)
+        strategy_investment = strategy_result.total_investment
+        strategy_final_value = strategy_result.final_portfolio_value
+        strategy_cagr = strategy_result.cagr
+        strategy_trades = len(strategy_result.trades)
 
-        strategy_cagr = strategy_result.get('cagr_percent', 0)
-        benchmark_cagr = benchmark_result.get('cagr_percent', 0)
-
-        strategy_investment = strategy_result.get('total_investment', 0)
+        # Extract values from benchmark result (dictionary)
         benchmark_investment = benchmark_result.get('total_investment', 0)
+        benchmark_final_value = benchmark_result.get('final_portfolio_value', 0)
+        benchmark_cagr = benchmark_result.get('cagr', 0)
+        benchmark_trades = benchmark_result.get('total_trades', 0)
 
-        strategy_trades = strategy_result.get('num_trades', 0)
-        benchmark_trades = benchmark_result.get('num_trades', 0)
+        # Calculate comparison metrics
+        investment_difference = strategy_investment - benchmark_investment
+        value_difference = strategy_final_value - benchmark_final_value
+        cagr_difference = strategy_cagr - benchmark_cagr
 
-        # Calculate outperformance
-        return_outperformance = strategy_return - benchmark_return
-        cagr_outperformance = strategy_cagr - benchmark_cagr
+        # Calculate percentage improvements
+        investment_ratio = (strategy_investment / benchmark_investment) if benchmark_investment > 0 else 0
+        value_ratio = (strategy_final_value / benchmark_final_value) if benchmark_final_value > 0 else 0
+        cagr_improvement = ((strategy_cagr / benchmark_cagr) - 1) * 100 if benchmark_cagr > 0 else 0
 
-        # Calculate efficiency metrics
-        investment_efficiency = ((
-                                             strategy_investment / benchmark_investment) - 1) * 100 if benchmark_investment > 0 else 0
-        trade_efficiency = strategy_trades - benchmark_trades
-
-        # Determine recommendation
-        recommendation = "Strategy outperforms benchmark" if return_outperformance > 0 else "Benchmark performs better"
+        # Determine overall performance
+        if value_ratio > 1.1 and strategy_cagr > benchmark_cagr:
+            overall_performance = "SIGNIFICANTLY_BETTER"
+        elif value_ratio > 1.05 and strategy_cagr >= benchmark_cagr:
+            overall_performance = "BETTER"
+        elif value_ratio > 0.95 and abs(strategy_cagr - benchmark_cagr) < 0.01:
+            overall_performance = "SIMILAR"
+        elif value_ratio > 0.9:
+            overall_performance = "SLIGHTLY_WORSE"
+        else:
+            overall_performance = "SIGNIFICANTLY_WORSE"
 
         return {
-            'return_outperformance_percent': float(return_outperformance),
-            'cagr_outperformance_percent': float(cagr_outperformance),
-            'investment_efficiency_percent': float(investment_efficiency),
-            'trade_difference': trade_efficiency,
-            'strategy_vs_benchmark': {
-                'strategy_return': float(strategy_return),
-                'benchmark_return': float(benchmark_return),
-                'strategy_cagr': float(strategy_cagr),
-                'benchmark_cagr': float(benchmark_cagr),
-                'strategy_investment': float(strategy_investment),
-                'benchmark_investment': float(benchmark_investment)
+            "investment_comparison": {
+                "strategy_investment": round(strategy_investment, 2),
+                "benchmark_investment": round(benchmark_investment, 2),
+                "difference": round(investment_difference, 2),
+                "ratio": round(investment_ratio, 3)
             },
-            'recommendation': recommendation,
-            'performance_summary': f"Strategy {'outperforms' if return_outperformance > 0 else 'underperforms'} benchmark by {abs(return_outperformance):.2f}%"
+            "value_comparison": {
+                "strategy_final_value": round(strategy_final_value, 2),
+                "benchmark_final_value": round(benchmark_final_value, 2),
+                "difference": round(value_difference, 2),
+                "ratio": round(value_ratio, 3)
+            },
+            "performance_comparison": {
+                "strategy_cagr": round(strategy_cagr * 100, 2),
+                "benchmark_cagr": round(benchmark_cagr * 100, 2),
+                "cagr_difference": round(cagr_difference * 100, 2),
+                "cagr_improvement_percent": round(cagr_improvement, 2)
+            },
+            "trade_comparison": {
+                "strategy_trades": strategy_trades,
+                "benchmark_trades": benchmark_trades,
+                "trade_efficiency": round(strategy_trades / benchmark_trades, 2) if benchmark_trades > 0 else 0
+            },
+            "overall_performance": overall_performance,
+            "summary": {
+                "better_returns": strategy_cagr > benchmark_cagr,
+                "higher_investment": strategy_investment > benchmark_investment,
+                "better_efficiency": (strategy_final_value / strategy_investment) > (
+                            benchmark_final_value / benchmark_investment) if strategy_investment > 0 and benchmark_investment > 0 else False
+            }
         }
 
     except Exception as e:
         logger.error(f"Error calculating comparison metrics: {e}")
         return {
-            'error': 'Could not calculate comparison metrics',
-            'return_outperformance_percent': 0.0,
-            'cagr_outperformance_percent': 0.0,
-            'recommendation': 'Comparison not available'
+            "status": "error",
+            "message": f"Failed to calculate comparison: {str(e)}",
+            "raw_strategy_result": str(type(strategy_result)),
+            "raw_benchmark_result": str(type(benchmark_result))
         }
 
 def safe_json_parse(data, field_name: str = "data", default=None):
@@ -4016,6 +4165,180 @@ def safe_json_parse(data, field_name: str = "data", default=None):
     except Exception as e:
         logger.error(f"Unexpected error parsing {field_name}: {e}")
         return default or ([] if field_name in ['symbols', 'list'] else {})
+
+
+# Add this new endpoint to sip_routes.py
+
+@sip_router.post("/monthly-report/{symbol}")
+async def generate_symbol_monthly_report(
+        symbol: str,
+        request: MonthlyReportRequest,
+        user_id: str = Depends(get_current_user),
+        trading_db: AsyncSession = Depends(get_db),
+        nsedata_db: AsyncSession = Depends(get_nsedata_db)
+):
+    """Generate detailed monthly investment report for a specific symbol"""
+    try:
+        logger.info(f"Generating monthly report for {symbol} (user: {user_id})")
+
+        strategy = EnhancedSIPStrategy(nsedata_session=nsedata_db, trading_session=trading_db)
+
+        # Convert request config
+        config = convert_request_to_sip_config(request.config) if hasattr(request, 'config') else SIPConfig(
+            enable_monthly_limits=True,
+            max_amount_in_a_month=request.monthly_limit if hasattr(request, 'monthly_limit') else 25000
+        )
+
+        # Run backtest to get data
+        backtest_result = await strategy.run_backtest(
+            symbol,
+            request.start_date,
+            request.end_date,
+            config
+        )
+
+        if not backtest_result:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No data available for {symbol} in the specified period"
+            )
+
+        # Generate monthly report
+        monthly_report = strategy.generate_monthly_investment_report(backtest_result)
+
+        # Save report to database for future reference
+        await save_monthly_report_to_db(
+            trading_db,
+            user_id,
+            symbol,
+            monthly_report,
+            request.start_date,
+            request.end_date
+        )
+
+        return {
+            "status": "success",
+            "symbol": symbol,
+            "period": f"{request.start_date} to {request.end_date}",
+            "backtest_summary": {
+                "total_investment": backtest_result.total_investment,
+                "final_value": backtest_result.final_portfolio_value,
+                "total_trades": len(backtest_result.trades),
+                "cagr": round(backtest_result.cagr * 100, 2)
+            },
+            "monthly_report": monthly_report,
+            "generated_at": datetime.now().isoformat()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating monthly report for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate monthly report: {str(e)}")
+
+
+@sip_router.post("/monthly-report/batch")
+async def generate_batch_monthly_reports(
+        request: BatchMonthlyReportRequest,
+        user_id: str = Depends(get_current_user),
+        trading_db: AsyncSession = Depends(get_db),
+        nsedata_db: AsyncSession = Depends(get_nsedata_db)
+):
+    """Generate monthly reports for multiple symbols"""
+    try:
+        strategy = EnhancedSIPStrategy(nsedata_session=nsedata_db, trading_session=trading_db)
+        config = convert_request_to_sip_config(request.config)
+
+        reports = {}
+        successful_reports = 0
+
+        for symbol in request.symbols:
+            try:
+                logger.info(f"Processing monthly report for {symbol}")
+
+                backtest_result = await strategy.run_backtest(
+                    symbol,
+                    request.start_date,
+                    request.end_date,
+                    config
+                )
+
+                if backtest_result:
+                    monthly_report = strategy.generate_monthly_investment_report(backtest_result)
+                    reports[symbol] = {
+                        "status": "success",
+                        "backtest_summary": {
+                            "total_investment": backtest_result.total_investment,
+                            "final_value": backtest_result.final_portfolio_value,
+                            "total_trades": len(backtest_result.trades),
+                            "cagr": round(backtest_result.cagr * 100, 2)
+                        },
+                        "monthly_report": monthly_report
+                    }
+                    successful_reports += 1
+                else:
+                    reports[symbol] = {
+                        "status": "no_data",
+                        "message": f"No data available for {symbol}"
+                    }
+
+            except Exception as symbol_error:
+                logger.error(f"Error processing {symbol}: {symbol_error}")
+                reports[symbol] = {
+                    "status": "error",
+                    "message": str(symbol_error)
+                }
+
+        return {
+            "status": "completed",
+            "summary": {
+                "total_symbols": len(request.symbols),
+                "successful_reports": successful_reports,
+                "failed_reports": len(request.symbols) - successful_reports
+            },
+            "reports": reports,
+            "generated_at": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error in batch monthly report generation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Helper function to save monthly reports
+async def save_monthly_report_to_db(
+        db: AsyncSession,
+        user_id: str,
+        symbol: str,
+        report: Dict,
+        start_date: str,
+        end_date: str
+):
+    """Save monthly report to database for future reference"""
+    try:
+        insert_query = text("""
+            INSERT INTO monthly_reports (
+                user_id, symbol, report_data, start_date, end_date, created_at
+            ) VALUES (
+                :user_id, :symbol, :report_data, :start_date, :end_date, :created_at
+            )
+        """)
+
+        await db.execute(insert_query, {
+            'user_id': user_id,
+            'symbol': symbol,
+            'report_data': json.dumps(report, default=str),
+            'start_date': start_date,
+            'end_date': end_date,
+            'created_at': datetime.now()
+        })
+
+        await db.commit()
+        logger.info(f"Monthly report saved for {symbol}")
+
+    except Exception as e:
+        logger.error(f"Error saving monthly report: {e}")
+        # Don't raise exception here - report generation is more important
 
 
 @sip_router.get("/health-check")
