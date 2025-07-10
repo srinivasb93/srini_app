@@ -28,8 +28,8 @@ from backend.app.database import db_manager
 # Clean imports - multi-database architecture
 from backend.app.database import get_db, get_nsedata_db
 from backend.app.auth import UserManager, oauth2_scheme
-from backend.app.strategies.enhanced_sip_strategy import (EnhancedSIPStrategy, SIPConfig, Trade,
-                                                          EnhancedSIPStrategyWithLimits)
+from backend.app.strategies.enhanced_sip_strategy import (
+    EnhancedSIPStrategy, SIPConfig, Trade, EnhancedSIPStrategyWithLimits, BenchmarkSIPCalculator)
 
 logger = logging.getLogger(__name__)
 
@@ -280,199 +280,6 @@ class InvestmentReportResponse(BaseModel):
     disclaimer: str
 
 
-class BenchmarkSIPCalculator:
-    """
-    Calculate regular SIP benchmark performance
-    Fixed ₹5000 investment on 15th of every month (no conditions)
-    """
-
-    def __init__(self, monthly_amount: float = 5000, investment_day: int = 15):
-        self.monthly_amount = monthly_amount
-        self.investment_day = investment_day
-
-    async def calculate_benchmark(self, symbol: str, start_date: str, end_date: str,
-                                  nsedata_db: AsyncSession) -> Dict:
-        """Calculate benchmark SIP performance for comparison"""
-        try:
-            logger.info(f"🎯 Calculating benchmark SIP for {symbol}: ₹{self.monthly_amount} on {self.investment_day}th")
-
-            # Fetch the same data as strategy
-            data = await self._fetch_data_from_db_async(symbol, start_date, end_date, nsedata_db)
-
-            if data.empty:
-                logger.warning(f"No data available for benchmark calculation: {symbol}")
-                return self._empty_benchmark_result()
-
-            # Initialize tracking variables
-            total_investment = 0.0
-            total_units = 0.0
-            benchmark_trades = []
-
-            # Track months we've already invested in
-            invested_months = set()
-
-            # Simulate regular monthly SIP
-            for i, row in data.iterrows():
-                current_date = row['timestamp']
-                current_price = row['close']
-
-                # Create month key (YYYY-MM)
-                month_key = f"{current_date.year}-{current_date.month:02d}"
-
-                # Check if we should invest this month
-                should_invest = False
-
-                # Primary condition: 15th of the month
-                if current_date.day == self.investment_day and month_key not in invested_months:
-                    should_invest = True
-
-                # Fallback: Last available day of month if 15th not available
-                elif month_key not in invested_months:
-                    # Check if this is the last day of data for this month
-                    next_day_month = None
-                    if i + 1 < len(data):
-                        next_day_month = data.iloc[i + 1]['timestamp'].month
-
-                    # If next day is different month or this is last data point
-                    if next_day_month != current_date.month or i == len(data) - 1:
-                        # And we haven't invested this month yet
-                        should_invest = True
-
-                if should_invest:
-                    # Execute benchmark investment
-                    units_bought = self.monthly_amount / current_price
-                    total_investment += self.monthly_amount
-                    total_units += units_bought
-
-                    # Record trade
-                    trade = {
-                        'date': current_date.strftime('%Y-%m-%d'),
-                        'price': float(current_price),
-                        'units': float(units_bought),
-                        'amount': float(self.monthly_amount),
-                        'total_investment': float(total_investment),
-                        'total_units': float(total_units),
-                        'portfolio_value': float(total_units * current_price),
-                        'trade_type': 'regular_sip'
-                    }
-                    benchmark_trades.append(trade)
-
-                    # Mark month as invested
-                    invested_months.add(month_key)
-
-                    logger.debug(f"📅 Benchmark SIP: {current_date.strftime('%Y-%m-%d')} "
-                                 f"₹{self.monthly_amount:,.2f} @ ₹{current_price:.2f}")
-
-            # Calculate final portfolio value
-            final_price = data.iloc[-1]['close']
-            final_portfolio_value = total_units * final_price
-
-            # Calculate performance metrics
-            total_return_percent = ((final_portfolio_value / total_investment) - 1) * 100 if total_investment > 0 else 0
-
-            # Calculate CAGR
-            start_timestamp = data.iloc[0]['timestamp']
-            end_timestamp = data.iloc[-1]['timestamp']
-            years = (end_timestamp - start_timestamp).days / 365.25
-            cagr_percent = ((final_portfolio_value / total_investment) ** (
-                        1 / years) - 1) * 100 if years > 0 and total_investment > 0 else 0
-
-            # Calculate average buy price
-            avg_buy_price = total_investment / total_units if total_units > 0 else 0
-
-            benchmark_result = {
-                'strategy_name': 'Regular SIP Benchmark',
-                'description': f'₹{self.monthly_amount:,.0f} invested on {self.investment_day}th of every month',
-                'total_investment': float(total_investment),
-                'final_portfolio_value': float(final_portfolio_value),
-                'total_units': float(total_units),
-                'average_buy_price': float(avg_buy_price),
-                'total_return_percent': float(total_return_percent),
-                'cagr_percent': float(cagr_percent),
-                'num_trades': len(benchmark_trades),
-                'trades': benchmark_trades,
-                'final_price': float(final_price),
-                'period': f"{start_date} to {end_date}",
-                'monthly_investment': float(self.monthly_amount),
-                'investment_day': self.investment_day
-            }
-
-            logger.info(f"✅ Benchmark SIP completed for {symbol}:")
-            logger.info(f"   📊 Investment: ₹{total_investment:,.2f}")
-            logger.info(f"   💰 Final Value: ₹{final_portfolio_value:,.2f}")
-            logger.info(f"   📈 CAGR: {cagr_percent:.2f}%")
-            logger.info(f"   🔄 Total Trades: {len(benchmark_trades)}")
-
-            return benchmark_result
-
-        except Exception as e:
-            logger.error(f"Error calculating benchmark SIP for {symbol}: {e}")
-            return self._empty_benchmark_result()
-
-    async def _fetch_data_from_db_async(self, symbol: str, start_date: str, end_date: str,
-                                        nsedata_db: AsyncSession) -> pd.DataFrame:
-        """Fetch market data for benchmark calculation"""
-        try:
-            # Convert string dates to datetime objects
-            start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
-            end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
-
-            query = text(f"""
-                SELECT timestamp, open, high, low, close, volume
-                FROM "{symbol.upper()}"
-                WHERE timestamp BETWEEN :start_date AND :end_date
-                ORDER BY timestamp ASC
-            """)
-
-            result = await nsedata_db.execute(query, {
-                'start_date': start_date_obj,
-                'end_date': end_date_obj
-            })
-
-            rows = result.fetchall()
-
-            if not rows:
-                logger.warning(f"No data found for {symbol} between {start_date} and {end_date}")
-                return pd.DataFrame()
-
-            # Convert to DataFrame
-            data = pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            data['timestamp'] = pd.to_datetime(data['timestamp'])
-
-            # Convert price columns to float
-            price_columns = ['open', 'high', 'low', 'close']
-            for col in price_columns:
-                data[col] = pd.to_numeric(data[col], errors='coerce')
-
-            data['volume'] = pd.to_numeric(data['volume'], errors='coerce')
-
-            return data.dropna()
-
-        except Exception as e:
-            logger.error(f"Error fetching data for benchmark: {e}")
-            return pd.DataFrame()
-
-    def _empty_benchmark_result(self) -> Dict:
-        """Return empty benchmark result for error cases"""
-        return {
-            'strategy_name': 'Regular SIP Benchmark',
-            'description': f'₹{self.monthly_amount:,.0f} invested on {self.investment_day}th of every month',
-            'total_investment': 0.0,
-            'final_portfolio_value': 0.0,
-            'total_units': 0.0,
-            'average_buy_price': 0.0,
-            'total_return_percent': 0.0,
-            'cagr_percent': 0.0,
-            'num_trades': 0,
-            'trades': [],
-            'final_price': 0.0,
-            'period': '',
-            'monthly_investment': float(self.monthly_amount),
-            'investment_day': self.investment_day,
-            'error': 'No data available for benchmark calculation'
-        }
-
-
 # Create router
 sip_router = APIRouter(prefix="/sip", tags=["sip-strategy"])
 
@@ -494,203 +301,199 @@ async def daily_signal_check():
         'errors_encountered': 0,
         'symbols_processed': []
     }
+    trading_db = get_db()
+    nsedata_db = get_nsedata_db()
 
     try:
-        # Use the proper dependency pattern for getting database sessions
-        async with db_manager.get_session('trading_db') as trading_db:
-            async with db_manager.get_session('nsedata') as nsedata_db:
+        # Get all active portfolios
+        portfolios_query = text("""
+            SELECT portfolio_id, user_id, symbols, config, 
+                   total_invested, current_units, next_investment_date
+            FROM sip_portfolios 
+            WHERE status = 'active'
+        """)
 
-                logger.info("✅ Database sessions established successfully")
+        result = await trading_db.execute(portfolios_query)
+        portfolios = result.fetchall()
 
-                # Get all active portfolios
-                portfolios_query = text("""
-                    SELECT portfolio_id, user_id, symbols, config, 
-                           total_invested, current_units, next_investment_date
-                    FROM sip_portfolios 
-                    WHERE status = 'active'
-                """)
+        logger.info(f"📊 Found {len(portfolios)} active portfolios to process")
 
-                result = await trading_db.execute(portfolios_query)
-                portfolios = result.fetchall()
+        if not portfolios:
+            logger.warning("⚠️ No active portfolios found")
+            return
 
-                logger.info(f"📊 Found {len(portfolios)} active portfolios to process")
+        # Initialize strategy
+        strategy = EnhancedSIPStrategy(
+            nsedata_session=nsedata_db,
+            trading_session=trading_db
+        )
 
-                if not portfolios:
-                    logger.warning("⚠️ No active portfolios found")
-                    return
+        # Process each portfolio
+        for portfolio in portfolios:
+            portfolio_start_time = datetime.now()
+            portfolio_id, user_id, symbols_json, config_json, total_invested, current_units, next_investment_date = portfolio
 
-                # Initialize strategy
-                strategy = EnhancedSIPStrategy(
-                    nsedata_session=nsedata_db,
-                    trading_session=trading_db
-                )
+            try:
+                # Safe JSON parsing with validation
+                if isinstance(symbols_json, str):
+                    symbols_data = json.loads(symbols_json)
+                else:
+                    symbols_data = symbols_json or []
 
-                # Process each portfolio
-                for portfolio in portfolios:
-                    portfolio_start_time = datetime.now()
-                    portfolio_id, user_id, symbols_json, config_json, total_invested, current_units, next_investment_date = portfolio
+                if isinstance(config_json, str):
+                    config_dict = json.loads(config_json)
+                else:
+                    config_dict = config_json or {}
+
+                # Validate config structure
+                required_config_keys = ['fixed_investment', 'min_investment_gap_days']
+                missing_keys = [key for key in required_config_keys if key not in config_dict]
+
+                if missing_keys:
+                    logger.error(f"Invalid config for portfolio {portfolio_id}: missing keys {missing_keys}")
+                    metrics['errors_encountered'] += 1
+                    continue
+
+                config = SIPConfig(**config_dict)
+                portfolio_signals_generated = 0
+
+                # Process each symbol in the portfolio
+                for symbol_config in symbols_data:
+                    symbol_start_time = datetime.now()
+
+                    # Extract and validate symbol name
+                    if isinstance(symbol_config, dict):
+                        symbol = symbol_config.get('symbol')
+                        if not symbol:
+                            logger.warning(f"Symbol config missing 'symbol' key: {symbol_config}")
+                            continue
+                    elif isinstance(symbol_config, str):
+                        symbol = symbol_config
+                    else:
+                        logger.warning(f"Invalid symbol config type: {type(symbol_config)}")
+                        continue
+
+                    # Validate symbol
+                    if not symbol or len(symbol.strip()) == 0:
+                        logger.warning(f"Empty or invalid symbol: '{symbol}'")
+                        continue
+
+                    # Normalize symbol name
+                    symbol = symbol.strip().upper()
+                    metrics['symbols_processed'].append(symbol)
 
                     try:
-                        # Safe JSON parsing with validation
-                        if isinstance(symbols_json, str):
-                            symbols_data = json.loads(symbols_json)
-                        else:
-                            symbols_data = symbols_json or []
+                        # Check timing constraints
+                        current_date = datetime.now().date()
 
-                        if isinstance(config_json, str):
-                            config_dict = json.loads(config_json)
-                        else:
-                            config_dict = config_json or {}
-
-                        # Validate config structure
-                        required_config_keys = ['fixed_investment', 'min_investment_gap_days']
-                        missing_keys = [key for key in required_config_keys if key not in config_dict]
-
-                        if missing_keys:
-                            logger.error(f"Invalid config for portfolio {portfolio_id}: missing keys {missing_keys}")
-                            metrics['errors_encountered'] += 1
+                        # Skip if next investment date is in future
+                        if next_investment_date and next_investment_date.date() > current_date:
+                            logger.info(
+                                f"Skipping {symbol} - next investment date is {next_investment_date.date()}")
                             continue
 
-                        config = SIPConfig(**config_dict)
-                        portfolio_signals_generated = 0
+                        # Check last investment date to ensure minimum gap
+                        last_trade_query = text("""
+                            SELECT MAX(timestamp) FROM sip_actual_trades 
+                            WHERE portfolio_id = :portfolio_id AND symbol = :symbol
+                        """)
 
-                        # Process each symbol in the portfolio
-                        for symbol_config in symbols_data:
-                            symbol_start_time = datetime.now()
-
-                            # Extract and validate symbol name
-                            if isinstance(symbol_config, dict):
-                                symbol = symbol_config.get('symbol')
-                                if not symbol:
-                                    logger.warning(f"Symbol config missing 'symbol' key: {symbol_config}")
-                                    continue
-                            elif isinstance(symbol_config, str):
-                                symbol = symbol_config
-                            else:
-                                logger.warning(f"Invalid symbol config type: {type(symbol_config)}")
-                                continue
-
-                            # Validate symbol
-                            if not symbol or len(symbol.strip()) == 0:
-                                logger.warning(f"Empty or invalid symbol: '{symbol}'")
-                                continue
-
-                            # Normalize symbol name
-                            symbol = symbol.strip().upper()
-                            metrics['symbols_processed'].append(symbol)
-
-                            try:
-                                # Check timing constraints
-                                current_date = datetime.now().date()
-
-                                # Skip if next investment date is in future
-                                if next_investment_date and next_investment_date.date() > current_date:
-                                    logger.info(
-                                        f"Skipping {symbol} - next investment date is {next_investment_date.date()}")
-                                    continue
-
-                                # Check last investment date to ensure minimum gap
-                                last_trade_query = text("""
-                                    SELECT MAX(timestamp) FROM sip_actual_trades 
-                                    WHERE portfolio_id = :portfolio_id AND symbol = :symbol
-                                """)
-
-                                last_trade_result = await trading_db.execute(
-                                    last_trade_query, {'portfolio_id': portfolio_id, 'symbol': symbol}
-                                )
-                                last_trade_date = last_trade_result.scalar()
-
-                                # Enforce minimum gap
-                                if last_trade_date:
-                                    days_since_last = (current_date - last_trade_date.date()).days
-                                    if days_since_last < config.min_investment_gap_days:
-                                        logger.info(
-                                            f"Skipping {symbol} - only {days_since_last} days since last investment "
-                                            f"(minimum: {config.min_investment_gap_days})"
-                                        )
-                                        continue
-
-                                # Generate signals with proper error handling
-                                try:
-                                    # Fetch data with reasonable date range
-                                    end_date = datetime.now().strftime('%Y-%m-%d')
-                                    start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
-
-                                    # Add timeout for data fetching
-                                    data = await asyncio.wait_for(
-                                        strategy.fetch_data_from_db_async(symbol, start_date, end_date),
-                                        timeout=30.0
-                                    )
-
-                                    if data.empty:
-                                        logger.warning(
-                                            f"No data available for {symbol} in date range {start_date} to {end_date}")
-                                        continue
-
-                                    # Validate data quality
-                                    if len(data) < 50:  # Minimum data points needed
-                                        logger.warning(f"Insufficient data for {symbol}: only {len(data)} records")
-                                        continue
-
-                                    # Generate signals with timeout
-                                    signals = await asyncio.wait_for(
-                                        asyncio.to_thread(strategy.get_next_investment_signals, data, config),
-                                        timeout=15.0
-                                    )
-
-                                    # Validate signal response
-                                    if not isinstance(signals, dict):
-                                        logger.error(f"Invalid signal response type for {symbol}: {type(signals)}")
-                                        continue
-
-                                    if 'signal' not in signals:
-                                        logger.error(f"Signal response missing 'signal' key for {symbol}: {signals}")
-                                        continue
-
-                                    # Save signal if valid
-                                    signal_type = signals.get('signal')
-                                    if signal_type and signal_type not in ['NO_DATA', 'ERROR', None]:
-                                        await save_signal_with_gtt_order(portfolio_id, symbol, signals, trading_db,
-                                                                         config)
-                                        portfolio_signals_generated += 1
-                                        metrics['signals_generated'] += 1
-
-                                        # Log success with details
-                                        signal_processing_time = (datetime.now() - symbol_start_time).total_seconds()
-                                        logger.info(
-                                            f"✅ Generated signal for {symbol} in {signal_processing_time:.2f}s\n"
-                                            f"   Signal: {signal_type}\n"
-                                            f"   Amount: {signals.get('recommended_amount', 'N/A')}\n"
-                                            f"   Confidence: {signals.get('confidence', 'N/A')}"
-                                        )
-                                    else:
-                                        logger.info(f"No actionable signal for {symbol}: {signal_type}")
-
-                                except asyncio.TimeoutError:
-                                    logger.error(f"Timeout processing {symbol} - operation took too long")
-                                    metrics['errors_encountered'] += 1
-                                except Exception as signal_error:
-                                    logger.error(f"Error generating signal for {symbol}: {signal_error}")
-                                    metrics['errors_encountered'] += 1
-
-                            except Exception as symbol_error:
-                                logger.error(f"Error processing symbol {symbol}: {symbol_error}")
-                                metrics['errors_encountered'] += 1
-
-                        # Log portfolio completion
-                        portfolio_processing_time = (datetime.now() - portfolio_start_time).total_seconds()
-                        metrics['portfolios_processed'] += 1
-
-                        logger.info(
-                            f"📈 Completed portfolio {portfolio_id} in {portfolio_processing_time:.2f}s\n"
-                            f"   User: {user_id}\n"
-                            f"   Signals generated: {portfolio_signals_generated}\n"
-                            f"   Total invested: {total_invested}"
+                        last_trade_result = await trading_db.execute(
+                            last_trade_query, {'portfolio_id': portfolio_id, 'symbol': symbol}
                         )
+                        last_trade_date = last_trade_result.scalar()
 
-                    except Exception as portfolio_error:
-                        logger.error(f"Error processing portfolio {portfolio_id}: {portfolio_error}")
+                        # Enforce minimum gap
+                        if last_trade_date:
+                            days_since_last = (current_date - last_trade_date.date()).days
+                            if days_since_last < config.min_investment_gap_days:
+                                logger.info(
+                                    f"Skipping {symbol} - only {days_since_last} days since last investment "
+                                    f"(minimum: {config.min_investment_gap_days})"
+                                )
+                                continue
+
+                        # Generate signals with proper error handling
+                        try:
+                            # Fetch data with reasonable date range
+                            end_date = datetime.now().strftime('%Y-%m-%d')
+                            start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+
+                            # Add timeout for data fetching
+                            data = await asyncio.wait_for(
+                                strategy.fetch_data_from_db_async(symbol, start_date, end_date),
+                                timeout=30.0
+                            )
+
+                            if data.empty:
+                                logger.warning(
+                                    f"No data available for {symbol} in date range {start_date} to {end_date}")
+                                continue
+
+                            # Validate data quality
+                            if len(data) < 50:  # Minimum data points needed
+                                logger.warning(f"Insufficient data for {symbol}: only {len(data)} records")
+                                continue
+
+                            # Generate signals with timeout
+                            signals = await asyncio.wait_for(
+                                asyncio.to_thread(strategy.get_next_investment_signals, data, config),
+                                timeout=15.0
+                            )
+
+                            # Validate signal response
+                            if not isinstance(signals, dict):
+                                logger.error(f"Invalid signal response type for {symbol}: {type(signals)}")
+                                continue
+
+                            if 'signal' not in signals:
+                                logger.error(f"Signal response missing 'signal' key for {symbol}: {signals}")
+                                continue
+
+                            # Save signal if valid
+                            signal_type = signals.get('signal')
+                            if signal_type and signal_type not in ['NO_DATA', 'ERROR', None]:
+                                await save_signal_with_gtt_order(portfolio_id, symbol, signals, trading_db,
+                                                                 config)
+                                portfolio_signals_generated += 1
+                                metrics['signals_generated'] += 1
+
+                                # Log success with details
+                                signal_processing_time = (datetime.now() - symbol_start_time).total_seconds()
+                                logger.info(
+                                    f"✅ Generated signal for {symbol} in {signal_processing_time:.2f}s\n"
+                                    f"   Signal: {signal_type}\n"
+                                    f"   Amount: {signals.get('recommended_amount', 'N/A')}\n"
+                                    f"   Confidence: {signals.get('confidence', 'N/A')}"
+                                )
+                            else:
+                                logger.info(f"No actionable signal for {symbol}: {signal_type}")
+
+                        except asyncio.TimeoutError:
+                            logger.error(f"Timeout processing {symbol} - operation took too long")
+                            metrics['errors_encountered'] += 1
+                        except Exception as signal_error:
+                            logger.error(f"Error generating signal for {symbol}: {signal_error}")
+                            metrics['errors_encountered'] += 1
+
+                    except Exception as symbol_error:
+                        logger.error(f"Error processing symbol {symbol}: {symbol_error}")
                         metrics['errors_encountered'] += 1
+
+                # Log portfolio completion
+                portfolio_processing_time = (datetime.now() - portfolio_start_time).total_seconds()
+                metrics['portfolios_processed'] += 1
+
+                logger.info(
+                    f"📈 Completed portfolio {portfolio_id} in {portfolio_processing_time:.2f}s\n"
+                    f"   User: {user_id}\n"
+                    f"   Signals generated: {portfolio_signals_generated}\n"
+                    f"   Total invested: {total_invested}"
+                )
+
+            except Exception as portfolio_error:
+                logger.error(f"Error processing portfolio {portfolio_id}: {portfolio_error}")
+                metrics['errors_encountered'] += 1
 
     except Exception as e:
         logger.error(f"Critical error in daily signal check: {e}")
@@ -729,8 +532,7 @@ async def daily_signal_check():
 
         # Store metrics for monitoring (if trading_db is still available)
         try:
-            async with db_manager.get_session('trading_db') as trading_db:
-                await store_job_metrics(trading_db, 'daily_signal_check', metrics)
+            await store_job_metrics(trading_db, 'daily_signal_check', metrics)
         except Exception as metric_error:
             logger.warning(f"Could not store job metrics: {metric_error}")
 
@@ -936,7 +738,8 @@ async def start_enhanced_scheduler():
         # Add the main daily job
         scheduler.add_job(
             daily_signal_check,
-            CronTrigger(hour=8, minute=0, timezone=pytz.timezone('Asia/Kolkata')),
+            CronTrigger(minute='*/1', timezone=pytz.timezone('Asia/Kolkata')),
+            # CronTrigger(hour=8, minute=0, timezone=pytz.timezone('Asia/Kolkata')),
             id='daily_signal_check',
             replace_existing=True,
             max_instances=1,
@@ -953,14 +756,14 @@ async def start_enhanced_scheduler():
         )
 
         # Add a test job for immediate testing (remove in production)
-        if os.getenv('ENVIRONMENT') != 'production':
-            scheduler.add_job(
-                test_daily_signal_check,
-                CronTrigger(minute='*/5', timezone=pytz.timezone('Asia/Kolkata')),  # Every 5 minutes
-                id='test_signal_check',
-                replace_existing=True,
-                max_instances=1
-            )
+        # if os.getenv('ENVIRONMENT') != 'production':
+        #     scheduler.add_job(
+        #         test_daily_signal_check,
+        #         CronTrigger(minute='*/5', timezone=pytz.timezone('Asia/Kolkata')),  # Every 5 minutes
+        #         id='test_signal_check',
+        #         replace_existing=True,
+        #         max_instances=1
+        #     )
 
         scheduler.start()
 
@@ -1178,7 +981,8 @@ async def run_sip_backtest(
         background_tasks: BackgroundTasks,
         user_id: str = Depends(get_current_user),
         trading_db: AsyncSession = Depends(get_db),
-        nsedata_db: AsyncSession = Depends(get_nsedata_db)
+        nsedata_db: AsyncSession = Depends(get_nsedata_db),
+        enable_monthly_limits: bool = True,
 ):
     """
     Enhanced SIP strategy backtest with benchmark comparison
@@ -1190,10 +994,16 @@ async def run_sip_backtest(
     """
     try:
         # Create enhanced strategy
-        strategy = EnhancedSIPStrategyWithLimits(
-            nsedata_session=nsedata_db,
-            trading_session=trading_db
-        )
+        if enable_monthly_limits:
+            strategy = EnhancedSIPStrategyWithLimits(
+                nsedata_session=nsedata_db,
+                trading_session=trading_db
+            )
+        else:
+            strategy = EnhancedSIPStrategy(
+                nsedata_session=nsedata_db,
+                trading_session=trading_db
+            )
 
         # Create benchmark calculator
         benchmark_calculator = BenchmarkSIPCalculator(
@@ -2016,8 +1826,8 @@ def _calculate_expected_improvements(analysis: Dict, optimized_config: Dict) -> 
 # BATCH PROCESSING AND UTILITIES
 # ============================================================================
 
-@sip_router.post("/batch-backtest")
-async def run_batch_backtest_with_limits(
+@sip_router.post("/batch-backtest/multi-configs")
+async def run_backtest_with_limits_multiple_configs(
         symbols: List[str],
         configs: List[SIPConfigRequest],
         start_date: str,
@@ -3358,7 +3168,8 @@ async def compare_strategies(
         start_date: str = "2020-01-01",
         end_date: Optional[str] = None,
         user_id: str = Depends(get_current_user),
-        nsedata_db: AsyncSession = Depends(get_nsedata_db)
+        nsedata_db: AsyncSession = Depends(get_nsedata_db),
+        enable_monthly_limits: bool = True
 ):
     """Compare different SIP strategy configurations with benchmark"""
     try:
@@ -3405,7 +3216,10 @@ async def compare_strategies(
         for strategy_name, config in strategies.items():
             logger.info(f"Running {strategy_name} strategy for {symbol}")
 
-            backtest_results = await strategy.run_batch_backtest([symbol], start_date, end_date, config)
+            if enable_monthly_limits:
+                backtest_results = await strategy.run_batch_backtest_with_monthly_limit([symbol], start_date, end_date, config)
+            else:
+                backtest_results = await strategy.run_batch_backtest([symbol], start_date, end_date, config)
 
             if symbol in backtest_results:
                 result = backtest_results[symbol]
@@ -3453,7 +3267,8 @@ async def quick_sip_test(
         end_date: Optional[str] = None,
         investment_amount: float = 5000,
         user_id: str = Depends(get_current_user),
-        nsedata_db: AsyncSession = Depends(get_nsedata_db)
+        nsedata_db: AsyncSession = Depends(get_nsedata_db),
+        enable_monthly_limits: bool = True
 ):
     """Quick SIP test for rapid analysis with benchmark comparison"""
     try:
@@ -3474,7 +3289,10 @@ async def quick_sip_test(
         benchmark_calculator = BenchmarkSIPCalculator(monthly_amount=investment_amount)
 
         # Run quick backtest
-        results = await strategy.run_batch_backtest(symbols, start_date, end_date, config)
+        if enable_monthly_limits:
+            results = await strategy.run_batch_backtest_with_monthly_limit(symbols, start_date, end_date, config)
+        else:
+            results = await strategy.run_batch_backtest(symbols, start_date, end_date, config)
 
         if not results:
             return {"message": "No data available for quick test", "symbols": symbols}
