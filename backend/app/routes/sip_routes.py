@@ -301,10 +301,17 @@ async def daily_signal_check():
         'errors_encountered': 0,
         'symbols_processed': []
     }
-    trading_db = get_db()
-    nsedata_db = get_nsedata_db()
+
+    # Create async generators and get sessions from them
+    trading_db_generator = get_db()
+    nsedata_db_generator = get_nsedata_db()
 
     try:
+        # Get sessions from the async generators
+        trading_db = await trading_db_generator.__anext__()
+        nsedata_db = await nsedata_db_generator.__anext__()
+        logger.info("✅ Database sessions acquired successfully")
+
         # Get all active portfolios
         portfolios_query = text("""
             SELECT portfolio_id, user_id, symbols, config, 
@@ -345,14 +352,6 @@ async def daily_signal_check():
                 else:
                     config_dict = config_json or {}
 
-                # Validate config structure
-                required_config_keys = ['fixed_investment', 'min_investment_gap_days']
-                missing_keys = [key for key in required_config_keys if key not in config_dict]
-
-                if missing_keys:
-                    logger.error(f"Invalid config for portfolio {portfolio_id}: missing keys {missing_keys}")
-                    metrics['errors_encountered'] += 1
-                    continue
 
                 config = SIPConfig(**config_dict)
                 portfolio_signals_generated = 0
@@ -385,12 +384,6 @@ async def daily_signal_check():
                     try:
                         # Check timing constraints
                         current_date = datetime.now().date()
-
-                        # Skip if next investment date is in future
-                        if next_investment_date and next_investment_date.date() > current_date:
-                            logger.info(
-                                f"Skipping {symbol} - next investment date is {next_investment_date.date()}")
-                            continue
 
                         # Check last investment date to ensure minimum gap
                         last_trade_query = text("""
@@ -3890,3 +3883,6 @@ async def test_benchmark_calculation(
     except Exception as e:
         logger.error(f"Benchmark test failed for {symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+

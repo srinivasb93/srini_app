@@ -1718,19 +1718,7 @@ async def general_exception_handler(request, exc):
     )
 
 if __name__ == "__main__":
-    import uvicorn
-
-    # Configuration for development
-    config = {
-        "app": "main:app",
-        "host": "0.0.0.0",
-        "port": 8000,
-        "reload": os.getenv("ENVIRONMENT", "development") == "development",
-        "log_level": "info",
-        "access_log": True,
-        "use_colors": True,
-        "loop": "asyncio"
-    }
-
-    logger.info(f"Starting server with config: {config}")
-    uvicorn.run(**config)
+    # Call daily_signal_check in sip_router
+    import asyncio
+    from backend.app.routes.sip_routes import daily_signal_check
+    asyncio.run(daily_signal_check())
