@@ -494,6 +494,26 @@ async def daily_signal_check():
         metrics['errors_encountered'] += 1
 
     finally:
+        # Proper cleanup of database sessions
+        try:
+            await trading_db.close()
+        except:
+            pass
+        try:
+            await nsedata_db.close()
+        except:
+            pass
+
+        # Clean up generators
+        try:
+            await trading_db_generator.aclose()
+        except:
+            pass
+        try:
+            await nsedata_db_generator.aclose()
+        except:
+            pass
+        
         # Calculate and log final metrics
         job_end_time = datetime.now()
         total_processing_time = (job_end_time - job_start_time).total_seconds()
