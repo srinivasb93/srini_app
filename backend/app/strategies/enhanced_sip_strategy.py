@@ -2598,12 +2598,12 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
                 should_invest, investment_reason = self._should_invest(row, config, i, data)
 
                 if should_invest:
-                    logger.info(f"<UNK> Investment: {investment_reason}, Date: {current_date.strftime('%Y-%m-%d')}, Price: ₹{current_price:.2f}")
+                    logger.info(f"Investment: {investment_reason}, Date: {current_date.strftime('%Y-%m-%d')}, Price: ₹{current_price:.2f}")
                     # Calculate investment amount based on market conditions
                     base_investment_amount = self.determine_investment_amount(
                         current_price, data, config, i
                     )
-                    logger.info(f"<UNK> Investment amount: {base_investment_amount}")
+                    logger.info(f"Investment amount: {base_investment_amount}")
 
                     # APPLY MONTHLY LIMITS AND PRICE THRESHOLD LOGIC
                     investment_check = self.monthly_tracker.can_invest(

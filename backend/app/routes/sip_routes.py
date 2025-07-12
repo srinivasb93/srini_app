@@ -883,14 +883,6 @@ async def daily_signal_check():
         metrics['errors_encountered'] += 1
 
     finally:
-        try:
-            if trading_db:
-                await trading_db_generator.aclose()
-            if nsedata_db:
-                await nsedata_db_generator.aclose()
-        except Exception as cleanup_error:
-            logger.debug(f"Session cleanup not completed: {cleanup_error}")
-
         # Calculate and log final metrics
         job_end_time = datetime.now()
         total_processing_time = (job_end_time - job_start_time).total_seconds()
@@ -925,6 +917,14 @@ async def daily_signal_check():
             await store_job_metrics(trading_db, 'daily_signal_check', metrics)
         except Exception as metric_error:
             logger.warning(f"Could not store job metrics: {metric_error}")
+
+        try:
+            if trading_db:
+                await trading_db_generator.aclose()
+            if nsedata_db:
+                await nsedata_db_generator.aclose()
+        except Exception as cleanup_error:
+            logger.debug(f"Session cleanup not completed: {cleanup_error}")
 
 
 async def store_job_metrics(db_session: AsyncSession, job_name: str, metrics: dict):
@@ -1063,7 +1063,7 @@ async def create_gtt_trade_record(
     """
     try:
         # Generate trade ID
-        trade_id = f"gtt_{portfolio_id}_{symbol}_{int(datetime.now().timestamp())}"
+        trade_id = f"gtt_{portfolio_id}_{int(datetime.now().timestamp())}"
 
         # Insert trade record with GTT-specific details
         insert_trade = text("""
@@ -1082,8 +1082,8 @@ async def create_gtt_trade_record(
             'price': trigger_price,
             'units': quantity,
             'amount': amount,
-            'trade_type': 'GTT_PLACED',  # Distinguish from actual executions
-            'execution_status': 'GTT_PENDING',  # Will be updated when GTT triggers
+            'trade_type': 'GTT_PLACED',
+            'execution_status': 'GTT_PENDING',
             'gtt_order_id': gtt_order_id
         })
 
@@ -1145,7 +1145,7 @@ async def save_signal_with_gtt_order(portfolio_id: str, symbol: str, signals: di
     3. Links signal with GTT order ID
     4. Handles errors gracefully
     """
-    signal_id = str(uuid.uuid4())
+    signal_id =  f"sig_{str(uuid.uuid4())}_{int(datetime.now().timestamp())}"
     gtt_order_id = None
 
     try:
@@ -1727,7 +1727,7 @@ async def save_enhanced_backtest_results(
 
         # Insert results with benchmark data
         for result in results:
-            backtest_id = str(uuid.uuid4())
+            backtest_id = f"bt_{uuid.uuid4()}_{int(datetime.now().timestamp())}"
 
             # Prepare data for insertion
             insert_query = text("""
@@ -2493,7 +2493,7 @@ async def run_backtest_with_limits_multiple_configs(
             })
 
         return {
-            "batch_id": str(uuid.uuid4()),
+            "batch_id": f"batch_{uuid.uuid4()}_{int(datetime.now().timestamp())}",
             "symbols": symbols,
             "period": f"{start_date} to {end_date}",
             "configurations_tested": len(configs),
