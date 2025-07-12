@@ -23,6 +23,7 @@ from apscheduler.jobstores.memory import MemoryJobStore
 import pytz
 import traceback
 from backend.app.database import db_manager
+from backend.app.services import OrderManager
 
 
 # Clean imports - multi-database architecture
@@ -114,6 +115,27 @@ def parse_date_string(date_str: str) -> date:
         logger.error(f"Error parsing date '{date_str}': {e}")
         raise ValueError(f"Invalid date format: {date_str}")
 
+def safe_json_parse(data, field_name: str = "data", default=None):
+    """Safely parse JSON data that might already be parsed"""
+    try:
+        if data is None:
+            return default or ([] if field_name in ['symbols', 'list'] else {})
+        elif isinstance(data, str):
+            if data.strip() == "":
+                return default or ([] if field_name in ['symbols', 'list'] else {})
+            return json.loads(data)
+        elif isinstance(data, (list, dict)):
+            return data  # Already parsed
+        else:
+            logger.warning(f"Unexpected {field_name} type: {type(data)}")
+            return default or ([] if field_name in ['symbols', 'list'] else {})
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error for {field_name}: {e}")
+        return default or ([] if field_name in ['symbols', 'list'] else {})
+    except Exception as e:
+        logger.error(f"Unexpected error parsing {field_name}: {e}")
+        return default or ([] if field_name in ['symbols', 'list'] else {})
+
 
 class SIPSymbolConfig(BaseModel):
     """Configuration for individual symbol in multi-symbol portfolio"""
@@ -166,6 +188,7 @@ class SIPConfigRequest(BaseModel):
         if v <= 0:
             raise ValueError('Price reduction threshold must be positive')
         return v
+
 
 class SIPBacktestRequest(BaseModel):
     """Enhanced backtest request with monthly limits"""
@@ -287,6 +310,357 @@ sip_router = APIRouter(prefix="/sip", tags=["sip-strategy"])
 # ============================================================================
 # BACKGROUND SIGNAL PROCESSING
 # ============================================================================
+def merge_symbol_config_with_fallback(symbol_config: Dict, fallback_config: Dict) -> Dict:
+    """
+    Merge symbol-specific config with fallback config.
+    Symbol config takes precedence, fallback config fills missing values.
+    """
+    try:
+        # Extract symbol's individual config
+        symbol_individual_config = symbol_config.get('config', {})
+
+        # If symbol config is empty or only has placeholder data, use fallback
+        if (not symbol_individual_config or
+                symbol_individual_config == {"additionalProp1": {}} or
+                not isinstance(symbol_individual_config, dict) or
+                len(symbol_individual_config) == 0):
+            logger.info(f"Using fallback config for symbol {symbol_config.get('symbol')}")
+            return fallback_config.copy()
+
+        # Check if symbol config has actual SIP parameters
+        sip_params = ['fixed_investment', 'drawdown_threshold_1', 'rolling_window', 'fallback_day']
+        has_sip_params = any(param in symbol_individual_config for param in sip_params)
+
+        if not has_sip_params:
+            logger.info(f"Symbol config lacks SIP parameters, using fallback for {symbol_config.get('symbol')}")
+            return fallback_config.copy()
+
+        # Merge configs - symbol config overrides fallback
+        merged_config = fallback_config.copy()
+        merged_config.update(symbol_individual_config)
+
+        logger.info(f"Using merged config for symbol {symbol_config.get('symbol')}: symbol-specific values applied")
+        return merged_config
+
+    except Exception as e:
+        logger.error(f"Error merging configs: {e}, using fallback")
+        return fallback_config.copy()
+
+
+async def get_monthly_investment_total(portfolio_id: str, symbol: str, trading_db: AsyncSession) -> float:
+    """Get total investment for a symbol in current month"""
+    try:
+        current_month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        next_month_start = (current_month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+        query = text("""
+            SELECT COALESCE(SUM(amount), 0) as total_invested
+            FROM sip_actual_trades
+            WHERE portfolio_id = :portfolio_id 
+            AND symbol = :symbol
+            AND timestamp >= :month_start
+            AND timestamp < :next_month
+        """)
+
+        result = await trading_db.execute(query, {
+            'portfolio_id': portfolio_id,
+            'symbol': symbol,
+            'month_start': current_month_start,
+            'next_month': next_month_start
+        })
+
+        total = result.scalar() or 0.0
+        logger.debug(f"Monthly investment total for {symbol}: ₹{total:.2f}")
+        return total
+
+    except Exception as e:
+        logger.error(f"Error fetching monthly investment total for {symbol}: {e}")
+        return 0.0
+
+
+async def get_investment_signals_with_monthly_limits(
+        symbol: str,
+        config_dict: Dict,
+        strategy,
+        nsedata_db: AsyncSession,
+        trading_db: AsyncSession,
+        portfolio_id: str
+) -> Dict:
+    """
+    Generate investment signals using existing enhanced strategy with monthly limits
+    - Uses the actual get_next_investment_signals from EnhancedSIPStrategy
+    - Adds monthly investment tracking on top
+    - Matches backtesting logic exactly
+    """
+    try:
+        # Fetch recent data (last 6 months for better analysis)
+        end_date = datetime.now().strftime('%Y-%m-%d')
+        start_date = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
+
+        # Get historical data using existing method
+        data = await strategy.fetch_data_from_db_async(symbol, start_date, end_date)
+
+        if data.empty:
+            return {
+                "signal": "NO_DATA",
+                "confidence": 0,
+                "recommended_amount": 0,
+                "current_price": 0,
+                "message": "Insufficient data for analysis"
+            }
+
+        # Create SIPConfig object from dictionary
+        config_obj = SIPConfig(
+            fixed_investment=config_dict.get('fixed_investment', 5000),
+            drawdown_threshold_1=config_dict.get('drawdown_threshold_1', -10.0),
+            drawdown_threshold_2=config_dict.get('drawdown_threshold_2', -4.0),
+            investment_multiplier_1=config_dict.get('investment_multiplier_1', 2.0),
+            investment_multiplier_2=config_dict.get('investment_multiplier_2', 3.0),
+            investment_multiplier_3=config_dict.get('investment_multiplier_3', 5.0),
+            rolling_window=config_dict.get('rolling_window', 100),
+            fallback_day=config_dict.get('fallback_day', 22),
+            min_investment_gap_days=config_dict.get('min_investment_gap_days', 5),
+            max_amount_in_a_month=config_dict.get('max_amount_in_a_month',
+                                                  config_dict.get('fixed_investment', 5000) * 4),
+            price_reduction_threshold=config_dict.get('price_reduction_threshold', 4.0)
+        )
+
+        # Use existing get_next_investment_signals method - this gives us the SAME logic as backtesting
+        signals = strategy.get_next_investment_signals(data, config_obj)
+
+        # Ensure signals is a dictionary and has required fields
+        if not isinstance(signals, dict):
+            signals = {
+                "signal": "ERROR",
+                "confidence": 0,
+                "recommended_amount": config_obj.fixed_investment,
+                "current_price": float(data['close'].iloc[-1]) if not data.empty else 0,
+                "message": "Invalid signal format from strategy"
+            }
+
+        # Ensure current_price is set
+        if 'current_price' not in signals:
+            signals['current_price'] = float(data['close'].iloc[-1]) if not data.empty else 0
+
+        # Check monthly investment limits AFTER getting base signals
+        monthly_invested = await get_monthly_investment_total(portfolio_id, symbol, trading_db)
+        max_monthly = config_obj.max_amount_in_a_month
+        available_monthly_budget = max(0, max_monthly - monthly_invested)
+
+        # Apply monthly limit constraints to recommended amount
+        recommended_amount = signals.get('recommended_amount', config_obj.fixed_investment)
+
+        # If no budget available, override signal
+        if available_monthly_budget < config_obj.fixed_investment:
+            signals.update({
+                "signal": "MONTHLY_LIMIT_REACHED",
+                "confidence": 0,
+                "recommended_amount": 0,
+                "message": f"Monthly limit reached. Available: ₹{available_monthly_budget:.2f}"
+            })
+        elif recommended_amount > available_monthly_budget:
+            # Adjust amount to available budget
+            signals.update({
+                'recommended_amount': available_monthly_budget,
+                'amount_adjusted': True,
+                'original_amount': recommended_amount,
+                'message': f"Amount adjusted for monthly limit. Available: ₹{available_monthly_budget:.2f}"
+            })
+
+        # Add monthly tracking metadata (same as backtesting)
+        signals.update({
+            "monthly_invested_so_far": monthly_invested,
+            "monthly_budget_remaining": available_monthly_budget,
+            "monthly_limit": max_monthly
+        })
+
+        return signals
+
+    except Exception as e:
+        logger.error(f"Error generating enhanced signals for {symbol}: {e}")
+        return {
+            "signal": "ERROR",
+            "confidence": 0,
+            "recommended_amount": 0,
+            "current_price": 0,
+            "message": f"Signal generation failed: {str(e)}"
+        }
+
+
+async def get_user_apis_for_gtt(user_id: str, trading_db: AsyncSession) -> Dict:
+    """
+    Get user APIs for GTT order placement
+    FIXED: Uses direct database queries instead of importing from main.py
+    """
+    try:
+        # Instead of importing from main.py, let's recreate the user API logic here
+        # This avoids circular imports
+
+        from backend.app.services import init_upstox_api, init_zerodha_api
+
+        # Initialize APIs directly
+        user_apis_dict = {
+            "upstox": {"order": None, "quotes": None},
+            "zerodha": {"kite": None, "quotes": None}
+        }
+
+        try:
+            # Initialize Zerodha APIs
+            kite_apis = await init_zerodha_api(trading_db, user_id)
+            if kite_apis and "kite" in kite_apis:
+                user_apis_dict["zerodha"]["kite"] = kite_apis["kite"]
+                logger.info(f"Zerodha API initialized for user {user_id}")
+        except Exception as zerodha_error:
+            logger.warning(f"Zerodha API initialization failed for user {user_id}: {zerodha_error}")
+
+        try:
+            # Initialize Upstox APIs
+            upstox_apis = await init_upstox_api(trading_db, user_id)
+            if upstox_apis and "order" in upstox_apis:
+                user_apis_dict["upstox"]["order"] = upstox_apis["order"]
+                logger.info(f"Upstox API initialized for user {user_id}")
+        except Exception as upstox_error:
+            logger.warning(f"Upstox API initialization failed for user {user_id}: {upstox_error}")
+
+        return user_apis_dict
+
+    except Exception as e:
+        logger.error(f"Error getting user APIs for {user_id}: {e}")
+        return {}
+
+
+async def get_instrument_token_for_symbol(symbol: str, trading_db: AsyncSession) -> Optional[str]:
+    """Get instrument token for symbol - required for GTT order placement"""
+    try:
+        # Query instruments table for the symbol
+        query = text("""
+            SELECT instrument_token 
+            FROM instruments 
+            WHERE trading_symbol = :symbol 
+            AND exchange = 'NSE'
+            LIMIT 1
+        """)
+
+        result = await trading_db.execute(query, {'symbol': symbol})
+        row = result.fetchone()
+
+        if row:
+            return str(row[0])
+        else:
+            logger.warning(f"Instrument token not found for symbol: {symbol}")
+            return None
+
+    except Exception as e:
+        logger.error(f"Error fetching instrument token for {symbol}: {e}")
+        return None
+
+
+async def get_order_manager_instance() -> Optional[OrderManager]:
+    """
+    Get OrderManager instance without circular import
+    FIXED: Creates new instance instead of importing global one
+    """
+    try:
+        from backend.app.services import OrderMonitor
+
+        # Create fresh instances to avoid circular import
+        order_monitor = OrderMonitor()
+        order_manager = OrderManager(monitor=order_monitor)
+
+        logger.debug("Created new OrderManager instance for GTT operations")
+        return order_manager
+
+    except Exception as e:
+        logger.error(f"Error creating OrderManager instance: {e}")
+        return None
+
+
+async def place_gtt_order_via_existing_api(
+        user_id: str,
+        symbol: str,
+        quantity: int,
+        trigger_price: float,
+        limit_price: float,
+        current_price: float,
+        trading_db: AsyncSession
+) -> Dict:
+    """
+    Place GTT order using OrderManager.place_gtt_order method
+    FIXED: Creates OrderManager instance instead of importing global one
+    """
+    try:
+        # Get user APIs without circular import
+        user_apis_dict = await get_user_apis_for_gtt(user_id, trading_db)
+
+        if not user_apis_dict:
+            logger.error(f"Could not get user APIs for user {user_id}")
+            return {"status": "error", "gtt_id": None, "message": "User APIs not available"}
+
+        # Get Zerodha API (assuming Zerodha for SIP orders)
+        broker = "Zerodha"
+        api = user_apis_dict.get("zerodha", {}).get("kite")
+
+        if not api:
+            logger.error(f"Zerodha API not initialized for user {user_id}")
+            return {"status": "error", "gtt_id": None, "message": "Zerodha API not initialized"}
+
+        # Get instrument token for the symbol
+        instrument_token = await get_instrument_token_for_symbol(symbol, trading_db)
+
+        if not instrument_token:
+            logger.error(f"Could not find instrument token for {symbol}")
+            return {"status": "error", "gtt_id": None, "message": f"Instrument token not found for {symbol}"}
+
+        # Create OrderManager instance (avoids circular import)
+        order_manager = await get_order_manager_instance()
+
+        if not order_manager:
+            logger.error("Could not create OrderManager instance")
+            return {"status": "error", "gtt_id": None, "message": "OrderManager not available"}
+
+        # Use OrderManager.place_gtt_order method
+        response = await order_manager.place_gtt_order(
+            api=api,
+            instrument_token=instrument_token,
+            trading_symbol=symbol,
+            transaction_type="BUY",
+            quantity=quantity,
+            trigger_type="single",
+            trigger_price=trigger_price,
+            limit_price=limit_price,
+            last_price=current_price,
+            second_trigger_price=None,
+            second_limit_price=None,
+            broker=broker,
+            db=trading_db,
+            user_id=user_id
+        )
+
+        if response.get("status") == "success":
+            gtt_id = response.get("gtt_id")
+            logger.info(f"GTT order placed successfully via OrderManager: {gtt_id} for {symbol}")
+
+            return {
+                "status": "success",
+                "gtt_id": gtt_id,
+                "message": "GTT order placed successfully via OrderManager"
+            }
+        else:
+            error_msg = response.get("message", "Unknown error from OrderManager")
+            logger.error(f"OrderManager GTT placement failed for {symbol}: {error_msg}")
+            return {
+                "status": "error",
+                "gtt_id": None,
+                "message": f"GTT placement failed: {error_msg}"
+            }
+
+    except Exception as e:
+        logger.error(f"Error placing GTT order via OrderManager for {symbol}: {e}")
+        return {
+            "status": "error",
+            "gtt_id": None,
+            "message": f"GTT order placement failed: {str(e)}"
+        }
 
 async def daily_signal_check():
     """Enhanced background task with proper session management and error handling"""
@@ -302,11 +676,14 @@ async def daily_signal_check():
         'symbols_processed': []
     }
 
-    # Create async generators and get sessions from them
-    trading_db_generator = get_db()
-    nsedata_db_generator = get_nsedata_db()
+    trading_db = None
+    nsedata_db = None
 
     try:
+        # Create async generators and get sessions from them
+        trading_db_generator = get_db()
+        nsedata_db_generator = get_nsedata_db()
+
         # Get sessions from the async generators
         trading_db = await trading_db_generator.__anext__()
         nsedata_db = await nsedata_db_generator.__anext__()
@@ -363,11 +740,15 @@ async def daily_signal_check():
                     # Extract and validate symbol name
                     if isinstance(symbol_config, dict):
                         symbol = symbol_config.get('symbol')
+                        allocation_pct = symbol_config.get('allocation_percentage', 100.0)
                         if not symbol:
                             logger.warning(f"Symbol config missing 'symbol' key: {symbol_config}")
                             continue
                     elif isinstance(symbol_config, str):
                         symbol = symbol_config
+                        allocation_pct = 100.0
+                        # Convert string to dict format for consistency
+                        symbol_config = {'symbol': symbol, 'allocation_percentage': allocation_pct, 'config': {}}
                     else:
                         logger.warning(f"Invalid symbol config type: {type(symbol_config)}")
                         continue
@@ -387,106 +768,114 @@ async def daily_signal_check():
 
                         # Check last investment date to ensure minimum gap
                         last_trade_query = text("""
-                            SELECT MAX(timestamp) FROM sip_actual_trades 
-                            WHERE portfolio_id = :portfolio_id AND symbol = :symbol
-                        """)
+                                            SELECT MAX(timestamp) FROM sip_actual_trades 
+                                            WHERE portfolio_id = :portfolio_id AND symbol = :symbol
+                                        """)
 
                         last_trade_result = await trading_db.execute(
                             last_trade_query, {'portfolio_id': portfolio_id, 'symbol': symbol}
                         )
                         last_trade_date = last_trade_result.scalar()
 
+                        # SOLUTION 1: Merge symbol config with fallback config
+                        merged_config = merge_symbol_config_with_fallback(symbol_config, config_dict)
+
                         # Enforce minimum gap
+                        min_gap_days = merged_config.get('min_investment_gap_days', 5)
                         if last_trade_date:
                             days_since_last = (current_date - last_trade_date.date()).days
-                            if days_since_last < config.min_investment_gap_days:
+                            if days_since_last < min_gap_days:
                                 logger.info(
-                                    f"Skipping {symbol} - only {days_since_last} days since last investment "
-                                    f"(minimum: {config.min_investment_gap_days})"
+                                    f"⏭️ Skipping {symbol}: minimum gap not met "
+                                    f"({days_since_last}/{min_gap_days} days)"
                                 )
                                 continue
 
-                        # Generate signals with proper error handling
+                        # SOLUTION 2: Use enhanced signal generation with monthly limits (same as backtest)
                         try:
-                            # Fetch data with reasonable date range
-                            end_date = datetime.now().strftime('%Y-%m-%d')
-                            start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
-
-                            # Add timeout for data fetching
-                            data = await asyncio.wait_for(
-                                strategy.fetch_data_from_db_async(symbol, start_date, end_date),
-                                timeout=30.0
+                            signals = await get_investment_signals_with_monthly_limits(
+                                symbol=symbol,
+                                config_dict=merged_config,
+                                strategy=strategy,
+                                nsedata_db=nsedata_db,
+                                trading_db=trading_db,
+                                portfolio_id=portfolio_id
                             )
-
-                            if data.empty:
-                                logger.warning(
-                                    f"No data available for {symbol} in date range {start_date} to {end_date}")
-                                continue
-
-                            # Validate data quality
-                            if len(data) < 50:  # Minimum data points needed
-                                logger.warning(f"Insufficient data for {symbol}: only {len(data)} records")
-                                continue
-
-                            # Generate signals with timeout
-                            signals = await asyncio.wait_for(
-                                asyncio.to_thread(strategy.get_next_investment_signals, data, config),
-                                timeout=15.0
-                            )
-
-                            # Validate signal response
-                            if not isinstance(signals, dict):
-                                logger.error(f"Invalid signal response type for {symbol}: {type(signals)}")
-                                continue
-
-                            if 'signal' not in signals:
-                                logger.error(f"Signal response missing 'signal' key for {symbol}: {signals}")
-                                continue
-
-                            # Save signal if valid
-                            signal_type = signals.get('signal')
-                            if signal_type and signal_type not in ['NO_DATA', 'ERROR', None]:
-                                await save_signal_with_gtt_order(portfolio_id, symbol, signals, trading_db,
-                                                                 config)
-                                portfolio_signals_generated += 1
-                                metrics['signals_generated'] += 1
-
-                                # Log success with details
-                                signal_processing_time = (datetime.now() - symbol_start_time).total_seconds()
-                                logger.info(
-                                    f"✅ Generated signal for {symbol} in {signal_processing_time:.2f}s\n"
-                                    f"   Signal: {signal_type}\n"
-                                    f"   Amount: {signals.get('recommended_amount', 'N/A')}\n"
-                                    f"   Confidence: {signals.get('confidence', 'N/A')}"
-                                )
-                            else:
-                                logger.info(f"No actionable signal for {symbol}: {signal_type}")
-
-                        except asyncio.TimeoutError:
-                            logger.error(f"Timeout processing {symbol} - operation took too long")
-                            metrics['errors_encountered'] += 1
                         except Exception as signal_error:
-                            logger.error(f"Error generating signal for {symbol}: {signal_error}")
+                            logger.error(f"Error generating signals for {symbol}: {signal_error}")
+                            signals = {
+                                "signal": "ERROR",
+                                "confidence": 0,
+                                "recommended_amount": 0,
+                                "current_price": 0,
+                                "message": f"Signal generation failed: {str(signal_error)}"
+                            }
+
+                        # Validate signals response
+                        if not isinstance(signals, dict):
+                            logger.error(f"Invalid signals response for {symbol}: {type(signals)}")
+                            continue
+
+                        # Add metadata to signals
+                        signals.update({
+                            'symbol': symbol,
+                            'allocation_percentage': allocation_pct,
+                            'portfolio_id': portfolio_id,
+                            'config_used': 'merged' if merged_config != config_dict else 'fallback'
+                        })
+
+                        # Adjust recommended amount based on allocation percentage
+                        if 'recommended_amount' in signals and allocation_pct != 100.0:
+                            base_amount = signals['recommended_amount']
+                            allocated_amount = (base_amount * allocation_pct) / 100.0
+                            signals['allocated_amount'] = allocated_amount
+                            signals['base_amount'] = base_amount
+                            signals['recommended_amount'] = allocated_amount
+
+                        portfolio_signals_generated += 1
+
+                        logger.info(
+                            f"✅ Generated signals for {symbol}: {signals.get('signal', 'UNKNOWN')} "
+                            f"(confidence: {signals.get('confidence', 0):.2f}, "
+                            f"amount: ₹{signals.get('recommended_amount', 0):,.2f})"
+                        )
+
+                        # SOLUTION 3: GTT order integration
+                        try:
+                            if signals.get('signal') not in ['NO_DATA', 'ERROR']:
+                                save_result = await save_signal_with_gtt_order(
+                                    portfolio_id, symbol, signals, trading_db, merged_config
+                                )
+
+                                if save_result.get('status') == 'success':
+                                    logger.info(f"✅ Signal and REAL GTT order saved successfully for {symbol}")
+                                    metrics['signals_generated'] += 1
+                                elif save_result.get('status') in ['partial_success', 'signal_only']:
+                                    logger.info(
+                                        f"⚠️ Signal saved (GTT partial/none) for {symbol}: {save_result.get('message')}")
+                                    metrics['signals_generated'] += 1
+                                else:
+                                    logger.error(f"❌ Failed to save signal for {symbol}: {save_result.get('message')}")
+                                    metrics['errors_encountered'] += 1
+                            else:
+                                logger.info(f"ℹ️ No actionable signal for {symbol}: {signals.get('signal')}")
+
+                        except Exception as save_error:
+                            logger.error(f"Error saving signal for {symbol}: {save_error}")
                             metrics['errors_encountered'] += 1
 
-                    except Exception as symbol_error:
-                        logger.error(f"Error processing symbol {symbol}: {symbol_error}")
+                    except asyncio.TimeoutError:
+                        logger.error(f"Timeout processing {symbol}")
                         metrics['errors_encountered'] += 1
-
-                # Log portfolio completion
-                portfolio_processing_time = (datetime.now() - portfolio_start_time).total_seconds()
-                metrics['portfolios_processed'] += 1
-
-                logger.info(
-                    f"📈 Completed portfolio {portfolio_id} in {portfolio_processing_time:.2f}s\n"
-                    f"   User: {user_id}\n"
-                    f"   Signals generated: {portfolio_signals_generated}\n"
-                    f"   Total invested: {total_invested}"
-                )
-
-            except Exception as portfolio_error:
-                logger.error(f"Error processing portfolio {portfolio_id}: {portfolio_error}")
+                        continue
+            except Exception as symbol_error:
+                logger.error(f"Error processing {symbol}: {symbol_error}")
                 metrics['errors_encountered'] += 1
+                continue
+
+            # Log symbol processing time
+            symbol_processing_time = (datetime.now() - symbol_start_time).total_seconds()
+            logger.debug(f"⏱️ Processed {symbol} in {symbol_processing_time:.2f}s")
 
     except Exception as e:
         logger.error(f"Critical error in daily signal check: {e}")
@@ -494,26 +883,14 @@ async def daily_signal_check():
         metrics['errors_encountered'] += 1
 
     finally:
-        # Proper cleanup of database sessions
         try:
-            await trading_db.close()
-        except:
-            pass
-        try:
-            await nsedata_db.close()
-        except:
-            pass
+            if trading_db:
+                await trading_db_generator.aclose()
+            if nsedata_db:
+                await nsedata_db_generator.aclose()
+        except Exception as cleanup_error:
+            logger.debug(f"Session cleanup not completed: {cleanup_error}")
 
-        # Clean up generators
-        try:
-            await trading_db_generator.aclose()
-        except:
-            pass
-        try:
-            await nsedata_db_generator.aclose()
-        except:
-            pass
-        
         # Calculate and log final metrics
         job_end_time = datetime.now()
         total_processing_time = (job_end_time - job_start_time).total_seconds()
@@ -598,68 +975,49 @@ def calculate_next_investment_date(current_date: datetime.date, config: SIPConfi
     return next_investment
 
 
-async def save_signal_with_gtt_order(portfolio_id: str, symbol: str, signals: dict,
-                                     trading_db: AsyncSession, config: SIPConfig):
-    """Save signal with GTT order - enhanced with better error handling"""
+async def save_signal_to_database_with_real_gtt(
+        signal_id: str,
+        portfolio_id: str,
+        symbol: str,
+        signals: Dict,
+        config: Dict,
+        trading_db: AsyncSession,
+        gtt_order_id: Optional[str] = None
+) -> Dict:
+    """Save signal record to database with GTT order linking"""
     try:
-        signal_id = str(uuid.uuid4())
-        current_price = signals.get('current_price', 0)
-
-        # Validate required signal data
-        required_fields = ['signal', 'recommended_amount']
-        missing_fields = [field for field in required_fields if field not in signals]
-
-        if missing_fields:
-            raise ValueError(f"Missing required signal fields: {missing_fields}")
-
-        # Calculate GTT trigger price with validation
-        gtt_trigger_price = current_price * 0.998  # 0.2% below current price
-        if gtt_trigger_price <= 0:
-            raise ValueError(f"Invalid GTT trigger price: {gtt_trigger_price}")
-
-        # Calculate signal strength
-        confidence = signals.get('confidence', 1.0)
-        signal_strength = min(max(confidence * 100, 0), 100)  # Clamp between 0-100
-
-        # Prepare signal data for JSON storage with proper serialization
-        try:
-            # Create a clean copy of signals for serialization
-            serializable_signals = {}
-            for key, value in signals.items():
-                try:
-                    # Convert numpy types and handle special cases
-                    if hasattr(value, 'item'):  # numpy scalar
-                        serializable_signals[key] = value.item()
-                    elif isinstance(value, (int, float, str, bool, type(None))):
-                        serializable_signals[key] = value
-                    elif isinstance(value, (datetime, date)):
-                        serializable_signals[key] = value.isoformat()
-                    else:
-                        serializable_signals[key] = str(value)
-                except Exception:
+        # Prepare serializable signal data
+        serializable_signals = {}
+        for key, value in signals.items():
+            try:
+                if isinstance(value, (datetime, date)):
+                    serializable_signals[key] = value.isoformat()
+                elif hasattr(value, 'item'):  # numpy scalar
+                    serializable_signals[key] = value.item()
+                elif isinstance(value, (int, float, str, bool, type(None))):
+                    serializable_signals[key] = value
+                else:
                     serializable_signals[key] = str(value)
+            except Exception:
+                serializable_signals[key] = str(value)
 
-            signal_data_json = json.dumps(serializable_signals)
+        signal_data_json = json.dumps(serializable_signals)
 
-        except Exception as json_error:
-            logger.error(f"JSON serialization error for signals: {json_error}")
-            # Fallback to basic signal data
-            signal_data_json = json.dumps({
-                "signal": signals.get('signal', 'UNKNOWN'),
-                "confidence": float(signals.get('confidence', 0)),
-                "message": f"Signal data serialization failed: {str(json_error)}"
-            })
+        # Calculate GTT trigger price
+        current_price = signals.get('current_price', 0)
+        gtt_trigger_price = current_price * 0.994 if current_price > 0 else 0  # 0.2% below current price
 
-        # Insert signal record
         insert_signal = text("""
             INSERT INTO sip_signals 
             (signal_id, portfolio_id, symbol, signal_type, recommended_amount, 
              multiplier, current_price, drawdown_percent, signal_strength, 
-             gtt_trigger_price, signal_data, created_at, expires_at)
+             gtt_trigger_price, signal_data, gtt_order_id, gtt_status,
+             created_at, expires_at)
             VALUES (:signal_id, :portfolio_id, :symbol, :signal_type, 
                     :recommended_amount, :multiplier, :current_price, 
                     :drawdown_percent, :signal_strength, :gtt_trigger_price,
-                    :signal_data, :created_at, :expires_at)
+                    :signal_data, :gtt_order_id, :gtt_status,
+                    :created_at, :expires_at)
         """)
 
         await trading_db.execute(insert_signal, {
@@ -667,31 +1025,272 @@ async def save_signal_with_gtt_order(portfolio_id: str, symbol: str, signals: di
             'portfolio_id': portfolio_id,
             'symbol': symbol,
             'signal_type': signals.get('signal', 'NORMAL'),
-            'recommended_amount': float(signals.get('recommended_amount', config.fixed_investment)),
+            'recommended_amount': float(signals.get('recommended_amount', config.get('fixed_investment', 5000))),
             'multiplier': float(signals.get('confidence', 1.0)),
             'current_price': float(current_price),
             'drawdown_percent': float(signals.get('drawdown_100', 0)),
-            'signal_strength': float(signal_strength),
+            'signal_strength': min(max(float(signals.get('confidence', 1.0)) * 100, 0), 100),
             'gtt_trigger_price': float(gtt_trigger_price),
             'signal_data': signal_data_json,
+            'gtt_order_id': gtt_order_id,
+            'gtt_status': 'ACTIVE' if gtt_order_id else 'NONE',
             'created_at': datetime.now(),
             'expires_at': datetime.now() + timedelta(days=7)
         })
 
         await trading_db.commit()
 
-        logger.info(
-            f"✅ Signal saved successfully for portfolio {portfolio_id}, symbol {symbol}\n"
-            f"   Signal ID: {signal_id}\n"
-            f"   Signal type: {signals.get('signal')}\n"
-            f"   Amount: ₹{signals.get('recommended_amount', 0):,.2f}\n"
-            f"   GTT trigger: ₹{gtt_trigger_price:.2f}"
-        )
+        return {"status": "success", "signal_id": signal_id}
 
     except Exception as e:
-        logger.error(f"Error saving signal with GTT order: {e}")
+        logger.error(f"Error saving signal to database: {e}")
         await trading_db.rollback()
         raise
+
+
+async def create_gtt_trade_record(
+        portfolio_id: str,
+        symbol: str,
+        gtt_order_id: str,
+        trigger_price: float,
+        quantity: int,
+        amount: float,
+        trading_db: AsyncSession
+) -> str:
+    """
+    Create trade record for GTT order placement
+    This ensures GTT orders count towards minimum gap tracking
+    """
+    try:
+        # Generate trade ID
+        trade_id = f"gtt_{portfolio_id}_{symbol}_{int(datetime.now().timestamp())}"
+
+        # Insert trade record with GTT-specific details
+        insert_trade = text("""
+            INSERT INTO sip_actual_trades 
+            (trade_id, portfolio_id, symbol, timestamp, price, units, amount, 
+             trade_type, execution_status, gtt_order_id)
+            VALUES (:trade_id, :portfolio_id, :symbol, :timestamp, :price, :units, :amount, 
+                    :trade_type, :execution_status, :gtt_order_id)
+        """)
+
+        await trading_db.execute(insert_trade, {
+            'trade_id': trade_id,
+            'portfolio_id': portfolio_id,
+            'symbol': symbol,
+            'timestamp': datetime.now(),
+            'price': trigger_price,
+            'units': quantity,
+            'amount': amount,
+            'trade_type': 'GTT_PLACED',  # Distinguish from actual executions
+            'execution_status': 'GTT_PENDING',  # Will be updated when GTT triggers
+            'gtt_order_id': gtt_order_id
+        })
+
+        logger.info(f"✅ Created trade record {trade_id} for GTT order {gtt_order_id}")
+        return trade_id
+
+    except Exception as e:
+        logger.error(f"Error creating GTT trade record: {e}")
+        raise
+
+
+async def update_portfolio_after_gtt_placement(
+        portfolio_id: str,
+        amount: float,
+        units: int,
+        config: dict,
+        trading_db: AsyncSession
+):
+    """
+    Update portfolio totals after GTT placement
+    This ensures portfolio tracking is consistent
+    """
+    try:
+        # Calculate next investment date
+        current_date = datetime.now().date()
+        next_investment_date = calculate_next_investment_date(current_date, config)
+
+        # Update portfolio with GTT investment
+        update_query = text("""
+            UPDATE sip_portfolios 
+            SET total_invested = total_invested + :amount,
+                current_units = current_units + :units,
+                next_investment_date = :next_date,
+                updated_at = :now
+            WHERE portfolio_id = :portfolio_id
+        """)
+
+        await trading_db.execute(update_query, {
+            'amount': amount,
+            'units': units,
+            'next_date': next_investment_date,
+            'now': datetime.now(),
+            'portfolio_id': portfolio_id
+        })
+
+        logger.info(f"✅ Updated portfolio {portfolio_id}: +₹{amount:,.2f}, +{units} units")
+
+    except Exception as e:
+        logger.error(f"Error updating portfolio after GTT placement: {e}")
+        raise
+
+async def save_signal_with_gtt_order(portfolio_id: str, symbol: str, signals: dict,
+                                     trading_db: AsyncSession, config: dict):
+    """
+    REAL GTT Integration using OrderManager.place_gtt_order
+    FIXED: No circular imports - creates OrderManager instance locally
+    1. Saves signal to database
+    2. Places actual GTT order through broker API integration
+    3. Links signal with GTT order ID
+    4. Handles errors gracefully
+    """
+    signal_id = str(uuid.uuid4())
+    gtt_order_id = None
+
+    try:
+        current_price = signals.get('current_price', 0)
+        recommended_amount = signals.get('recommended_amount', 0)
+
+        # Validate signal before processing
+        if signals.get('signal') in ['NO_DATA', 'ERROR', 'MONTHLY_LIMIT_REACHED']:
+            logger.info(f"Saving signal without GTT order for {symbol}: {signals.get('signal')}")
+            await save_signal_to_database_with_real_gtt(
+                signal_id, portfolio_id, symbol, signals, config, trading_db, None
+            )
+            return {
+                "status": "signal_only",
+                "signal_id": signal_id,
+                "message": f"Signal saved: {signals.get('signal')}"
+            }
+
+        # Validate price and amount for GTT order
+        if recommended_amount <= 0 or current_price <= 0:
+            logger.warning(f"Invalid amount or price for {symbol}: amount={recommended_amount}, price={current_price}")
+            await save_signal_to_database_with_real_gtt(
+                signal_id, portfolio_id, symbol, signals, config, trading_db, None
+            )
+            return {
+                "status": "signal_only",
+                "signal_id": signal_id,
+                "message": "Signal saved without GTT (invalid price/amount)"
+            }
+
+        # Calculate GTT parameters
+        gtt_trigger_price = current_price * 0.994  # 0.6% below current price
+        limit_price = current_price * 0.992  # 0.8% below current price
+        quantity = max(1, int(recommended_amount / current_price))  # Ensure minimum 1 quantity
+
+        # Get user_id from portfolio
+        user_query = text("SELECT user_id FROM sip_portfolios WHERE portfolio_id = :portfolio_id")
+        user_result = await trading_db.execute(user_query, {'portfolio_id': portfolio_id})
+        user_row = user_result.fetchone()
+        user_id = user_row[0] if user_row else None
+
+        if not user_id:
+            logger.error(f"Could not find user_id for portfolio {portfolio_id}")
+            await save_signal_to_database_with_real_gtt(
+                signal_id, portfolio_id, symbol, signals, config, trading_db, None
+            )
+            return {
+                "status": "signal_only",
+                "signal_id": signal_id,
+                "message": "Signal saved without GTT (user not found)"
+            }
+
+        # Place GTT order
+        logger.info(
+            f"Placing GTT order for {symbol} : trigger=₹{gtt_trigger_price:.2f}, qty={quantity}")
+
+        gtt_result = await place_gtt_order_via_existing_api(
+            user_id=user_id,
+            symbol=symbol,
+            quantity=quantity,
+            trigger_price=gtt_trigger_price,
+            limit_price=limit_price,
+            current_price=current_price,
+            trading_db=trading_db
+        )
+
+        # Save signal with GTT order ID (if successful)
+        if gtt_result.get('status') == 'success':
+            gtt_order_id = gtt_result.get('gtt_id')
+
+        await save_signal_to_database_with_real_gtt(
+            signal_id, portfolio_id, symbol, signals, config, trading_db, gtt_order_id
+        )
+
+        if gtt_order_id:
+            await create_gtt_trade_record(
+                portfolio_id=portfolio_id,
+                symbol=symbol,
+                gtt_order_id=gtt_order_id,
+                trigger_price=gtt_trigger_price,
+                quantity=quantity,
+                amount=recommended_amount,
+                trading_db=trading_db
+            )
+
+            # SOLUTION: Update portfolio totals
+            await update_portfolio_after_gtt_placement(
+                portfolio_id=portfolio_id,
+                amount=recommended_amount,
+                units=quantity,
+                config=config,
+                trading_db=trading_db
+            )
+
+            logger.info(
+                f"✅ REAL GTT order flow successful for {symbol}:\n"
+                f"   Signal ID: {signal_id}\n"
+                f"   GTT Order ID: {gtt_order_id}\n"
+                f"   Quantity: {quantity} units\n"
+                f"   Trigger Price: ₹{gtt_trigger_price:.2f}\n"
+                f"   Amount: ₹{recommended_amount:,.2f}\n"
+                f"   Placed via: OrderManager (no circular import)"
+            )
+
+            return {
+                "status": "success",
+                "signal_id": signal_id,
+                "gtt_order_id": gtt_order_id,
+                "trade_created": True,
+                "message": "Signal saved, GTT order placed, and trade recorded for tracking"
+            }
+        else:
+            logger.warning(f"GTT order failed for {symbol}, signal saved without GTT")
+            return {
+                "status": "partial_success",
+                "signal_id": signal_id,
+                "gtt_order_id": None,
+                "trade_created": False,
+                "message": f"Signal saved but GTT order failed: {gtt_result.get('message', 'Unknown error')}"
+            }
+
+    except Exception as e:
+        logger.error(f"Error in GTT order flow for {symbol}: {e}")
+        try:
+            await trading_db.rollback()
+            # Try to save signal only as fallback
+            await save_signal_to_database_with_real_gtt(
+                signal_id, portfolio_id, symbol, signals, config, trading_db, None
+            )
+            return {
+                "status": "error_recovered",
+                "signal_id": signal_id,
+                "gtt_order_id": None,
+                "trade_created": False,
+                "message": f"Error occurred but signal saved: {str(e)}"
+            }
+        except Exception as fallback_error:
+            logger.error(f"Complete failure for {symbol}: {fallback_error}")
+            return {
+                "status": "error",
+                "signal_id": None,
+                "gtt_order_id": None,
+                "trade_created": False,
+                "message": f"Complete failure: {str(e)}"
+            }
 
 
 async def update_next_investment_date(portfolio_id: str, next_date: datetime.date,
@@ -2755,6 +3354,7 @@ async def get_symbol_signals(
 async def execute_sip_investment(
         portfolio_id: str,
         amount: Optional[float] = None,
+        place_gtt_orders: bool = True,
         user_id: str = Depends(get_current_user),
         trading_db: AsyncSession = Depends(get_db)
 ):
@@ -3826,44 +4426,6 @@ def _calculate_comparison_metrics(strategy_result: Dict, benchmark_result: Dict)
             'cagr_outperformance_percent': 0.0,
             'recommendation': 'Comparison not available'
         }
-
-def safe_json_parse(data, field_name: str = "data", default=None):
-    """Safely parse JSON data that might already be parsed"""
-    try:
-        if data is None:
-            return default or ([] if field_name in ['symbols', 'list'] else {})
-        elif isinstance(data, str):
-            if data.strip() == "":
-                return default or ([] if field_name in ['symbols', 'list'] else {})
-            return json.loads(data)
-        elif isinstance(data, (list, dict)):
-            return data  # Already parsed
-        else:
-            logger.warning(f"Unexpected {field_name} type: {type(data)}")
-            return default or ([] if field_name in ['symbols', 'list'] else {})
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error for {field_name}: {e}")
-        return default or ([] if field_name in ['symbols', 'list'] else {})
-    except Exception as e:
-        logger.error(f"Unexpected error parsing {field_name}: {e}")
-        return default or ([] if field_name in ['symbols', 'list'] else {})
-
-
-@sip_router.get("/health-check")
-async def sip_strategy_health_check():
-    """Health check endpoint for SIP strategy system"""
-    return {
-        "status": "healthy",
-        "version": "2.0.0-enhanced",
-        "features": {
-            "monthly_investment_limits": "active",
-            "price_reduction_threshold": "active",
-            "enhanced_tracking": "active",
-            "batch_processing": "active",
-            "config_optimization": "active"
-        },
-        "timestamp": datetime.now().isoformat()
-    }
 
 
 @sip_router.get("/benchmark/test/{symbol}")
