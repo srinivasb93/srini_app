@@ -2681,9 +2681,15 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
 
         # Check for drawdown opportunities
         drawdown_100 = row.get('Drawdown_100', 0)
+        drawdown_50 = row.get('Drawdown_50', 0)
+        drawdown_20 = row.get('Drawdown_20', 0)
         is_drawdown_opportunity = (
                 drawdown_100 <= config.drawdown_threshold_1 or
-                drawdown_100 <= config.drawdown_threshold_2
+                drawdown_100 <= config.drawdown_threshold_2 or
+                drawdown_50 <= config.drawdown_threshold_1 or
+                drawdown_50 <= config.drawdown_threshold_2 or
+                drawdown_20 <= config.drawdown_threshold_1 or
+                drawdown_20 <= config.drawdown_threshold_2
         )
 
         if is_sip_date:
@@ -2692,41 +2698,6 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
             return True, f"drawdown_opportunity_{abs(drawdown_100):.1f}%"
         else:
             return False, "no_signal"
-
-    # def _calculate_investment_amount(self, current_price: float, data: pd.DataFrame,
-    #                                  config, i: int) -> float:
-    #     """Calculate investment amount based on market conditions"""
-    #     try:
-    #         base_amount = config.fixed_investment
-    #         row = data.iloc[i]
-    #         drawdown_100 = row.get('Drawdown_100', 0)
-    #
-    #         # Determine multiplier based on drawdown
-    #         if drawdown_100 <= config.drawdown_threshold_1:
-    #             multiplier = config.investment_multiplier_3  # Highest multiplier for deepest drawdown
-    #         elif drawdown_100 <= config.drawdown_threshold_2:
-    #             multiplier = config.investment_multiplier_2  # Medium multiplier
-    #         else:
-    #             multiplier = config.investment_multiplier_1  # Base multiplier
-    #
-    #         investment_amount = base_amount * multiplier
-    #
-    #         # Apply safety caps to prevent excessive investments
-    #         max_allowed = base_amount * 5  # Maximum 5x investment
-    #         if investment_amount > max_allowed:
-    #             investment_amount = max_allowed
-    #             logger.warning(f"Capping investment at maximum allowed: {max_allowed}")
-    #
-    #         # Ensure minimum investment
-    #         min_allowed = base_amount * 0.5  # Minimum 50% of base amount
-    #         if investment_amount < min_allowed:
-    #             investment_amount = min_allowed
-    #
-    #         return round(investment_amount, 2)
-    #
-    #     except Exception as e:
-    #         logger.error(f"Error determining investment amount: {e}")
-    #         return config.fixed_investment
 
     def _calculate_enhanced_results(self, symbol: str, total_investment: float,
                                     final_portfolio_value: float, total_units: float,

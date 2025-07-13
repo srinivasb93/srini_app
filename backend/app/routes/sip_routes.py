@@ -7,13 +7,14 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text, desc
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Union, Literal
 from datetime import datetime, timedelta, date
 from pydantic import BaseModel, validator
 import json
 import logging
 import uuid
 import numpy as np
+from enum import Enum
 import pandas as pd
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -64,9 +65,52 @@ def create_enhanced_scheduler():
 
     return scheduler
 
-
 # Create global scheduler instance
 scheduler = create_enhanced_scheduler()
+
+class SchedulerStatus(str, Enum):
+    RUNNING = "running"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+
+class JobTriggerType(str, Enum):
+    CRON = "cron"
+    INTERVAL = "interval"
+    DATE = "date"
+
+# Pydantic models for request/response
+class SchedulerConfigRequest(BaseModel):
+    job_id: str
+    trigger_type: JobTriggerType
+    # For CRON triggers
+    cron_expression: Optional[str] = None
+    # For interval triggers
+    interval_seconds: Optional[int] = None
+    interval_minutes: Optional[int] = None
+    interval_hours: Optional[int] = None
+    # For date triggers
+    run_date: Optional[datetime] = None
+    # Common job settings
+    timezone: str = "Asia/Kolkata"
+    max_instances: int = 1
+    coalesce: bool = True
+    misfire_grace_time: int = 300
+    replace_existing: bool = True
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    next_run_time: Optional[datetime]
+    trigger_info: Dict[str, Any]
+    max_instances: int
+    pending_instances: int
+
+class SchedulerStatusResponse(BaseModel):
+    scheduler_running: bool
+    total_jobs: int
+    active_jobs: List[JobStatusResponse]
+    timezone: str
+    uptime_seconds: float
 
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
@@ -927,6 +971,64 @@ async def daily_signal_check():
             logger.debug(f"Session cleanup not completed: {cleanup_error}")
 
 
+async def monitor_and_update_gtt_status():
+    """
+    Monitor GTT orders and update trade records when they execute
+    This should be called periodically to sync GTT status
+    """
+    try:
+        db_gen = get_db()
+        trading_db = await db_gen.__anext__()
+        # Get active GTT orders
+        active_gtt_query = text("""
+            SELECT t.trade_id, t.gtt_order_id, t.symbol, t.portfolio_id, g.status
+            FROM sip_actual_trades t
+            JOIN gtt_orders g ON t.gtt_order_id = g.gtt_order_id
+            WHERE t.execution_status = 'GTT_PENDING'
+            AND g.status IN ('ACTIVE', 'TRIGGERED', 'CANCELLED')
+        """)
+
+        result = await trading_db.execute(active_gtt_query)
+        gtt_trades = result.fetchall()
+
+        for trade_row in gtt_trades:
+            trade_id, gtt_order_id, symbol, portfolio_id, gtt_status = trade_row
+
+            # Update trade status based on GTT status
+            new_execution_status = {
+                'TRIGGERED': 'EXECUTED',
+                'CANCELLED': 'CANCELLED',
+                'ACTIVE': 'GTT_PENDING'
+            }.get(gtt_status, 'GTT_PENDING')
+
+            if new_execution_status != 'GTT_PENDING':
+                update_trade_query = text("""
+                    UPDATE sip_actual_trades 
+                    SET execution_status = :status, updated_at = :now
+                    WHERE trade_id = :trade_id
+                """)
+
+                await trading_db.execute(update_trade_query, {
+                    'status': new_execution_status,
+                    'trade_id': trade_id,
+                    'now': datetime.now()
+                })
+
+                logger.info(f"Updated trade {trade_id} status to {new_execution_status}")
+
+        await trading_db.commit()
+
+    except Exception as e:
+        logger.error(f"Error monitoring GTT status: {e}")
+        await trading_db.rollback()
+    finally:
+        try:
+            if trading_db:
+                await db_gen.aclose()
+        except Exception as cleanup_error:
+            logger.debug(f"Session cleanup not completed: {cleanup_error}")
+
+
 async def store_job_metrics(db_session: AsyncSession, job_name: str, metrics: dict):
     """Store job execution metrics for monitoring"""
     try:
@@ -1109,7 +1211,7 @@ async def update_portfolio_after_gtt_placement(
     try:
         # Calculate next investment date
         current_date = datetime.now().date()
-        next_investment_date = calculate_next_investment_date(current_date, config)
+        next_investment_date = calculate_next_investment_date(current_date, SIPConfig(**config))
 
         # Update portfolio with GTT investment
         update_query = text("""
@@ -1313,83 +1415,6 @@ async def update_next_investment_date(portfolio_id: str, next_date: datetime.dat
 
     except Exception as e:
         logger.error(f"Error updating next investment date: {e}")
-
-
-async def scheduler_health_check():
-    """Periodic health check for the scheduler"""
-    try:
-        logger.info("🔍 Scheduler health check running")
-
-        # Check database connectivity
-        from backend.app.database import db_manager
-        health_status = await db_manager.health_check()
-
-        unhealthy_databases = [db for db, status in health_status.items() if status.get('status') != 'healthy']
-
-        if unhealthy_databases:
-            logger.error(f"❌ Unhealthy databases detected: {unhealthy_databases}")
-        else:
-            logger.info("✅ All databases healthy")
-
-    except Exception as e:
-        logger.error(f"Scheduler health check failed: {e}")
-
-
-async def test_daily_signal_check():
-    """Test version of daily signal check for development"""
-    if os.getenv('ENVIRONMENT') == 'production':
-        return
-
-    logger.info("🧪 Running test signal check...")
-
-# Start the scheduler
-@sip_router.on_event("startup")
-async def start_enhanced_scheduler():
-    """Start the enhanced background scheduler with monitoring"""
-    try:
-        # Add the main daily job
-        scheduler.add_job(
-            daily_signal_check,
-            CronTrigger(minute='*/1', timezone=pytz.timezone('Asia/Kolkata')),
-            # CronTrigger(hour=8, minute=0, timezone=pytz.timezone('Asia/Kolkata')),
-            id='daily_signal_check',
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True
-        )
-
-        # Add a health check job every hour
-        scheduler.add_job(
-            scheduler_health_check,
-            CronTrigger(minute=0, timezone=pytz.timezone('Asia/Kolkata')),  # Every hour
-            id='scheduler_health_check',
-            replace_existing=True,
-            max_instances=1
-        )
-
-        # Add a test job for immediate testing (remove in production)
-        # if os.getenv('ENVIRONMENT') != 'production':
-        #     scheduler.add_job(
-        #         test_daily_signal_check,
-        #         CronTrigger(minute='*/5', timezone=pytz.timezone('Asia/Kolkata')),  # Every 5 minutes
-        #         id='test_signal_check',
-        #         replace_existing=True,
-        #         max_instances=1
-        #     )
-
-        scheduler.start()
-
-        logger.info(
-            f"✅ Enhanced background scheduler started\n"
-            f"   • Daily signal check: 8:00 AM IST\n"
-            f"   • Health check: Every hour\n"
-            f"   • Test mode: {'Enabled (every 5 min)' if os.getenv('ENVIRONMENT') != 'production' else 'Disabled'}"
-        )
-
-    except Exception as e:
-        logger.error(f"Failed to start scheduler: {e}")
-        raise
-
 
 # ============================================================================
 # HEALTH AND TESTING ENDPOINTS
@@ -1619,7 +1644,7 @@ async def run_sip_backtest(
 
         # Create benchmark calculator
         benchmark_calculator = BenchmarkSIPCalculator(
-            monthly_amount=5000,
+            monthly_amount=request.config.fixed_investment,
             investment_day=15
         )
 
@@ -4467,4 +4492,778 @@ async def test_benchmark_calculation(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# SCHEDULER STATUS AND CONTROL ENDPOINTS
+# ============================================================================
 
+@sip_router.get("/scheduler/status", response_model=Dict)
+async def get_scheduler_status():
+    """Get comprehensive scheduler status and job information"""
+    try:
+        # Calculate uptime if scheduler is running
+        uptime = 0
+        if scheduler.running:
+            # Approximation - would need to track start time for exact uptime
+            uptime = 3600  # Placeholder - implement proper uptime tracking
+
+        jobs_info = []
+        for job in scheduler.get_jobs():
+            # FIXED: Handle case when scheduler is not running
+            next_run_time = None
+            if scheduler.running and hasattr(job, 'next_run_time') and job.next_run_time:
+                next_run_time = job.next_run_time.isoformat()
+
+            job_info = {
+                "job_id": job.id,
+                "status": "running" if scheduler.running else "paused",
+                "next_run_time": next_run_time,
+                "trigger_info": {
+                    "trigger_type": type(job.trigger).__name__,
+                    "trigger_details": str(job.trigger)
+                },
+                "max_instances": job.max_instances,
+                "pending_instances": 0  # Simplified for now
+            }
+            jobs_info.append(job_info)
+
+        return {
+            "scheduler_running": scheduler.running,
+            "total_jobs": len(scheduler.get_jobs()),
+            "active_jobs": jobs_info,
+            "timezone": str(scheduler.timezone),
+            "uptime_seconds": uptime
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting scheduler status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get scheduler status: {str(e)}")
+
+
+@sip_router.post("/scheduler/start")
+async def start_scheduler():
+    """Start the scheduler if it's not running"""
+    try:
+        if not scheduler.running:
+            scheduler.start()
+            logger.info("✅ Scheduler started via API")
+            return {"status": "success", "message": "Scheduler started successfully"}
+        else:
+            return {"status": "info", "message": "Scheduler is already running"}
+
+    except Exception as e:
+        logger.error(f"Error starting scheduler: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start scheduler: {str(e)}")
+
+
+@sip_router.post("/scheduler/pause")
+async def pause_scheduler():
+    """Pause the scheduler (stops scheduling new jobs but keeps existing ones)"""
+    try:
+        if scheduler.running:
+            scheduler.pause()
+            logger.info("⏸️ Scheduler paused via API")
+            return {"status": "success", "message": "Scheduler paused successfully"}
+        else:
+            return {"status": "info", "message": "Scheduler is not running"}
+
+    except Exception as e:
+        logger.error(f"Error pausing scheduler: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to pause scheduler: {str(e)}")
+
+
+@sip_router.post("/scheduler/resume")
+async def resume_scheduler():
+    """Resume the scheduler if it's paused"""
+    try:
+        if scheduler.state == 2:  # STATE_PAUSED = 2
+            scheduler.resume()
+            logger.info("▶️ Scheduler resumed via API")
+            return {"status": "success", "message": "Scheduler resumed successfully"}
+        else:
+            return {"status": "info", "message": "Scheduler is not paused"}
+
+    except Exception as e:
+        logger.error(f"Error resuming scheduler: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to resume scheduler: {str(e)}")
+
+
+@sip_router.post("/scheduler/shutdown")
+async def shutdown_scheduler():
+    """Shutdown the scheduler completely"""
+    try:
+        if scheduler.running:
+            scheduler.shutdown(wait=True)
+            logger.info("🛑 Scheduler shutdown via API")
+            return {"status": "success", "message": "Scheduler shutdown successfully"}
+        else:
+            return {"status": "info", "message": "Scheduler is not running"}
+
+    except Exception as e:
+        logger.error(f"Error shutting down scheduler: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to shutdown scheduler: {str(e)}")
+
+
+# ============================================================================
+# JOB MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@sip_router.get("/scheduler/jobs")
+async def list_jobs():
+    """List all scheduled jobs with their details"""
+    try:
+        jobs = []
+        for job in scheduler.get_jobs():
+            # FIXED: Safe access to next_run_time
+            next_run_time = None
+            if scheduler.running and hasattr(job, 'next_run_time') and job.next_run_time:
+                next_run_time = job.next_run_time.isoformat()
+
+            job_detail = {
+                "job_id": job.id,
+                "function_name": job.func.__name__,
+                "next_run_time": next_run_time,
+                "trigger_type": type(job.trigger).__name__,
+                "trigger_info": str(job.trigger),
+                "max_instances": job.max_instances,
+                "coalesce": job.coalesce,
+                "misfire_grace_time": job.misfire_grace_time,
+                "scheduler_running": scheduler.running
+            }
+            jobs.append(job_detail)
+
+        return {
+            "total_jobs": len(jobs),
+            "jobs": jobs,
+            "scheduler_running": scheduler.running,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error listing jobs: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list jobs: {str(e)}")
+
+
+@sip_router.get("/scheduler/jobs/{job_id}")
+async def get_job_details(job_id: str):
+    """Get detailed information about a specific job"""
+    try:
+        job = scheduler.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+
+        # FIXED: Safe access to next_run_time
+        next_run_time = None
+        if scheduler.running and hasattr(job, 'next_run_time') and job.next_run_time:
+            next_run_time = job.next_run_time.isoformat()
+
+        return {
+            "job_id": job.id,
+            "function_name": job.func.__name__,
+            "next_run_time": next_run_time,
+            "trigger_type": type(job.trigger).__name__,
+            "trigger_info": str(job.trigger),
+            "max_instances": job.max_instances,
+            "coalesce": job.coalesce,
+            "misfire_grace_time": job.misfire_grace_time,
+            "scheduler_running": scheduler.running,
+            "scheduler_state": scheduler.state
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting job details: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get job details: {str(e)}")
+
+
+@sip_router.delete("/scheduler/jobs/{job_id}")
+async def remove_job(job_id: str):
+    """Remove a specific job from the scheduler"""
+    try:
+        job = scheduler.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+
+        scheduler.remove_job(job_id)
+        logger.info(f"🗑️ Job '{job_id}' removed via API")
+
+        return {
+            "status": "success",
+            "message": f"Job '{job_id}' removed successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error removing job: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to remove job: {str(e)}")
+
+
+@sip_router.post("/scheduler/jobs/{job_id}/run")
+async def run_job_now(job_id: str):
+    """Execute a job immediately (outside of its normal schedule)"""
+    try:
+        job = scheduler.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+
+        # FIXED: Different approach for running job immediately
+        if scheduler.running:
+            # If scheduler is running, modify next_run_time
+            job.modify(next_run_time=datetime.now())
+            logger.info(f"🚀 Job '{job_id}' scheduled to run immediately")
+            message = f"Job '{job_id}' scheduled to run immediately"
+        else:
+            # If scheduler is not running, execute the job function directly
+            logger.info(f"🚀 Executing job '{job_id}' directly (scheduler not running)")
+            asyncio.create_task(job.func())
+            message = f"Job '{job_id}' executed directly"
+
+        return {
+            "status": "success",
+            "message": message,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error running job immediately: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to run job immediately: {str(e)}")
+
+
+@sip_router.post("/scheduler/jobs/{job_id}/pause")
+async def pause_job(job_id: str):
+    """Pause a specific job"""
+    try:
+        job = scheduler.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+
+        scheduler.pause_job(job_id)
+        logger.info(f"⏸️ Job '{job_id}' paused via API")
+
+        return {
+            "status": "success",
+            "message": f"Job '{job_id}' paused successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error pausing job: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to pause job: {str(e)}")
+
+
+@sip_router.post("/scheduler/jobs/{job_id}/resume")
+async def resume_job(job_id: str):
+    """Resume a paused job"""
+    try:
+        job = scheduler.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+
+        scheduler.resume_job(job_id)
+        logger.info(f"▶️ Job '{job_id}' resumed via API")
+
+        return {
+            "status": "success",
+            "message": f"Job '{job_id}' resumed successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error resuming job: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to resume job: {str(e)}")
+
+
+# ============================================================================
+# JOB CONFIGURATION ENDPOINTS
+# ============================================================================
+
+@sip_router.put("/scheduler/jobs/{job_id}/configure")
+async def update_job_configuration(job_id: str, config: SchedulerConfigRequest):
+    """Update job configuration (trigger, timing, etc.)"""
+    try:
+        job = scheduler.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+
+        # Prepare new trigger based on type
+        trigger = None
+        timezone_obj = pytz.timezone(config.timezone)
+
+        if config.trigger_type == JobTriggerType.CRON:
+            if not config.cron_expression:
+                raise HTTPException(status_code=400, detail="cron_expression required for CRON trigger")
+
+            # Validate cron expression
+            try:
+                # Parse cron expression to validate it
+                import croniter
+                if not croniter.is_valid(config.cron_expression):
+                    raise ValueError("Invalid cron expression")
+
+                trigger = CronTrigger.from_crontab(config.cron_expression, timezone=timezone_obj)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid cron expression: {str(e)}")
+
+        elif config.trigger_type == JobTriggerType.INTERVAL:
+            from apscheduler.triggers.interval import IntervalTrigger
+
+            interval_kwargs = {}
+            if config.interval_seconds:
+                interval_kwargs['seconds'] = config.interval_seconds
+            if config.interval_minutes:
+                interval_kwargs['minutes'] = config.interval_minutes
+            if config.interval_hours:
+                interval_kwargs['hours'] = config.interval_hours
+
+            if not interval_kwargs:
+                raise HTTPException(status_code=400, detail="At least one interval parameter required")
+
+            trigger = IntervalTrigger(**interval_kwargs, timezone=timezone_obj)
+
+        elif config.trigger_type == JobTriggerType.DATE:
+            from apscheduler.triggers.date import DateTrigger
+
+            if not config.run_date:
+                raise HTTPException(status_code=400, detail="run_date required for DATE trigger")
+
+            trigger = DateTrigger(run_date=config.run_date, timezone=timezone_obj)
+
+        # Update the job
+        job.modify(
+            trigger=trigger,
+            max_instances=config.max_instances,
+            coalesce=config.coalesce,
+            misfire_grace_time=config.misfire_grace_time
+        )
+
+        logger.info(f"🔧 Job '{job_id}' configuration updated via API")
+
+        return {
+            "status": "success",
+            "message": f"Job '{job_id}' configuration updated successfully",
+            "new_config": {
+                "trigger_type": config.trigger_type,
+                "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None,
+                "max_instances": config.max_instances,
+                "coalesce": config.coalesce,
+                "misfire_grace_time": config.misfire_grace_time
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating job configuration: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update job configuration: {str(e)}")
+
+
+# ============================================================================
+# PREDEFINED JOB MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@sip_router.post("/scheduler/jobs/daily-signal-check/configure")
+async def configure_daily_signal_check(
+        trigger_type: str = "interval",  # "cron" or "interval"
+        cron_expression: Optional[str] = None,
+        interval_minutes: Optional[int] = 1,
+        timezone: str = "Asia/Kolkata",
+        max_instances: int = 1
+):
+    """Configure the daily signal check job with predefined settings"""
+    try:
+        # Validate inputs
+        if trigger_type not in ["cron", "interval"]:
+            raise HTTPException(status_code=400, detail="trigger_type must be 'cron' or 'interval'")
+
+        if trigger_type == "cron" and not cron_expression:
+            raise HTTPException(status_code=400, detail="cron_expression required for cron trigger")
+
+        if trigger_type == "interval" and not interval_minutes:
+            raise HTTPException(status_code=400, detail="interval_minutes required for interval trigger")
+
+        # Remove existing job if it exists
+        if scheduler.get_job('daily_signal_check'):
+            scheduler.remove_job('daily_signal_check')
+            logger.info("Removed existing daily_signal_check job")
+
+        timezone_obj = pytz.timezone(timezone)
+
+        # Create appropriate trigger
+        if trigger_type == "cron":
+            trigger = CronTrigger.from_crontab(cron_expression, timezone=timezone_obj)
+        else:  # interval
+            from apscheduler.triggers.interval import IntervalTrigger
+            trigger = IntervalTrigger(minutes=interval_minutes, timezone=timezone_obj)
+
+        # Add the job with new configuration
+        scheduler.add_job(
+            daily_signal_check,
+            trigger,
+            id='daily_signal_check',
+            name='Daily Signal Check',
+            replace_existing=True,
+            max_instances=max_instances,
+            coalesce=True
+        )
+
+        # FIXED: Safe access to job details
+        job = scheduler.get_job('daily_signal_check')
+        next_run_time = None
+
+        if scheduler.running and job and hasattr(job, 'next_run_time') and job.next_run_time:
+            next_run_time = job.next_run_time.isoformat()
+        elif not scheduler.running:
+            next_run_time = "Will be calculated when scheduler starts"
+
+        logger.info(f"🔧 Daily signal check job reconfigured: {trigger}")
+
+        return {
+            "status": "success",
+            "message": "Daily signal check job configured successfully",
+            "configuration": {
+                "job_id": "daily_signal_check",
+                "trigger_type": trigger_type,
+                "trigger_details": str(trigger),
+                "next_run_time": next_run_time,
+                "max_instances": max_instances,
+                "timezone": timezone,
+                "scheduler_running": scheduler.running
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error configuring daily signal check: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to configure daily signal check: {str(e)}")
+
+
+@sip_router.get("/scheduler/presets")
+async def get_scheduler_presets():
+    """Get predefined scheduler configurations for common use cases"""
+    return {
+        "presets": {
+            "development": {
+                "name": "Development Mode",
+                "description": "Frequent execution for testing",
+                "daily_signal_check": {
+                    "trigger_type": "interval",
+                    "interval_minutes": 1,
+                    "timezone": "Asia/Kolkata"
+                }
+            },
+            "production_conservative": {
+                "name": "Production Conservative",
+                "description": "Once daily at market open",
+                "daily_signal_check": {
+                    "trigger_type": "cron",
+                    "cron_expression": "0 9 * * 1-5",  # 9 AM weekdays
+                    "timezone": "Asia/Kolkata"
+                }
+            },
+            "production_aggressive": {
+                "name": "Production Aggressive",
+                "description": "Multiple times during market hours",
+                "daily_signal_check": {
+                    "trigger_type": "cron",
+                    "cron_expression": "0 9,12,15 * * 1-5",  # 9 AM, 12 PM, 3 PM weekdays
+                    "timezone": "Asia/Kolkata"
+                }
+            },
+            "testing": {
+                "name": "Testing Mode",
+                "description": "Every 5 minutes for intensive testing",
+                "daily_signal_check": {
+                    "trigger_type": "interval",
+                    "interval_minutes": 5,
+                    "timezone": "Asia/Kolkata"
+                }
+            }
+        },
+        "common_cron_expressions": {
+            "every_minute": "* * * * *",
+            "every_5_minutes": "*/5 * * * *",
+            "every_hour": "0 * * * *",
+            "market_open": "0 9 * * 1-5",
+            "market_close": "30 15 * * 1-5",
+            "twice_daily": "0 9,15 * * 1-5",
+            "weekly_monday": "0 9 * * 1",
+            "end_of_month": "0 9 28-31 * *"
+        }
+    }
+
+
+@sip_router.post("/scheduler/apply-preset/{preset_name}")
+async def apply_scheduler_preset(preset_name: str):
+    """Apply a predefined scheduler configuration"""
+    try:
+        presets = await get_scheduler_presets()
+
+        if preset_name not in presets["presets"]:
+            raise HTTPException(status_code=404, detail=f"Preset '{preset_name}' not found")
+
+        preset_config = presets["presets"][preset_name]["daily_signal_check"]
+
+        # Configure the daily signal check job
+        await configure_daily_signal_check(
+            trigger_type=JobTriggerType(preset_config["trigger_type"]),
+            cron_expression=preset_config.get("cron_expression"),
+            interval_minutes=preset_config.get("interval_minutes"),
+            timezone=preset_config["timezone"]
+        )
+
+        logger.info(f"📋 Applied scheduler preset: {preset_name}")
+
+        return {
+            "status": "success",
+            "message": f"Scheduler preset '{preset_name}' applied successfully",
+            "preset_details": presets["presets"][preset_name]
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error applying scheduler preset: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to apply scheduler preset: {str(e)}")
+
+
+# ============================================================================
+# SCHEDULER MONITORING AND METRICS
+# ============================================================================
+
+@sip_router.get("/scheduler/metrics")
+async def get_scheduler_metrics():
+    """Get scheduler performance metrics and statistics"""
+    try:
+        jobs = scheduler.get_jobs()
+
+        metrics = {
+            "scheduler_status": "running" if scheduler.running else "stopped",
+            "total_jobs": len(jobs),
+            "job_breakdown": {},
+            "next_executions": [],
+            "system_info": {
+                "timezone": str(scheduler.timezone),
+                "executor_count": len(scheduler._executors),
+                "jobstore_count": len(scheduler._jobstores)
+            }
+        }
+
+        # Job breakdown by type
+        for job in jobs:
+            func_name = job.func.__name__
+            if func_name not in metrics["job_breakdown"]:
+                metrics["job_breakdown"][func_name] = 0
+            metrics["job_breakdown"][func_name] += 1
+
+        # Next 10 executions
+        next_runs = []
+        for job in jobs:
+            if job.next_run_time:
+                next_runs.append({
+                    "job_id": job.id,
+                    "function": job.func.__name__,
+                    "next_run": job.next_run_time.isoformat(),
+                    "trigger_type": type(job.trigger).__name__
+                })
+
+        # Sort by next run time
+        next_runs.sort(key=lambda x: x["next_run"])
+        metrics["next_executions"] = next_runs[:10]
+
+        return metrics
+
+    except Exception as e:
+        logger.error(f"Error getting scheduler metrics: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get scheduler metrics: {str(e)}")
+
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def validate_cron_expression(cron_expr: str) -> bool:
+    """Validate cron expression format"""
+    try:
+        from croniter import croniter
+        return croniter.is_valid(cron_expr)
+    except ImportError:
+        # Fallback validation - basic format check
+        parts = cron_expr.split()
+        return len(parts) == 5 and all(
+            part.replace('*', '1').replace('/', '1').replace('-', '1').replace(',', '1').isdigit() or part == '*' for
+            part in parts)
+
+
+async def get_job_execution_history(job_id: str, limit: int = 50):
+    """Get execution history for a specific job (requires job_execution_metrics table)"""
+    try:
+        async with db_manager.get_session_factory('trading_db')() as db:
+            query = text("""
+                SELECT execution_start, execution_end, total_time_seconds, 
+                       portfolios_processed, signals_generated, errors_count
+                FROM job_execution_metrics 
+                WHERE job_name = :job_id 
+                ORDER BY execution_start DESC 
+                LIMIT :limit
+            """)
+
+            result = await db.execute(query, {"job_id": job_id, "limit": limit})
+            history = result.fetchall()
+
+            return [
+                {
+                    "execution_start": row[0].isoformat(),
+                    "execution_end": row[1].isoformat() if row[1] else None,
+                    "duration_seconds": row[2],
+                    "portfolios_processed": row[3],
+                    "signals_generated": row[4],
+                    "errors_count": row[5]
+                }
+                for row in history
+            ]
+    except Exception as e:
+        logger.error(f"Error getting job execution history: {e}")
+        return []
+
+
+@sip_router.get("/scheduler/jobs/{job_id}/history")
+async def get_job_history(job_id: str, limit: int = 50):
+    """Get execution history for a specific job"""
+    try:
+        history = await get_job_execution_history(job_id, limit)
+
+        return {
+            "job_id": job_id,
+            "total_executions": len(history),
+            "history": history
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting job history: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get job history: {str(e)}")
+
+# ============================================================================
+# EMERGENCY CONTROLS
+# ============================================================================
+
+@sip_router.post("/scheduler/emergency-stop")
+async def emergency_stop():
+    """EMERGENCY: Stop all scheduled jobs immediately"""
+    try:
+        paused_jobs = []
+        for job in scheduler.get_jobs():
+            scheduler.pause_job(job.id)
+            paused_jobs.append(job.id)
+
+        logger.critical(f"🚨 EMERGENCY STOP: {len(paused_jobs)} jobs paused")
+
+        return {
+            "status": "EMERGENCY_STOPPED",
+            "message": f"Emergency stop executed - {len(paused_jobs)} jobs paused",
+            "paused_jobs": paused_jobs,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error in emergency stop: {e}")
+        raise HTTPException(status_code=500, detail=f"Emergency stop failed: {str(e)}")
+
+
+@sip_router.post("/scheduler/resume-from-emergency")
+async def resume_from_emergency():
+    """Resume all jobs after emergency stop"""
+    try:
+        resumed_jobs = []
+        for job in scheduler.get_jobs():
+            scheduler.resume_job(job.id)
+            resumed_jobs.append(job.id)
+
+        logger.info(f"✅ Emergency recovery: {len(resumed_jobs)} jobs resumed")
+
+        return {
+            "status": "RECOVERED",
+            "message": f"Emergency recovery completed - {len(resumed_jobs)} jobs resumed",
+            "resumed_jobs": resumed_jobs,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error in emergency recovery: {e}")
+        raise HTTPException(status_code=500, detail=f"Emergency recovery failed: {str(e)}")
+
+
+# ============================================================================
+# TRIGGER MANUAL EXECUTION
+# ============================================================================
+
+@sip_router.post("/scheduler/trigger/daily-signal-check")
+async def trigger_signal_check_now():
+    """Run the daily signal check immediately in background"""
+    try:
+        # Run the job immediately in background
+        asyncio.create_task(daily_signal_check())
+
+        logger.info("🚀 Daily signal check triggered manually")
+
+        return {
+            "status": "triggered",
+            "message": "Daily signal check started immediately in background",
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error triggering signal check: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to trigger signal check: {str(e)}")
+
+
+# ============================================================================
+# DEVELOPMENT HELPERS
+# ============================================================================
+
+@sip_router.post("/scheduler/dev/create-test-job")
+async def create_test_job():
+    """Create a simple test job for development testing"""
+    try:
+        async def test_job():
+            logger.info("🧪 Test job executed!")
+            return "Test job completed"
+
+        scheduler.add_job(
+            test_job,
+            CronTrigger(minute='*/2', timezone=pytz.timezone('Asia/Kolkata')),
+            id='test_job',
+            name='Test Job',
+            replace_existing=True,
+            max_instances=1
+        )
+
+        return {
+            "status": "success",
+            "message": "Test job created (runs every 2 minutes)",
+            "job_id": "test_job"
+        }
+
+    except Exception as e:
+        logger.error(f"Error creating test job: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create test job: {str(e)}")
+
+
+@sip_router.delete("/scheduler/dev/remove-test-job")
+async def remove_test_job():
+    """Remove the test job"""
+    try:
+        if scheduler.get_job('test_job'):
+            scheduler.remove_job('test_job')
+            return {"status": "success", "message": "Test job removed"}
+        else:
+            return {"status": "info", "message": "Test job not found"}
+
+    except Exception as e:
+        logger.error(f"Error removing test job: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to remove test job: {str(e)}")

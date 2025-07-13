@@ -44,7 +44,7 @@ from backend.app.database import (
     get_nsedata_db
 )
 
-from backend.app.routes.sip_routes import sip_router
+from backend.app.routes.sip_routes import sip_router, SIPBacktestRequest, SIPConfigRequest
 from backend.app.routes import data
 
 # Continue with your other imports...
@@ -1718,7 +1718,39 @@ async def general_exception_handler(request, exc):
     )
 
 if __name__ == "__main__":
-    # Call daily_signal_check in sip_router
     import asyncio
-    from backend.app.routes.sip_routes import daily_signal_check
-    asyncio.run(daily_signal_check())
+    async def main():
+        from backend.app.routes.sip_routes import run_sip_backtest, SIPBacktestRequest, SIPConfigRequest
+        from fastapi import BackgroundTasks
+        from backend.app.database import get_db, get_nsedata_db
+
+        request_config = SIPBacktestRequest(
+            symbols=["GOLDBEES", "ITBEES"],
+            start_date="2020-01-01",
+            end_date="2025-06-30",
+            config=SIPConfigRequest(
+                fixed_investment=3000,
+                max_amount_in_a_month=6000,
+                drawdown_threshold_1=-10,
+                drawdown_threshold_2=-4,
+                investment_multiplier_1=1.5,
+                investment_multiplier_2=2,
+                investment_multiplier_3=3,
+                rolling_window=100,
+                fallback_day=28,
+                min_investment_gap_days=7,
+                price_reduction_threshold=5
+            )
+        )
+
+        background_tasks = BackgroundTasks()
+        db_gen = get_db()
+        db = await db_gen.__anext__()
+
+        nsedata_db_gen = get_nsedata_db()
+        nsedata_db = await nsedata_db_gen.__anext__()
+
+        await run_sip_backtest(request_config, background_tasks, trading_db=db, nsedata_db=nsedata_db)
+
+
+    asyncio.run(main())
