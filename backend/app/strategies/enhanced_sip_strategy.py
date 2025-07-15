@@ -24,16 +24,18 @@ logger = logging.getLogger(__name__)
 class SIPConfig:
     """Enhanced configuration for SIP strategy"""
     fixed_investment: float = 5000
-    drawdown_threshold_1: float = -10.0
-    drawdown_threshold_2: float = -4.0
-    investment_multiplier_1: float = 2.0
-    investment_multiplier_2: float = 3.0
-    investment_multiplier_3: float = 5.0
+    major_drawdown_threshold: float = -10.0
+    minor_drawdown_threshold: float = -4.0
+    extreme_drawdown_threshold: float = -15.0
+    minor_drawdown_inv_multiplier: float = 1.75
+    major_drawdown_inv_multiplier: float = 3.0
+    extreme_drawdown_inv_multiplier: float = 4.0  # For extreme opportunities
     rolling_window: int = 100
-    fallback_day: int = 22
+    fallback_day: int = 28
     min_investment_gap_days: int = 5
     max_amount_in_a_month: Optional[float] = None
     price_reduction_threshold: float = 4.0
+    force_remaining_investment: bool = True  # Force invest remaining amount
 
 @dataclass
 class Trade:
@@ -217,6 +219,7 @@ class BenchmarkSIPCalculator:
                         'total_investment': float(total_investment),
                         'total_units': float(total_units),
                         'portfolio_value': float(total_units * investment_price),
+                        'return_on_investment': ((total_units * investment_price) / total_investment - 1) * 100,
                         'trade_type': 'regular_sip',
                         'month': month_key
                     }
@@ -482,7 +485,7 @@ class EnhancedSIPStrategy:
                 # Check for drawdown opportunities regardless of SIP date
                 drawdown_100 = row.get('Drawdown_100', 0)
                 is_drawdown_opportunity = (
-                        drawdown_100 <= config.drawdown_threshold_2  # -4% or worse
+                        drawdown_100 <= config.minor_drawdown_threshold  # -4% or worse
                 )
 
                 should_invest = is_sip_date or is_drawdown_opportunity
@@ -493,7 +496,7 @@ class EnhancedSIPStrategy:
                     # Check if investment is allowed (minimum gap enforcement)
                     if portfolio.can_invest(current_date):
                         current_price = row['close']
-                        investment_amount = self.determine_investment_amount(
+                        investment_amount, is_extreme = self.determine_investment_amount(
                             current_price, data, config, i
                         )
                         logger.info(
@@ -615,15 +618,18 @@ class EnhancedSIPStrategy:
                 config_request = type('obj', (object,), {
                     'fixed_investment': config.fixed_investment,
                     'max_amount_in_a_month': config.max_amount_in_a_month or (config.fixed_investment * 4),
+                    'extreme_drawdown_threshold': config.extreme_drawdown_threshold,
                     'price_reduction_threshold': config.price_reduction_threshold,
-                    'drawdown_threshold_1': config.drawdown_threshold_1,
-                    'drawdown_threshold_2': config.drawdown_threshold_2,
-                    'investment_multiplier_1': config.investment_multiplier_1,
-                    'investment_multiplier_2': config.investment_multiplier_2,
-                    'investment_multiplier_3': config.investment_multiplier_3,
+                    'major_drawdown_threshold': config.major_drawdown_threshold,
+                    'minor_drawdown_threshold': config.minor_drawdown_threshold,
+                    'minor_drawdown_inv_multiplier': config.minor_drawdown_inv_multiplier,
+                    'major_drawdown_inv_multiplier': config.major_drawdown_inv_multiplier,
+                    'extreme_drawdown_inv_multiplier': config.extreme_drawdown_inv_multiplier,
                     'rolling_window': config.rolling_window,
                     'fallback_day': config.fallback_day,
-                    'min_investment_gap_days': config.min_investment_gap_days
+                    'min_investment_gap_days': config.min_investment_gap_days,
+                    'force_remaining_investment': config.force_remaining_investment
+
                 })
 
                 result_dict = await enhanced_strategy.run_backtest(
@@ -671,205 +677,6 @@ class EnhancedSIPStrategy:
 
         logger.info(f"✅ Batch backtest completed. Results for {len(results)} symbols")
         return results
-
-    def get_next_investment_signals(self, data: pd.DataFrame, config: SIPConfig) -> Dict[str, Any]:
-        """Generate enhanced investment signals with robust error handling"""
-        try:
-            if data.empty:
-                return {
-                    "signal": "NO_DATA",
-                    "confidence": 0,
-                    "message": "No data available"
-                }
-
-            logger.debug(f"Generating signals for {len(data)} data points")
-
-            # Calculate indicators - this is where the previous error occurred
-            try:
-                data_with_indicators = self.calculate_technical_indicators(data)
-                if data_with_indicators.empty:
-                    raise ValueError("Technical indicators calculation returned empty DataFrame")
-            except Exception as indicator_error:
-                logger.error(f"Technical indicators calculation failed: {indicator_error}")
-                return {
-                    "signal": "ERROR",
-                    "confidence": 0,
-                    "message": f"Technical indicators calculation failed: {str(indicator_error)}"
-                }
-
-            # Get latest data point
-            try:
-                latest = data_with_indicators.iloc[-1]
-                current_price = float(latest['close'])
-            except Exception as latest_error:
-                logger.error(f"Error getting latest data point: {latest_error}")
-                return {
-                    "signal": "ERROR",
-                    "confidence": 0,
-                    "message": f"Error accessing latest data: {str(latest_error)}"
-                }
-
-            # Extract indicators safely with defaults
-            try:
-                drawdown_100 = float(latest.get('Drawdown_100', 0))
-                drawdown_50 = float(latest.get('Drawdown_50', 0))
-                rsi = float(latest.get('RSI', 50))
-                volatility = float(latest.get('Volatility_20', 0))
-                bb_position = float(latest.get('BB_Position', 0.5))
-                macd_histogram = float(latest.get('MACD_Histogram', 0))
-                williams_r = float(latest.get('Williams_R', -50))
-                cci = float(latest.get('CCI', 0))
-
-                logger.debug(
-                    f"Extracted indicators - RSI: {rsi}, Drawdown_100: {drawdown_100}, BB_Position: {bb_position}")
-
-            except Exception as extract_error:
-                logger.error(f"Error extracting indicators: {extract_error}")
-                return {
-                    "signal": "ERROR",
-                    "confidence": 0,
-                    "message": f"Error extracting technical indicators: {str(extract_error)}"
-                }
-
-            # Determine signal strength and type
-            signal_type = "NORMAL"
-            confidence = 0.5
-            recommended_multiplier = 1.0
-            recommended_amount = config.fixed_investment
-
-            # Analyze market conditions
-            market_conditions = []
-
-            try:
-                # Drawdown analysis with safe thresholds
-                if drawdown_100 <= config.drawdown_threshold_1:  # Severe drawdown (< -10%)
-                    signal_type = "STRONG_BUY"
-                    confidence = 0.9
-                    recommended_multiplier = config.investment_multiplier_3
-                    recommended_amount = config.fixed_investment * recommended_multiplier
-                    market_conditions.append(f"Severe drawdown: {drawdown_100:.2f}%")
-
-                elif drawdown_100 <= config.drawdown_threshold_2:  # Moderate drawdown (-5% to -10%)
-                    signal_type = "BUY"
-                    confidence = 0.8
-                    recommended_multiplier = config.investment_multiplier_2
-                    recommended_amount = config.fixed_investment * recommended_multiplier
-                    market_conditions.append(f"Moderate drawdown: {drawdown_100:.2f}%")
-
-                elif drawdown_100 <= -1.0:  # Minor drawdown (-1% to -5%)
-                    signal_type = "WEAK_BUY"
-                    confidence = 0.7
-                    recommended_multiplier = config.investment_multiplier_1
-                    recommended_amount = config.fixed_investment * recommended_multiplier
-                    market_conditions.append(f"Minor drawdown: {drawdown_100:.2f}%")
-
-                else:
-                    market_conditions.append(f"No significant drawdown: {drawdown_100:.2f}%")
-
-                # Volatility analysis
-                if volatility > 0.3:  # High volatility
-                    confidence *= 0.8  # Reduce confidence
-                    market_conditions.append(f"High volatility: {volatility:.2f}")
-                elif volatility < 0.1:  # Low volatility
-                    confidence *= 1.1  # Increase confidence slightly
-                    market_conditions.append(f"Low volatility: {volatility:.2f}")
-                else:
-                    market_conditions.append(f"Normal volatility: {volatility:.2f}")
-
-                # Technical momentum analysis
-                momentum_score = 0
-
-                # RSI analysis
-                if rsi < 30:  # Oversold
-                    momentum_score += 1
-                    market_conditions.append(f"Oversold conditions (RSI: {rsi:.1f})")
-                elif rsi > 70:  # Overbought
-                    momentum_score -= 1
-                    market_conditions.append(f"Overbought conditions (RSI: {rsi:.1f})")
-
-                # Williams %R analysis
-                if williams_r < -80:  # Oversold
-                    momentum_score += 0.5
-                elif williams_r > -20:  # Overbought
-                    momentum_score -= 0.5
-
-                # MACD analysis
-                if macd_histogram > 0:
-                    momentum_score += 0.5
-                    market_conditions.append("Positive momentum trend")
-                else:
-                    momentum_score -= 0.5
-                    market_conditions.append("Negative momentum - potential reversal")
-
-                # Adjust signal based on momentum
-                if momentum_score >= 1.5 and signal_type in ["NORMAL", "WEAK_BUY"]:
-                    if signal_type == "NORMAL":
-                        signal_type = "WEAK_BUY"
-                        confidence = max(confidence, 0.6)
-                    elif signal_type == "WEAK_BUY":
-                        signal_type = "BUY"
-                        confidence = max(confidence, 0.75)
-
-                # Cap confidence
-                confidence = min(confidence, 1.0)
-
-                # Generate next fallback date
-                next_fallback_date = (datetime.now() + timedelta(days=30)).replace(day=config.fallback_day).strftime(
-                    '%Y-%m-%d')
-
-                # Determine trade type description
-                if signal_type == "STRONG_BUY":
-                    trade_type = "Aggressive Dip Purchase"
-                    message = "Excellent opportunity. Strong buy signal detected."
-                elif signal_type == "BUY":
-                    trade_type = "Strategic Dip Purchase"
-                    message = "Good opportunity. Consider increased investment."
-                elif signal_type == "WEAK_BUY":
-                    trade_type = "Minor Dip Purchase"
-                    message = "Moderate opportunity. Consider slightly increased investment."
-                else:
-                    trade_type = "Regular SIP"
-                    message = "Normal market conditions. Continue regular SIP."
-
-                return {
-                    "signal": signal_type,
-                    "confidence": confidence,
-                    "current_price": current_price,
-                    "recommended_amount": recommended_amount,
-                    "investment_multiplier": recommended_multiplier,
-                    "drawdown_100": drawdown_100,
-                    "drawdown_50": drawdown_50,
-                    "rsi": rsi,
-                    "williams_r": williams_r,
-                    "cci": cci,
-                    "volatility": volatility,
-                    "bb_position": bb_position,
-                    "macd_histogram": macd_histogram,
-                    "market_conditions": market_conditions,
-                    "next_fallback_date": next_fallback_date,
-                    "analysis_timestamp": datetime.now().isoformat(),
-                    "trade_type": trade_type,
-                    "message": message
-                }
-
-            except Exception as analysis_error:
-                logger.error(f"Error in signal analysis: {analysis_error}")
-                return {
-                    "signal": "ERROR",
-                    "confidence": 0,
-                    "message": f"Signal analysis failed: {str(analysis_error)}",
-                    "current_price": current_price,
-                    "analysis_timestamp": datetime.now().isoformat()
-                }
-
-        except Exception as e:
-            logger.error(f"Critical error in get_next_investment_signals: {e}")
-            return {
-                "signal": "ERROR",
-                "confidence": 0,
-                "message": f"Signal generation failed: {str(e)}",
-                "analysis_timestamp": datetime.now().isoformat()
-            }
 
     def _calculate_next_fallback_date(self, current_date: datetime.date, fallback_day: int) -> datetime.date:
         """Calculate next fallback investment date"""
@@ -1174,18 +981,19 @@ class EnhancedSIPStrategy:
                 return df
 
     def determine_investment_amount(self, current_price: float, data: pd.DataFrame,
-                                    config: SIPConfig, index: int) -> float:
+                                    config: SIPConfig, index: int) -> Tuple[float, bool]:
         """Enhanced investment amount determination with multiple factors"""
         try:
             base_amount = config.fixed_investment
 
             if index >= len(data):
-                return base_amount
+                return base_amount, False  # No data available for this index
 
             row = data.iloc[index]
 
             # Get technical indicators
             drawdown_50 = row.get('Drawdown_50', 0)
+            drawdown_100 = row.get('Drawdown_100', 0)
             rsi = row.get('RSI', 50)
             bb_position = row.get('BB_Position', 0.5)
             macd_histogram = row.get('MACD_Histogram', 0)
@@ -1194,13 +1002,25 @@ class EnhancedSIPStrategy:
 
             investment_amount = base_amount
 
-            # Primary drawdown-based adjustments
-            if drawdown_50 <= config.drawdown_threshold_1:  # Severe drawdown (< -10%)
-                investment_amount *= config.investment_multiplier_3
-                logger.info(f"Severe drawdown detected ({drawdown_50:.2f}%), increasing to {investment_amount}")
-            elif drawdown_50 <= config.drawdown_threshold_2:  # Moderate drawdown (-4% to -10%)
-                investment_amount *= config.investment_multiplier_2
-                logger.info(f"Moderate drawdown detected ({drawdown_50:.2f}%), increasing to {investment_amount}")
+            # ENHANCEMENT 3: Check for extreme opportunity (>15% drawdown)
+            if drawdown_100 <= config.extreme_drawdown_threshold:
+                extreme_amount = investment_amount * config.extreme_drawdown_inv_multiplier
+                logger.info(f"🔥 EXTREME OPPORTUNITY: {abs(drawdown_100):.1f}% drawdown "
+                            f"- investing ₹{extreme_amount:,.2f} (4x)")
+                return extreme_amount, True
+
+            # Regular drawdown logic
+            if drawdown_100 <= config.major_drawdown_threshold:
+                multiplier = config.major_drawdown_inv_multiplier
+                investment_amount = config.fixed_investment * multiplier
+                logger.info(f"📉 Major drawdown: {abs(drawdown_100):.1f}% "
+                            f"- investing ₹{investment_amount:,.2f} ({multiplier}x)")
+
+            elif drawdown_100 <= config.minor_drawdown_threshold:
+                multiplier = config.minor_drawdown_inv_multiplier
+                investment_amount = config.fixed_investment * multiplier
+                logger.info(f"📊 Moderate drawdown: {abs(drawdown_100):.1f}% "
+                            f"- investing ₹{investment_amount:,.2f} ({multiplier}x)")
 
 
             # RSI-based adjustments (oversold/overbought conditions)
@@ -1260,11 +1080,11 @@ class EnhancedSIPStrategy:
             if investment_amount < min_allowed:
                 investment_amount = min_allowed
 
-            return round(investment_amount, 2)
+            return round(investment_amount, 2), False
 
         except Exception as e:
             logger.error(f"Error determining investment amount: {e}")
-            return config.fixed_investment
+            return config.fixed_investment, False
 
     async def generate_investment_report(self, symbols: List[str], config: SIPConfig) -> Dict[str, Any]:
         """Generate comprehensive investment report for multiple symbols - OPTIMIZED VERSION"""
@@ -1909,6 +1729,7 @@ class EnhancedSIPStrategy:
     async def get_investment_signals(self, symbol: str, config: SIPConfig) -> Dict[str, Any]:
         """Get investment signals for a symbol"""
         try:
+            logger.info(f"🎯 Getting enhanced investment signals for {symbol}")
             end_date = datetime.now().strftime('%Y-%m-%d')
             start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
 
@@ -1933,9 +1754,9 @@ class EnhancedSIPStrategy:
                     "drawdown_signal": {
                         "current_drawdown": float(latest.get('Drawdown_100', 0)),
                         "signal_strength": "STRONG" if latest.get('Drawdown_100',
-                                                                  0) <= config.drawdown_threshold_1 else "WEAK",
+                                                                  0) <= config.major_drawdown_threshold else "WEAK",
                         "recommended_action": "BUY" if latest.get('Drawdown_100',
-                                                                  0) <= config.drawdown_threshold_2 else "HOLD"
+                                                                  0) <= config.minor_drawdown_threshold else "HOLD"
                     },
                     "price_position": {
                         "current_price": float(latest['close']),
@@ -1943,7 +1764,7 @@ class EnhancedSIPStrategy:
                         "vs_50_sma": float(((latest['close'] / latest.get('SMA_50', latest['close'])) - 1) * 100)
                     }
                 },
-                "overall_signal": "BUY" if latest.get('Drawdown_100', 0) <= config.drawdown_threshold_2 else "HOLD"
+                "overall_signal": "BUY" if latest.get('Drawdown_100', 0) <= config.minor_drawdown_threshold else "HOLD"
             }
 
             return signals
@@ -2382,30 +2203,37 @@ class MonthlyInvestmentTracker:
 
     def __init__(self, max_monthly_amount: float, price_reduction_threshold: float = 4.0):
         self.max_monthly_amount = max_monthly_amount
-        self.price_reduction_threshold = price_reduction_threshold / 100  # Convert to decimal
-        self.monthly_investments = {}  # symbol -> {month_key -> {total_invested, investments, last_price}}
+        self.price_reduction_threshold = price_reduction_threshold / 100
+        self.monthly_investments = {}
         self.skipped_investments = []
+        self.extreme_trades_made = {}
 
     def get_month_key(self, date: datetime) -> str:
         """Generate month key for tracking"""
         return f"{date.year}-{date.month:02d}"
 
+    def has_extreme_trade_this_month(self, symbol: str, current_date: datetime) -> bool:
+        """Check if an extreme trade (4x investment) was made this month"""
+        month_key = self.get_month_key(current_date)
+        return self.extreme_trades_made.get(f"{symbol}_{month_key}", False)
+
+    def mark_extreme_trade(self, symbol: str, current_date: datetime):
+        """Mark that an extreme trade was made this month"""
+        month_key = self.get_month_key(current_date)
+        self.extreme_trades_made[f"{symbol}_{month_key}"] = True
+        logger.info(f"🔥 Marked extreme trade for {symbol} in {month_key}")
+
     def can_invest(self, symbol: str, current_date: datetime,
-                   intended_amount: float, current_price: float) -> Dict:
+                   intended_amount: float, current_price: float,
+                   is_extreme_opportunity: bool = False) -> Dict:
         """
         Check if investment is allowed based on monthly limits and price thresholds
-
-        Returns:
-        {
-            'can_invest': bool,
-            'suggested_amount': float,
-            'reason': str,
-            'remaining_budget': float
-        }
+        1. Extreme opportunities (>15% drawdown) bypass monthly limits
+        2. Remaining amount force investment at month end
         """
         month_key = self.get_month_key(current_date)
 
-        # Initialize symbol tracking if needed
+        # Initialize symbol tracking
         if symbol not in self.monthly_investments:
             self.monthly_investments[symbol] = {}
 
@@ -2414,14 +2242,56 @@ class MonthlyInvestmentTracker:
                 'total_invested': 0.0,
                 'investments': [],
                 'last_price': None,
-                'investment_count': 0
+                'investment_count': 0,
+                'extreme_trade_made': False
             }
 
         month_data = self.monthly_investments[symbol][month_key]
         current_invested = month_data['total_invested']
         remaining_budget = self.max_monthly_amount - current_invested
 
-        # Check 1: Monthly limit
+        # ENHANCEMENT 3: Handle extreme opportunities (>15% drawdown)
+        if is_extreme_opportunity:
+            # Check if we've already made an extreme trade this month
+            if self.has_extreme_trade_this_month(symbol, current_date):
+                self.record_skip(symbol, current_date, intended_amount,
+                                 "Extreme trade already made this month", current_price)
+                return {
+                    'can_invest': False,
+                    'suggested_amount': 0.0,
+                    'reason': 'Extreme trade already made this month',
+                    'remaining_budget': remaining_budget
+                }
+
+            # For extreme opportunities, allow 4x investment regardless of monthly limit
+            extreme_amount = intended_amount  # This should already be 4x from caller
+            logger.info(f"🔥 EXTREME OPPORTUNITY: {symbol} - Investing ₹{extreme_amount:,.2f} "
+                        f"(bypassing monthly limit of ₹{self.max_monthly_amount:,.2f})")
+
+            # Mark that we've made an extreme trade this month
+            self.mark_extreme_trade(symbol, current_date)
+            month_data['extreme_trade_made'] = True
+
+            return {
+                'can_invest': True,
+                'suggested_amount': extreme_amount,
+                'reason': 'Extreme opportunity - bypassing monthly limit',
+                'remaining_budget': 0.0,  # No more investments this month
+                'is_extreme': True
+            }
+
+        # Check if extreme trade was made this month - if so, skip all other investments
+        if month_data.get('extreme_trade_made', False):
+            self.record_skip(symbol, current_date, intended_amount,
+                             "Extreme trade made this month - skipping other investments", current_price)
+            return {
+                'can_invest': False,
+                'suggested_amount': 0.0,
+                'reason': 'Extreme trade made this month',
+                'remaining_budget': 0.0
+            }
+
+        # Check 1: Monthly limit for regular investments
         if current_invested >= self.max_monthly_amount:
             self.record_skip(symbol, current_date, intended_amount,
                              "Monthly investment limit reached", current_price)
@@ -2432,7 +2302,7 @@ class MonthlyInvestmentTracker:
                 'remaining_budget': 0.0
             }
 
-        # Check 2: If this would exceed monthly limit, adjust amount
+        # Check 2: Adjust amount if it would exceed monthly limit
         if current_invested + intended_amount > self.max_monthly_amount:
             adjusted_amount = remaining_budget
             if adjusted_amount < intended_amount * 0.1:  # Less than 10% of intended
@@ -2470,8 +2340,38 @@ class MonthlyInvestmentTracker:
             'remaining_budget': remaining_budget - adjusted_amount
         }
 
+    def force_remaining_investment(self, symbol: str, current_date: datetime,
+                                   current_price: float, fixed_investment: float) -> Optional[Dict]:
+        """
+        ENHANCEMENT 1: Force invest remaining amount if there's budget left at month end
+        """
+        month_key = self.get_month_key(current_date)
+
+        if symbol not in self.monthly_investments or month_key not in self.monthly_investments[symbol]:
+            return None
+
+        month_data = self.monthly_investments[symbol][month_key]
+        current_invested = month_data['total_invested']
+        remaining_budget = fixed_investment - current_invested
+
+        # Only force if we have significant remaining budget (at least 20% of fixed investment)
+        min_threshold = fixed_investment * 0.2
+
+        if remaining_budget >= min_threshold and not month_data.get('extreme_trade_made', False):
+            logger.info(f"💰 FORCE INVESTMENT: {symbol} - Remaining budget ₹{remaining_budget:,.2f} "
+                        f"on {current_date.strftime('%Y-%m-%d')}")
+            return {
+                'can_invest': True,
+                'suggested_amount': remaining_budget,
+                'reason': 'Force investment - remaining monthly budget',
+                'remaining_budget': 0.0,
+                'is_force_investment': True
+            }
+
+        return None
+
     def record_investment(self, symbol: str, date: datetime, amount: float,
-                          price: float, trade_id: str) -> None:
+                          price: float, is_extreme: bool = False) -> None:
         """Record a successful investment"""
         month_key = self.get_month_key(date)
 
@@ -2482,26 +2382,31 @@ class MonthlyInvestmentTracker:
                 'total_invested': 0.0,
                 'investments': [],
                 'last_price': None,
-                'investment_count': 0
+                'investment_count': 0,
+                'extreme_trade_made': False
             }
 
         month_data = self.monthly_investments[symbol][month_key]
         month_data['total_invested'] += amount
         month_data['last_price'] = price
         month_data['investment_count'] += 1
+
+        if is_extreme:
+            month_data['extreme_trade_made'] = True
+
         month_data['investments'].append({
-            'trade_id': trade_id,
             'date': date.strftime('%Y-%m-%d'),
             'amount': amount,
             'price': price,
-            'units': amount / price
+            'units': amount / price,
+            'is_extreme': is_extreme
         })
 
         logger.debug(f"💰 Recorded investment: {symbol} ₹{amount:,.2f} @ ₹{price:.2f} "
                      f"(Month total: ₹{month_data['total_invested']:,.2f})")
 
     def record_skip(self, symbol: str, date: datetime, intended_amount: float,
-                    reason: str, current_price: float, additional_info: Dict = None) -> None:
+                    reason: str, current_price: float) -> None:
         """Record a skipped investment with reason"""
         skip_record = {
             'symbol': symbol,
@@ -2511,9 +2416,6 @@ class MonthlyInvestmentTracker:
             'current_price': current_price,
             'month_key': self.get_month_key(date)
         }
-
-        if additional_info:
-            skip_record.update(additional_info)
 
         self.skipped_investments.append(skip_record)
         logger.info(f"⏭️ Skipped investment: {symbol} ₹{intended_amount:,.2f} - {reason}")
@@ -2547,6 +2449,7 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
     """Enhanced SIP Strategy with monthly investment limits and price thresholds"""
 
     def __init__(self, nsedata_session: AsyncSession = None, trading_session: AsyncSession = None):
+        super().__init__()
         self.nsedata_session = nsedata_session
         self.trading_session = trading_session
         self.monthly_tracker = None
@@ -2563,9 +2466,9 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
         try:
             logger.info(f"🚀 Starting enhanced SIP backtest for {symbol}")
             logger.info(f"📅 Period: {start_date} to {end_date}")
-            logger.info(f"💰 Fixed investment: ₹{config.fixed_investment:,.2f}")
-            logger.info(f"📊 Monthly limit: ₹{config.max_amount_in_a_month:,.2f}")
-            logger.info(f"📉 Price reduction threshold: {config.price_reduction_threshold}%")
+            logger.info(f"💰 Config: Fixed=₹{config.fixed_investment:,.2f}, "
+                        f"Monthly=₹{config.max_amount_in_a_month:,.2f}, "
+                        f"Extreme=₹{config.fixed_investment * config.extreme_drawdown_inv_multiplier:,.2f}")
 
             # Initialize monthly tracker with enhanced config
             self.monthly_tracker = MonthlyInvestmentTracker(
@@ -2595,19 +2498,21 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
                 current_price = row['close']
 
                 # Determine if this is an investment opportunity
-                should_invest, investment_reason = self._should_invest(row, config, i, data)
+                should_invest, investment_reason = self._should_invest(row, config, i, data, symbol)
 
                 if should_invest:
-                    logger.info(f"Investment: {investment_reason}, Date: {current_date.strftime('%Y-%m-%d')}, Price: ₹{current_price:.2f}")
+                    logger.info(f"Investment signal: {investment_reason},"
+                                f" Date: {current_date.strftime('%Y-%m-%d')},"
+                                f" Price: ₹{current_price:.2f}")
                     # Calculate investment amount based on market conditions
-                    base_investment_amount = self.determine_investment_amount(
+                    base_investment_amount, is_extreme  = self.determine_investment_amount(
                         current_price, data, config, i
                     )
                     logger.info(f"Investment amount: {base_investment_amount}")
 
-                    # APPLY MONTHLY LIMITS AND PRICE THRESHOLD LOGIC
+                    # Check if investment is allowed (APPLY MONTHLY LIMITS AND PRICE THRESHOLD LOGIC)
                     investment_check = self.monthly_tracker.can_invest(
-                        symbol, current_date, base_investment_amount, current_price
+                        symbol, current_date, base_investment_amount, current_price, is_extreme
                     )
 
                     if investment_check['can_invest']:
@@ -2619,14 +2524,14 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
                         total_units += units_bought
 
                         # Record the investment in tracker
-                        trade_id = str(uuid.uuid4())
                         self.monthly_tracker.record_investment(
-                            symbol, current_date, final_amount, current_price, trade_id
+                            symbol, current_date, final_amount, current_price,
+                            is_extreme or investment_check.get('is_extreme', False)
                         )
 
                         # Record trade
                         trade = {
-                            'trade_id': trade_id,
+                            'symbol': symbol,
                             'date': current_date.strftime('%Y-%m-%d'),
                             'price': float(current_price),
                             'units': float(units_bought),
@@ -2634,14 +2539,18 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
                             'total_investment': float(total_investment),
                             'total_units': float(total_units),
                             'portfolio_value': float(total_units * current_price),
+                            "return_on_investment": float((total_units * current_price - total_investment) / total_investment * 100),
                             'trade_type': investment_reason,
                             'drawdown': float(row.get('Drawdown_100', 0)),
                             'original_intended_amount': float(base_investment_amount),
-                            'amount_adjusted': final_amount != base_investment_amount
+                            'amount_adjusted': final_amount != base_investment_amount,
+                            'is_extreme': is_extreme or investment_check.get('is_extreme', False),
+                            'is_force': investment_check.get('is_force_investment', False)
                         }
                         trades.append(trade)
 
-                        logger.debug(f"💰 Investment executed: {symbol} ₹{final_amount:,.2f} @ ₹{current_price:.2f}")
+                        logger.debug(f"💰 Investment executed: {symbol} ₹{final_amount:,.2f}"
+                                     f" @ ₹{current_price:.2f} ({units_bought:.2f} units)")
 
                     else:
                         # Track skip reasons
@@ -2652,6 +2561,41 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
                             price_threshold_skipped += 1
 
                         logger.debug(f"⏭️ Investment skipped: {symbol} - {skip_reason}")
+
+                if self._is_month_end_or_fallback_approaching(current_date, config, i, data):
+                    force_check = self.monthly_tracker.force_remaining_investment(
+                        symbol, current_date, current_price, config.fixed_investment
+                    )
+
+                    if force_check and force_check['can_invest']:
+                        final_amount = force_check['suggested_amount']
+                        units_bought = final_amount / current_price
+                        total_investment += final_amount
+                        total_units += units_bought
+
+                        # Record the force investment
+                        self.monthly_tracker.record_investment(
+                            symbol, current_date, final_amount, current_price, False
+                        )
+
+                        # Create trade record
+                        trade = {
+                            'symbol': symbol,
+                            'date': current_date.strftime('%Y-%m-%d'),
+                            'price': current_price,
+                            'amount': final_amount,
+                            'units': units_bought,
+                            'portfolio_value': total_units * current_price,
+                            'total_investment': total_investment,
+                            'drawdown': row.get('Drawdown_100', 0),
+                            'trade_type': 'force_remaining_investment',
+                            'is_extreme': False,
+                            'is_force': True
+                        }
+                        trades.append(trade)
+
+                        logger.info(f"🔄 FORCE INVESTMENT: ₹{final_amount:,.2f} "
+                                    f"(remaining budget) at ₹{current_price:.2f}")
 
             # Calculate final portfolio value
             final_price = data.iloc[-1]['close']
@@ -2668,30 +2612,195 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
             logger.error(f"Error running enhanced backtest for {symbol}: {e}")
             return None
 
-    def _should_invest(self, row, config, i: int, data: pd.DataFrame) -> Tuple[bool, str]:
+    async def get_next_investment_signals(self, symbol: str, config: SIPConfig) -> Dict[str, Any]:
+        """Generate enhanced investment signals with robust error handling"""
+        try:
+            logger.info(f"🎯 Getting enhanced investment signals for {symbol}")
+
+            # Get recent data for analysis
+            end_date = datetime.now().strftime('%Y-%m-%d')
+            start_date = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
+
+            data = await self.fetch_data_from_db_async(symbol, start_date, end_date)
+            if data.empty:
+                return {
+                    "signal": "NO_DATA",
+                    "confidence": 0,
+                    "recommended_amount": 0,
+                    "current_price": 0,
+                    "message": "Insufficient data for analysis",
+                    "symbol": symbol
+                }
+
+            # Calculate technical indicators
+            data = self.calculate_technical_indicators(data)
+
+            # Get current market data
+            current_row = data.iloc[-1]
+            current_date = current_row['timestamp']
+            current_price = current_row['close']
+            drawdown_100 = current_row.get('Drawdown_100', 0)
+            rsi = current_row.get('RSI', 0)
+
+            # Initialize monthly tracker for current analysis
+            if not self.monthly_tracker:
+                self.monthly_tracker = MonthlyInvestmentTracker(
+                    max_monthly_amount=config.max_amount_in_a_month,
+                    price_reduction_threshold=config.price_reduction_threshold
+                )
+
+            # Check investment signals with enhanced logic
+            should_invest, investment_reason = self._should_invest(
+                current_row, config, len(data) - 1, data, symbol
+            )
+
+            if not should_invest:
+                return {
+                    "signal": "NORMAL",
+                    "confidence": 0.1,
+                    "recommended_amount": 0,
+                    "current_price": current_price,
+                    "message": f"No investment signal: {investment_reason}",
+                    "symbol": symbol,
+                    "drawdown_100": drawdown_100,
+                    "analysis_timestamp": datetime.now().isoformat()
+                }
+
+            # Calculate investment amount with enhanced logic
+            base_amount, is_extreme = self.determine_investment_amount(
+                current_price, data, config, len(data) - 1
+            )
+
+            # Check monthly limits and constraints
+            investment_check = self.monthly_tracker.can_invest(
+                symbol, current_date, base_amount, current_price, is_extreme
+            )
+
+            if not investment_check['can_invest']:
+                # Check for force investment opportunity
+                force_check = self.monthly_tracker.force_remaining_investment(
+                    symbol, current_date, current_price, config.fixed_investment
+                )
+
+                if force_check and force_check['can_invest']:
+                    return {
+                        "signal": "BUY",
+                        "confidence": 0.8,
+                        "recommended_amount": force_check['suggested_amount'],
+                        "current_price": current_price,
+                        "investment_multiplier": force_check['suggested_amount'] / config.fixed_investment,
+                        "drawdown_100": drawdown_100,
+                        "message": "Force investment - remaining monthly budget",
+                        "symbol": symbol,
+                        "is_force_investment": True,
+                        "is_extreme_opportunity": False,
+                        "is_holiday_makeup": False,
+                        "trade_type": "force_remaining_investment",
+                        "analysis_timestamp": datetime.now().isoformat()
+                    }
+                else:
+                    return {
+                        "signal": "SKIP",
+                        "confidence": 0,
+                        "recommended_amount": 0,
+                        "current_price": current_price,
+                        "message": investment_check['reason'],
+                        "symbol": symbol,
+                        "analysis_timestamp": datetime.now().isoformat()
+                    }
+
+            # Determine signal strength and type
+            final_amount = investment_check['suggested_amount']
+            investment_multiplier = final_amount / config.fixed_investment
+
+            # Determine signal type based on conditions
+            if is_extreme:
+                signal_type = "STRONG_BUY"
+                confidence = 0.95
+                trade_type = "extreme_opportunity"
+            elif investment_reason.startswith("sip_makeup") or investment_reason.startswith("last_trading_day"):
+                signal_type = "BUY"
+                confidence = 0.7
+                trade_type = "holiday_makeup"
+            elif drawdown_100 <= config.major_drawdown_threshold:
+                signal_type = "STRONG_BUY"
+                confidence = 0.85
+                trade_type = "major_drawdown"
+            elif drawdown_100 <= config.minor_drawdown_threshold:
+                signal_type = "BUY"
+                confidence = 0.75
+                trade_type = "moderate_drawdown"
+            else:
+                signal_type = "WEAK_BUY"
+                confidence = 0.6
+                trade_type = "regular_sip"
+
+            # RSI analysis
+            if rsi < 30:
+                signal_type = "STRONG_BUY"
+                confidence = 0.95
+                trade_type = "Oversold_condition"
+            elif rsi > 70:
+                confidence -= 0.5
+
+            return {
+                "signal": signal_type,
+                "confidence": confidence,
+                "recommended_amount": final_amount,
+                "current_price": current_price,
+                "investment_multiplier": investment_multiplier,
+                "drawdown_100": drawdown_100,
+                "rsi": rsi,
+                "message": f"{trade_type.replace('_', ' ').title()} - {investment_reason}",
+                "symbol": symbol,
+                "is_extreme_opportunity": is_extreme,
+                "is_force_investment": investment_check.get('is_force_investment', False),
+                "is_holiday_makeup": "makeup" in investment_reason or "last_trading_day" in investment_reason,
+                "trade_type": trade_type,
+                "remaining_monthly_budget": investment_check.get('remaining_budget', 0),
+                "analysis_timestamp": datetime.now().isoformat(),
+                "next_fallback_date": self._calculate_next_fallback_date(current_date.date(),
+                                                                         config.fallback_day).strftime('%Y-%m-%d')
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting enhanced investment signals for {symbol}: {e}")
+            return {
+                "signal": "ERROR",
+                "confidence": 0,
+                "recommended_amount": 0,
+                "current_price": 0,
+                "message": f"Signal analysis failed: {str(e)}",
+                "symbol": symbol,
+                "analysis_timestamp": datetime.now().isoformat()
+            }
+
+    def _should_invest(self, row, config, i: int, data: pd.DataFrame, symbol: str) -> Tuple[bool, str]:
         """Determine if we should invest based on strategy conditions"""
         current_date = row['timestamp']
 
-        # Check if it's a regular SIP date (fallback day of month)
-        is_sip_date = current_date.day == config.fallback_day
-        # is_sip_date = (
-        #         current_date.day == config.fallback_day or
-        #         (i > 0 and current_date.month != data.iloc[i - 1]['timestamp'].month)
-        # )
+        # Check if it's a regular SIP date (fallback day of month with holiday handling)
+        is_sip_date, sip_reason = self._check_sip_date_with_holiday_handling(
+            current_date, config, i, data, symbol
+        )
 
         # Check for drawdown opportunities
         drawdown_100 = row.get('Drawdown_100', 0)
         drawdown_50 = row.get('Drawdown_50', 0)
         drawdown_20 = row.get('Drawdown_20', 0)
+
+        is_extreme_drawdown = drawdown_100 <= config.extreme_drawdown_threshold
         is_drawdown_opportunity = (
-                drawdown_100 <= config.drawdown_threshold_1 or
-                drawdown_100 <= config.drawdown_threshold_2 or
-                drawdown_50 <= config.drawdown_threshold_1 or
-                drawdown_50 <= config.drawdown_threshold_2 or
-                drawdown_20 <= config.drawdown_threshold_1 or
-                drawdown_20 <= config.drawdown_threshold_2
+                drawdown_100 <= config.major_drawdown_threshold or
+                drawdown_100 <= config.minor_drawdown_threshold or
+                drawdown_50 <= config.major_drawdown_threshold or
+                drawdown_50 <= config.minor_drawdown_threshold or
+                drawdown_20 <= config.major_drawdown_threshold or
+                drawdown_20 <= config.minor_drawdown_threshold
         )
 
+        if is_extreme_drawdown:
+            return True, f"extreme_drawdown_{abs(drawdown_100):.1f}%"
         if is_sip_date:
             return True, "regular_sip"
         elif is_drawdown_opportunity:
@@ -2699,30 +2808,100 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
         else:
             return False, "no_signal"
 
+    def _check_sip_date_with_holiday_handling(self, current_date: datetime,
+                                              config: SIPConfig, i: int,
+                                              data: pd.DataFrame, symbol: str) -> Tuple[bool, str]:
+        """
+        ENHANCEMENT 2: Check SIP date with holiday handling
+        """
+        # Check if it's exactly the fallback day
+        if current_date.day == config.fallback_day:
+            return True, "regular_sip_fallback_day"
+
+        # Check if fallback day was a holiday and this is the next available date
+        # Look back up to 5 days to see if we missed the fallback day
+        for days_back in range(1, 6):
+            if i >= days_back:
+                check_date = data.iloc[i - days_back]['timestamp']
+                if (check_date.day == config.fallback_day and
+                        check_date.month == current_date.month and
+                        check_date.year == current_date.year):
+                    # Found the fallback day in recent history, this could be makeup
+                    return True, f"sip_makeup_after_{days_back}_days"
+
+        # Check if this is the last trading day of the month and we haven't invested yet
+        if self._is_last_trading_day_of_month(current_date, i, data):
+            month_key = f"{current_date.year}-{current_date.month:02d}"
+
+            # Check if we have any investments this month
+            if (self.monthly_tracker and
+                    symbol in self.monthly_tracker.monthly_investments and
+                    month_key in self.monthly_tracker.monthly_investments[symbol]):
+                monthly_data = self.monthly_tracker.monthly_investments[symbol][month_key]
+                if monthly_data['investment_count'] == 0:
+                    return True, "last_trading_day_makeup"
+
+        return False, "not_sip_date"
+
+    def _is_last_trading_day_of_month(self, current_date: datetime,
+                                      i: int, data: pd.DataFrame) -> bool:
+        """Check if this is the last trading day of the month"""
+        # Look ahead to see if next trading day is in different month
+        if i < len(data) - 1:
+            next_date = data.iloc[i + 1]['timestamp']
+            return current_date.month != next_date.month
+
+        # If this is the last day in dataset, check calendar
+        return current_date.month != (current_date + timedelta(days=1)).month
+
+    def _is_month_end_or_fallback_approaching(self, current_date: datetime,
+                                              config: SIPConfig, i: int,
+                                              data: pd.DataFrame) -> bool:
+        """
+        ENHANCEMENT 1: Check if we should force remaining investment
+        """
+        # Check if we're within 3 trading days of month end
+        days_to_check = 3
+        for days_ahead in range(1, days_to_check + 1):
+            if i + days_ahead < len(data):
+                future_date = data.iloc[i + days_ahead]['timestamp']
+                if future_date.month != current_date.month:
+                    return True
+
+        # Also check if we're past fallback day and approaching month end
+        if current_date.day > config.fallback_day:
+            days_remaining_in_month = (current_date.replace(month=current_date.month + 1, day=1) - current_date).days
+            return days_remaining_in_month <= 5
+
+        return False
+
     def _calculate_enhanced_results(self, symbol: str, total_investment: float,
-                                    final_portfolio_value: float, total_units: float,
-                                    trades: List[Dict], config,
-                                    start_date: str, end_date: str, data,
-                                    monthly_exceeded_count: int, price_threshold_skipped: int) -> Dict:
+                                  final_portfolio_value: float, total_units: float,
+                                  trades: List[Dict], config, start_date: str,
+                                  end_date: str, data, monthly_exceeded_count: int,
+                                  price_threshold_skipped: int) -> Dict:
         """Calculate comprehensive performance metrics"""
 
-        # Basic performance metrics
         total_return_percent = ((final_portfolio_value / total_investment) - 1) * 100 if total_investment > 0 else 0
 
         # Calculate CAGR
         start_timestamp = data.iloc[0]['timestamp']
         end_timestamp = data.iloc[-1]['timestamp']
         years = (end_timestamp - start_timestamp).days / 365.25
-        cagr_percent = ((final_portfolio_value / total_investment) ** (
-                    1 / years) - 1) * 100 if years > 0 and total_investment > 0 else 0
+        cagr_percent = ((final_portfolio_value / total_investment) ** (1 / years) - 1) * 100 if years > 0 and total_investment > 0 else 0
 
-        # Get monthly summary and skipped investments
+        # Get monthly summary and analytics
         monthly_summary = self.monthly_tracker.get_monthly_summary(symbol)
         skipped_investments = self.monthly_tracker.skipped_investments
 
+        # Count different trade types
+        extreme_trades = len([t for t in trades if t.get('is_extreme', False)])
+        force_trades = len([t for t in trades if t.get('is_force', False)])
+        regular_trades = len(trades) - extreme_trades - force_trades
+
         results = {
             'symbol': symbol,
-            'strategy_name': 'Enhanced SIP with Monthly Limits',
+            'strategy_name': 'Enhanced SIP V4 with Comprehensive Fixes',
             'period': f"{start_date} to {end_date}",
             'total_investment': float(total_investment),
             'final_portfolio_value': float(final_portfolio_value),
@@ -2732,36 +2911,30 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
             'cagr_percent': float(cagr_percent),
             'num_trades': len(trades),
             'num_skipped': len(skipped_investments),
+            'trade_breakdown': {
+                'regular_trades': regular_trades,
+                'extreme_trades': extreme_trades,
+                'force_trades': force_trades
+            },
             'monthly_limit_exceeded': monthly_exceeded_count,
             'price_threshold_skipped': price_threshold_skipped,
-            'config_used': {
-                'fixed_investment': float(config.fixed_investment),
-                'max_amount_in_a_month': float(config.max_amount_in_a_month),
-                'price_reduction_threshold': float(config.price_reduction_threshold),
-                'drawdown_threshold_1': float(config.drawdown_threshold_1),
-                'drawdown_threshold_2': float(config.drawdown_threshold_2),
-                'investment_multiplier_1': float(config.investment_multiplier_1),
-                'investment_multiplier_2': float(config.investment_multiplier_2),
-                'investment_multiplier_3': float(config.investment_multiplier_3)
-            },
-            'trades': self._convert_numpy_types(trades),
-            'skipped_investments': self._convert_numpy_types(skipped_investments),
-            'monthly_summary': self._convert_numpy_types(monthly_summary),
-            'final_price': float(data.iloc[-1]['close']),
-            'analytics': {
-                'monthly_utilization': self._calculate_monthly_utilization(monthly_summary),
-                'skip_analysis': self._analyze_skips(skipped_investments),
-                'trade_frequency': len(trades) / max(1, years),
-                'avg_monthly_investment': total_investment / max(1, years * 12)
-            }
+            'trades': trades,
+            'skipped_investments': skipped_investments,
+            'monthly_summary': monthly_summary,
+            'config': config,
+            'enhancements_applied': [
+                'Force remaining investment at month end',
+                'Holiday handling for regular SIP dates',
+                'Extreme opportunity detection (>15% drawdown gets 4x investment)',
+                'Monthly investment limits with extreme bypass',
+                'Comprehensive trade categorization'
+            ]
         }
 
-        logger.info(f"✅ Enhanced backtest completed for {symbol}:")
-        logger.info(f"   📊 Investment: ₹{total_investment:,.2f}")
-        logger.info(f"   💰 Final Value: ₹{final_portfolio_value:,.2f}")
-        logger.info(f"   📈 CAGR: {cagr_percent:.2f}%")
-        logger.info(f"   🔄 Total Trades: {len(trades)}")
-        logger.info(f"   ⏭️ Skipped: {len(skipped_investments)}")
+        logger.info(f"✅ Enhanced backtest V4 completed for {symbol}")
+        logger.info(f"📊 Results: {regular_trades} regular + {extreme_trades} extreme + {force_trades} force trades")
+        logger.info(f"💰 Total investment: ₹{total_investment:,.2f}, Final value: ₹{final_portfolio_value:,.2f}")
+        logger.info(f"📈 Return: {total_return_percent:.2f}%, CAGR: {cagr_percent:.2f}%")
 
         return results
 

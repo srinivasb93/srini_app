@@ -44,7 +44,7 @@ from backend.app.database import (
     get_nsedata_db
 )
 
-from backend.app.routes.sip_routes import sip_router, SIPBacktestRequest, SIPConfigRequest
+from backend.app.routes.sip_routes import sip_router, SIPBacktestRequest, SIPConfigRequest, daily_signal_check
 from backend.app.routes import data
 
 # Continue with your other imports...
@@ -176,77 +176,6 @@ async def lifespan(app: FastAPI):
 
         except Exception as e:
             logger.error(f"Shutdown error: {e}")
-
-async def enhanced_cleanup():
-    """Enhanced cleanup that properly handles all resources"""
-    global order_monitor, order_manager, user_apis, background_tasks
-
-    logger.info("🛑 Starting enhanced application cleanup...")
-
-    try:
-        # Step 1: Cancel background tasks
-        if background_tasks:
-            logger.info(f"🔄 Cancelling {len(background_tasks)} background tasks...")
-
-            for task in background_tasks:
-                if not task.done():
-                    task.cancel()
-                    logger.debug(f"Cancelled task: {task.get_name()}")
-
-            # Wait for tasks to complete with timeout
-            if background_tasks:
-                try:
-                    await asyncio.wait_for(
-                        asyncio.gather(*background_tasks, return_exceptions=True),
-                        timeout=5.0
-                    )
-                    logger.info("✅ Background tasks cancelled successfully")
-                except asyncio.TimeoutError:
-                    logger.warning("⚠️ Some background tasks did not complete within timeout")
-
-        # Step 2: Cleanup service objects
-        if order_monitor:
-            try:
-                await order_monitor.cancel_all_tasks()
-                logger.info("✅ Order monitor cleaned up")
-            except Exception as e:
-                logger.warning(f"Error cleaning up order monitor: {e}")
-
-        # Step 3: Cancel any remaining asyncio tasks
-        current_task = asyncio.current_task()
-        remaining_tasks = [
-            task for task in asyncio.all_tasks()
-            if task != current_task and not task.done()
-        ]
-
-        if remaining_tasks:
-            logger.info(f"🔄 Cancelling {len(remaining_tasks)} remaining tasks...")
-            for task in remaining_tasks:
-                task.cancel()
-
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*remaining_tasks, return_exceptions=True),
-                    timeout=3.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Some tasks did not respond to cancellation")
-
-        # Step 4: Close database connections (most critical)
-        logger.info("🔄 Closing database connections...")
-        await cleanup_databases()
-        logger.info("✅ Database connections closed successfully")
-
-        # Step 5: Clear global references
-        order_monitor = None
-        order_manager = None
-        user_apis.clear()
-        background_tasks.clear()
-
-        logger.info("✅ Enhanced cleanup completed successfully")
-
-    except Exception as e:
-        logger.error(f"❌ Error during enhanced cleanup: {e}")
 
 app = FastAPI(
     title="Modern Algorithmic Trading Platform",
@@ -1731,15 +1660,17 @@ if __name__ == "__main__":
             config=SIPConfigRequest(
                 fixed_investment=3000,
                 max_amount_in_a_month=6000,
-                drawdown_threshold_1=-10,
-                drawdown_threshold_2=-4,
-                investment_multiplier_1=1.5,
-                investment_multiplier_2=2,
-                investment_multiplier_3=3,
+                major_drawdown_threshold=-10,
+                minor_drawdown_threshold=-4,
+                extreme_drawdown_threshold=-15,
+                major_drawdown_inv_multiplier=3,
+                minor_drawdown_inv_multiplier=2,
+                extreme_drawdown_inv_multiplier=4,
                 rolling_window=100,
                 fallback_day=28,
                 min_investment_gap_days=7,
-                price_reduction_threshold=5
+                price_reduction_threshold=5,
+                force_remaining_investment=True
             )
         )
 
@@ -1751,6 +1682,7 @@ if __name__ == "__main__":
         nsedata_db = await nsedata_db_gen.__anext__()
 
         await run_sip_backtest(request_config, background_tasks, trading_db=db, nsedata_db=nsedata_db)
+        # await daily_signal_check()
 
 
     asyncio.run(main())

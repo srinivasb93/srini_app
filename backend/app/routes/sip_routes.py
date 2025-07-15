@@ -197,16 +197,18 @@ class SIPSymbolConfig(BaseModel):
 class SIPConfigRequest(BaseModel):
     """Enhanced SIP Configuration with monthly investment limits"""
     fixed_investment: float = 5000
-    max_amount_in_a_month: Optional[float] = 20000
-    drawdown_threshold_1: float = -10.0
-    drawdown_threshold_2: float = -4.0
-    investment_multiplier_1: float = 2.0
-    investment_multiplier_2: float = 3.0
-    investment_multiplier_3: float = 5.0
+    major_drawdown_threshold: float = -10.0
+    minor_drawdown_threshold: float = -4.0
+    extreme_drawdown_threshold: float = -15.0
+    minor_drawdown_inv_multiplier: float = 1.75
+    major_drawdown_inv_multiplier: float = 3.0
+    extreme_drawdown_inv_multiplier: float = 4.0  # For extreme opportunities
     rolling_window: int = 100
-    fallback_day: int = 22
+    fallback_day: int = 28
     min_investment_gap_days: int = 5
-    price_reduction_threshold: float = 4.0  # 4% price reduction for multiple signals
+    max_amount_in_a_month: Optional[float] = None
+    price_reduction_threshold: float = 4.0
+    force_remaining_investment: bool = True  # Force invest remaining amount
 
     @validator('fixed_investment')
     def validate_investment(cls, v):
@@ -372,7 +374,7 @@ def merge_symbol_config_with_fallback(symbol_config: Dict, fallback_config: Dict
             return fallback_config.copy()
 
         # Check if symbol config has actual SIP parameters
-        sip_params = ['fixed_investment', 'drawdown_threshold_1', 'rolling_window', 'fallback_day']
+        sip_params = ['fixed_investment', 'major_drawdown_threshold', 'rolling_window', 'fallback_day']
         has_sip_params = any(param in symbol_individual_config for param in sip_params)
 
         if not has_sip_params:
@@ -391,144 +393,125 @@ def merge_symbol_config_with_fallback(symbol_config: Dict, fallback_config: Dict
         return fallback_config.copy()
 
 
-async def get_monthly_investment_total(portfolio_id: str, symbol: str, trading_db: AsyncSession) -> float:
-    """Get total investment for a symbol in current month"""
-    try:
-        current_month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        next_month_start = (current_month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+# async def get_monthly_investment_total(portfolio_id: str, symbol: str, trading_db: AsyncSession) -> float:
+#     """Get total investment for a symbol in current month"""
+#     try:
+#         current_month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+#         next_month_start = (current_month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+#
+#         query = text("""
+#             SELECT COALESCE(SUM(amount), 0) as total_invested
+#             FROM sip_actual_trades
+#             WHERE portfolio_id = :portfolio_id
+#             AND symbol = :symbol
+#             AND timestamp >= :month_start
+#             AND timestamp < :next_month
+#         """)
+#
+#         result = await trading_db.execute(query, {
+#             'portfolio_id': portfolio_id,
+#             'symbol': symbol,
+#             'month_start': current_month_start,
+#             'next_month': next_month_start
+#         })
+#
+#         total = result.scalar() or 0.0
+#         logger.debug(f"Monthly investment total for {symbol}: ₹{total:.2f}")
+#         return total
+#
+#     except Exception as e:
+#         logger.error(f"Error fetching monthly investment total for {symbol}: {e}")
+#         return 0.0
 
-        query = text("""
-            SELECT COALESCE(SUM(amount), 0) as total_invested
-            FROM sip_actual_trades
-            WHERE portfolio_id = :portfolio_id 
-            AND symbol = :symbol
-            AND timestamp >= :month_start
-            AND timestamp < :next_month
-        """)
 
-        result = await trading_db.execute(query, {
-            'portfolio_id': portfolio_id,
-            'symbol': symbol,
-            'month_start': current_month_start,
-            'next_month': next_month_start
-        })
-
-        total = result.scalar() or 0.0
-        logger.debug(f"Monthly investment total for {symbol}: ₹{total:.2f}")
-        return total
-
-    except Exception as e:
-        logger.error(f"Error fetching monthly investment total for {symbol}: {e}")
-        return 0.0
-
-
-async def get_investment_signals_with_monthly_limits(
-        symbol: str,
-        config_dict: Dict,
-        strategy,
-        nsedata_db: AsyncSession,
-        trading_db: AsyncSession,
-        portfolio_id: str
-) -> Dict:
-    """
-    Generate investment signals using existing enhanced strategy with monthly limits
-    - Uses the actual get_next_investment_signals from EnhancedSIPStrategy
-    - Adds monthly investment tracking on top
-    - Matches backtesting logic exactly
-    """
-    try:
-        # Fetch recent data (last 6 months for better analysis)
-        end_date = datetime.now().strftime('%Y-%m-%d')
-        start_date = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
-
-        # Get historical data using existing method
-        data = await strategy.fetch_data_from_db_async(symbol, start_date, end_date)
-
-        if data.empty:
-            return {
-                "signal": "NO_DATA",
-                "confidence": 0,
-                "recommended_amount": 0,
-                "current_price": 0,
-                "message": "Insufficient data for analysis"
-            }
-
-        # Create SIPConfig object from dictionary
-        config_obj = SIPConfig(
-            fixed_investment=config_dict.get('fixed_investment', 5000),
-            drawdown_threshold_1=config_dict.get('drawdown_threshold_1', -10.0),
-            drawdown_threshold_2=config_dict.get('drawdown_threshold_2', -4.0),
-            investment_multiplier_1=config_dict.get('investment_multiplier_1', 2.0),
-            investment_multiplier_2=config_dict.get('investment_multiplier_2', 3.0),
-            investment_multiplier_3=config_dict.get('investment_multiplier_3', 5.0),
-            rolling_window=config_dict.get('rolling_window', 100),
-            fallback_day=config_dict.get('fallback_day', 22),
-            min_investment_gap_days=config_dict.get('min_investment_gap_days', 5),
-            max_amount_in_a_month=config_dict.get('max_amount_in_a_month',
-                                                  config_dict.get('fixed_investment', 5000) * 4),
-            price_reduction_threshold=config_dict.get('price_reduction_threshold', 4.0)
-        )
-
-        # Use existing get_next_investment_signals method - this gives us the SAME logic as backtesting
-        signals = strategy.get_next_investment_signals(data, config_obj)
-
-        # Ensure signals is a dictionary and has required fields
-        if not isinstance(signals, dict):
-            signals = {
-                "signal": "ERROR",
-                "confidence": 0,
-                "recommended_amount": config_obj.fixed_investment,
-                "current_price": float(data['close'].iloc[-1]) if not data.empty else 0,
-                "message": "Invalid signal format from strategy"
-            }
-
-        # Ensure current_price is set
-        if 'current_price' not in signals:
-            signals['current_price'] = float(data['close'].iloc[-1]) if not data.empty else 0
-
-        # Check monthly investment limits AFTER getting base signals
-        monthly_invested = await get_monthly_investment_total(portfolio_id, symbol, trading_db)
-        max_monthly = config_obj.max_amount_in_a_month
-        available_monthly_budget = max(0, max_monthly - monthly_invested)
-
-        # Apply monthly limit constraints to recommended amount
-        recommended_amount = signals.get('recommended_amount', config_obj.fixed_investment)
-
-        # If no budget available, override signal
-        if available_monthly_budget < config_obj.fixed_investment:
-            signals.update({
-                "signal": "MONTHLY_LIMIT_REACHED",
-                "confidence": 0,
-                "recommended_amount": 0,
-                "message": f"Monthly limit reached. Available: ₹{available_monthly_budget:.2f}"
-            })
-        elif recommended_amount > available_monthly_budget:
-            # Adjust amount to available budget
-            signals.update({
-                'recommended_amount': available_monthly_budget,
-                'amount_adjusted': True,
-                'original_amount': recommended_amount,
-                'message': f"Amount adjusted for monthly limit. Available: ₹{available_monthly_budget:.2f}"
-            })
-
-        # Add monthly tracking metadata (same as backtesting)
-        signals.update({
-            "monthly_invested_so_far": monthly_invested,
-            "monthly_budget_remaining": available_monthly_budget,
-            "monthly_limit": max_monthly
-        })
-
-        return signals
-
-    except Exception as e:
-        logger.error(f"Error generating enhanced signals for {symbol}: {e}")
-        return {
-            "signal": "ERROR",
-            "confidence": 0,
-            "recommended_amount": 0,
-            "current_price": 0,
-            "message": f"Signal generation failed: {str(e)}"
-        }
+# async def get_investment_signals_with_monthly_limits(
+#         symbol: str,
+#         config_dict: Dict,
+#         strategy,
+#         nsedata_db: AsyncSession,
+#         trading_db: AsyncSession,
+#         portfolio_id: str
+# ) -> Dict:
+#     """
+#     Generate investment signals using existing enhanced strategy with monthly limits
+#     - Uses the actual get_next_investment_signals from EnhancedSIPStrategy
+#     - Adds monthly investment tracking on top
+#     - Matches backtesting logic exactly
+#     """
+#     try:
+#         # Create SIPConfig object from dictionary
+#         config_obj = SIPConfig(
+#                 fixed_investment=config_dict.get('fixed_investment', 5000),
+#                 drawdown_threshold_1=config_dict.get('drawdown_threshold_1', -10.0),
+#                 drawdown_threshold_2=config_dict.get('drawdown_threshold_2', -4.0),
+#                 investment_multiplier_1=config_dict.get('investment_multiplier_1', 2.0),
+#                 investment_multiplier_2=config_dict.get('investment_multiplier_2', 3.0),
+#                 investment_multiplier_3=config_dict.get('investment_multiplier_3', 5.0),
+#                 investment_multiplier_4=config_dict.get('investment_multiplier_4', 4.0),  # For extreme opportunities
+#                 rolling_window=config_dict.get('rolling_window', 100),
+#                 fallback_day=config_dict.get('fallback_day', 22),
+#                 min_investment_gap_days=config_dict.get('min_investment_gap_days', 5),
+#                 max_amount_in_a_month=config_dict.get('max_amount_in_a_month',
+#                                                      config_dict.get('fixed_investment', 5000) * 4),
+#                 price_reduction_threshold=config_dict.get('price_reduction_threshold', 4.0),
+#                 extreme_drawdown_threshold=config_dict.get('extreme_drawdown_threshold', -15.0),
+#                 force_remaining_investment=config_dict.get('force_remaining_investment', True)
+#             )
+#
+#         # Use existing get_next_investment_signals method - this gives us the SAME logic as backtesting
+#         signals = strategy.get_next_investment_signals(symbol, config_obj)
+#
+#         # Ensure signals is a dictionary and has required fields
+#         if not isinstance(signals, dict):
+#             signals = {
+#                 "signal": "ERROR",
+#                 "confidence": 0,
+#                 "recommended_amount": config_obj.fixed_investment,
+#                 "message": "Invalid signal format from strategy"
+#             }
+#
+#         # Check monthly investment limits AFTER getting base signals
+#         monthly_invested = await get_monthly_investment_total(portfolio_id, symbol, trading_db)
+#         max_monthly = config_obj.max_amount_in_a_month
+#
+#         # Apply monthly limit constraints to recommended amount
+#         recommended_amount = signals.get('recommended_amount', config_obj.fixed_investment)
+#
+#         # If no budget available, override signal
+#         if available_monthly_budget < config_obj.fixed_investment:
+#             signals.update({
+#                 "signal": "MONTHLY_LIMIT_REACHED",
+#                 "confidence": 0,
+#                 "recommended_amount": 0,
+#                 "message": f"Monthly limit reached. Available: ₹{available_monthly_budget:.2f}"
+#             })
+#         elif recommended_amount > available_monthly_budget:
+#             # Adjust amount to available budget
+#             signals.update({
+#                 'recommended_amount': available_monthly_budget,
+#                 'amount_adjusted': True,
+#                 'original_amount': recommended_amount,
+#                 'message': f"Amount adjusted for monthly limit. Available: ₹{available_monthly_budget:.2f}"
+#             })
+#
+#         # Add monthly tracking metadata (same as backtesting)
+#         signals.update({
+#             "monthly_invested_so_far": monthly_invested,
+#             "monthly_budget_remaining": available_monthly_budget,
+#             "monthly_limit": max_monthly
+#         })
+#
+#         return signals
+#
+#     except Exception as e:
+#         logger.error(f"Error generating enhanced signals for {symbol}: {e}")
+#         return {
+#             "signal": "ERROR",
+#             "confidence": 0,
+#             "recommended_amount": 0,
+#             "current_price": 0,
+#             "message": f"Signal generation failed: {str(e)}"
+#         }
 
 
 async def get_user_apis_for_gtt(user_id: str, trading_db: AsyncSession) -> Dict:
@@ -715,11 +698,19 @@ async def daily_signal_check():
     metrics = {
         'start_time': job_start_time,
         'portfolios_processed': 0,
+        'symbols_processed': [],
         'signals_generated': 0,
+        'extreme_opportunities_detected': 0,
+        'force_investments_made': 0,
+        'holiday_makeups_executed': 0,
         'errors_encountered': 0,
-        'symbols_processed': []
+        'gtt_orders_placed': 0,
+        'total_investment_amount': 0.0
     }
 
+    # Database session management
+    trading_db_generator = None
+    nsedata_db_generator = None
     trading_db = None
     nsedata_db = None
 
@@ -733,7 +724,7 @@ async def daily_signal_check():
         nsedata_db = await nsedata_db_generator.__anext__()
         logger.info("✅ Database sessions acquired successfully")
 
-        # Get all active portfolios
+        # Get all active SIP portfolios
         portfolios_query = text("""
             SELECT portfolio_id, user_id, symbols, config, 
                    total_invested, current_units, next_investment_date
@@ -751,14 +742,13 @@ async def daily_signal_check():
             return
 
         # Initialize strategy
-        strategy = EnhancedSIPStrategy(
+        strategy = EnhancedSIPStrategyWithLimits(
             nsedata_session=nsedata_db,
             trading_session=trading_db
         )
 
         # Process each portfolio
         for portfolio in portfolios:
-            portfolio_start_time = datetime.now()
             portfolio_id, user_id, symbols_json, config_json, total_invested, current_units, next_investment_date = portfolio
 
             try:
@@ -775,7 +765,11 @@ async def daily_signal_check():
 
 
                 config = SIPConfig(**config_dict)
+                portfolio_signals = {}
                 portfolio_signals_generated = 0
+                portfolio_extreme_opportunities = 0
+                portfolio_force_investments = 0
+                portfolio_holiday_makeups = 0
 
                 # Process each symbol in the portfolio
                 for symbol_config in symbols_data:
@@ -837,17 +831,38 @@ async def daily_signal_check():
 
                         # SOLUTION 2: Use enhanced signal generation with monthly limits (same as backtest)
                         try:
-                            signals = await get_investment_signals_with_monthly_limits(
-                                symbol=symbol,
-                                config_dict=merged_config,
-                                strategy=strategy,
-                                nsedata_db=nsedata_db,
-                                trading_db=trading_db,
-                                portfolio_id=portfolio_id
+                            # signals = await get_investment_signals_with_monthly_limits(
+                            #     symbol=symbol,
+                            #     config_dict=merged_config,
+                            #     strategy=strategy,
+                            #     nsedata_db=nsedata_db,
+                            #     trading_db=trading_db,
+                            #     portfolio_id=portfolio_id
+                            # )
+                            config_obj = SIPConfig(
+                                fixed_investment=config_dict.get('fixed_investment', 5000),
+                                major_drawdown_threshold=config_dict.get('major_drawdown_threshold', -10.0),
+                                minor_drawdown_threshold=config_dict.get('minor_drawdown_threshold', -4.0),
+                                minor_drawdown_inv_multiplier=config_dict.get('minor_drawdown_inv_multiplier', 3.0),
+                                major_drawdown_inv_multiplier=config_dict.get('major_drawdown_inv_multiplier', 5.0),
+                                extreme_drawdown_inv_multiplier=config_dict.get('extreme_drawdown_inv_multiplier', 4.0),
+                                # For extreme opportunities
+                                rolling_window=config_dict.get('rolling_window', 100),
+                                fallback_day=config_dict.get('fallback_day', 22),
+                                min_investment_gap_days=config_dict.get('min_investment_gap_days', 5),
+                                max_amount_in_a_month=config_dict.get('max_amount_in_a_month',
+                                                                      config_dict.get('fixed_investment', 5000) * 4),
+                                price_reduction_threshold=config_dict.get('price_reduction_threshold', 4.0),
+                                extreme_drawdown_threshold=config_dict.get('extreme_drawdown_threshold', -15.0),
+                                force_remaining_investment=config_dict.get('force_remaining_investment', True)
                             )
+
+                            # Use existing get_next_investment_signals method - this gives us the SAME logic as backtesting
+                            signal_result = await strategy.get_next_investment_signals(symbol, config_obj)
+
                         except Exception as signal_error:
                             logger.error(f"Error generating signals for {symbol}: {signal_error}")
-                            signals = {
+                            signal_result = {
                                 "signal": "ERROR",
                                 "confidence": 0,
                                 "recommended_amount": 0,
@@ -856,53 +871,88 @@ async def daily_signal_check():
                             }
 
                         # Validate signals response
-                        if not isinstance(signals, dict):
-                            logger.error(f"Invalid signals response for {symbol}: {type(signals)}")
+                        if not isinstance(signal_result, dict):
+                            logger.error(f"Invalid signals response for {symbol}: {type(signal_result)}")
                             continue
 
+                        if signal_result and signal_result.get('signal') not in ['NO_DATA', 'ERROR']:
+                            # Check for different signal types
+                            signal_type = signal_result.get('signal', 'NORMAL')
+                            is_extreme = signal_result.get('is_extreme_opportunity', False)
+                            is_force = signal_result.get('is_force_investment', False)
+                            is_holiday_makeup = signal_result.get('is_holiday_makeup', False)
+
+                            # Track different investment types
+                            if is_extreme:
+                                portfolio_extreme_opportunities += 1
+                                metrics['extreme_opportunities_detected'] += 1
+                                logger.info(f"🔥 EXTREME OPPORTUNITY detected for {symbol}: "
+                                            f"₹{signal_result.get('recommended_amount', 0):,.2f}")
+
+                            if is_force:
+                                portfolio_force_investments += 1
+                                metrics['force_investments_made'] += 1
+                                logger.info(f"💰 FORCE INVESTMENT for {symbol}: "
+                                            f"₹{signal_result.get('recommended_amount', 0):,.2f}")
+
+                            if is_holiday_makeup:
+                                portfolio_holiday_makeups += 1
+                                metrics['holiday_makeups_executed'] += 1
+                                logger.info(f"📅 HOLIDAY MAKEUP for {symbol}: "
+                                            f"₹{signal_result.get('recommended_amount', 0):,.2f}")
+
+                            # Store signal for potential GTT order placement
+                            if signal_type in ['BUY', 'STRONG_BUY']:
+                                portfolio_signals[symbol] = signal_result
+                                metrics['signals_generated'] += 1
+                                metrics['total_investment_amount'] += signal_result.get('recommended_amount', 0)
+
+                        else:
+                            logger.debug(
+                                f"📊 No actionable signal for {symbol}: {signal_result.get('signal', 'UNKNOWN')}")
+
                         # Add metadata to signals
-                        signals.update({
-                            'symbol': symbol,
+                        signal_result.update({
                             'allocation_percentage': allocation_pct,
                             'portfolio_id': portfolio_id,
                             'config_used': 'merged' if merged_config != config_dict else 'fallback'
                         })
 
                         # Adjust recommended amount based on allocation percentage
-                        if 'recommended_amount' in signals and allocation_pct != 100.0:
-                            base_amount = signals['recommended_amount']
+                        if 'recommended_amount' in signal_result and allocation_pct != 100.0:
+                            base_amount = signal_result['recommended_amount']
                             allocated_amount = (base_amount * allocation_pct) / 100.0
-                            signals['allocated_amount'] = allocated_amount
-                            signals['base_amount'] = base_amount
-                            signals['recommended_amount'] = allocated_amount
+                            signal_result['allocated_amount'] = allocated_amount
+                            signal_result['base_amount'] = base_amount
+                            signal_result['recommended_amount'] = allocated_amount
 
                         portfolio_signals_generated += 1
 
                         logger.info(
-                            f"✅ Generated signals for {symbol}: {signals.get('signal', 'UNKNOWN')} "
-                            f"(confidence: {signals.get('confidence', 0):.2f}, "
-                            f"amount: ₹{signals.get('recommended_amount', 0):,.2f})"
+                            f"✅ Generated signal_result for {symbol}: {signal_result.get('signal', 'UNKNOWN')} "
+                            f"(confidence: {signal_result.get('confidence', 0):.2f}, "
+                            f"amount: ₹{signal_result.get('recommended_amount', 0):,.2f})"
                         )
 
                         # SOLUTION 3: GTT order integration
                         try:
-                            if signals.get('signal') not in ['NO_DATA', 'ERROR']:
+                            if signal_result.get('signal') not in ['NO_DATA', 'ERROR', 'NORMAL']:
                                 save_result = await save_signal_with_gtt_order(
-                                    portfolio_id, symbol, signals, trading_db, merged_config
+                                    portfolio_id, symbol, signal_result, trading_db, merged_config
                                 )
 
                                 if save_result.get('status') == 'success':
                                     logger.info(f"✅ Signal and REAL GTT order saved successfully for {symbol}")
-                                    metrics['signals_generated'] += 1
+                                    metrics['signal_result_generated'] += 1
                                 elif save_result.get('status') in ['partial_success', 'signal_only']:
                                     logger.info(
                                         f"⚠️ Signal saved (GTT partial/none) for {symbol}: {save_result.get('message')}")
-                                    metrics['signals_generated'] += 1
+                                    metrics['signal_result_generated'] += 1
                                 else:
                                     logger.error(f"❌ Failed to save signal for {symbol}: {save_result.get('message')}")
                                     metrics['errors_encountered'] += 1
                             else:
-                                logger.info(f"ℹ️ No actionable signal for {symbol}: {signals.get('signal')}")
+                                logger.info(f"ℹ️ No actionable signal for {symbol}: {signal_result.get('signal')}")
 
                         except Exception as save_error:
                             logger.error(f"Error saving signal for {symbol}: {save_error}")
@@ -2372,9 +2422,9 @@ def _generate_optimized_config(analysis: Dict, risk_tolerance: str) -> Dict:
 
     # Risk tolerance multipliers
     risk_multipliers = {
-        "conservative": {"monthly": 3.0, "price_threshold": 5.0, "multipliers": [1.5, 2.0, 2.5]},
-        "moderate": {"monthly": 4.0, "price_threshold": 4.0, "multipliers": [2.0, 3.0, 4.0]},
-        "aggressive": {"monthly": 5.0, "price_threshold": 3.0, "multipliers": [2.5, 4.0, 6.0]}
+        "conservative": {"monthly": 3.0, "price_threshold": 5.0, "multipliers": [1.5, 2.5]},
+        "moderate": {"monthly": 4.0, "price_threshold": 4.0, "multipliers": [2.0, 4.0]},
+        "aggressive": {"monthly": 5.0, "price_threshold": 3.0, "multipliers": [2.5, 6.0]}
     }
 
     risk_params = risk_multipliers.get(risk_tolerance, risk_multipliers["moderate"])
@@ -2399,11 +2449,10 @@ def _generate_optimized_config(analysis: Dict, risk_tolerance: str) -> Dict:
         "fixed_investment": base_config.fixed_investment,
         "max_amount_in_a_month": base_config.fixed_investment * monthly_multiplier,
         "price_reduction_threshold": round(price_threshold, 1),
-        "drawdown_threshold_1": -12.0 if risk_tolerance == "conservative" else -8.0 if risk_tolerance == "moderate" else -5.0,
-        "drawdown_threshold_2": -6.0 if risk_tolerance == "conservative" else -4.0 if risk_tolerance == "moderate" else -2.0,
-        "investment_multiplier_1": risk_params["multipliers"][0],
-        "investment_multiplier_2": risk_params["multipliers"][1],
-        "investment_multiplier_3": risk_params["multipliers"][2],
+        "major_drawdown_threshold": -12.0 if risk_tolerance == "conservative" else -8.0 if risk_tolerance == "moderate" else -5.0,
+        "minor_drawdown_threshold": -6.0 if risk_tolerance == "conservative" else -4.0 if risk_tolerance == "moderate" else -2.0,
+        "minor_drawdown_inv_multiplier": risk_params["multipliers"][0],
+        "major_drawdown_inv_multiplier": risk_params["multipliers"][1],
         "rolling_window": base_config.rolling_window,
         "fallback_day": base_config.fallback_day,
         "min_investment_gap_days": 7 if risk_tolerance == "conservative" else 5 if risk_tolerance == "moderate" else 3
@@ -3706,11 +3755,10 @@ async def get_default_config():
             "fixed_investment": config.fixed_investment,
             "max_amount_in_a_month": config.max_amount_in_a_month,
             "price_reduction_threshold": config.price_reduction_threshold,
-            "drawdown_threshold_1": config.drawdown_threshold_1,
-            "drawdown_threshold_2": config.drawdown_threshold_2,
-            "investment_multiplier_1": config.investment_multiplier_1,
-            "investment_multiplier_2": config.investment_multiplier_2,
-            "investment_multiplier_3": config.investment_multiplier_3,
+            "major_drawdown_threshold": config.major_drawdown_threshold,
+            "minor_drawdown_threshold": config.minor_drawdown_threshold,
+            "minor_drawdown_inv_multiplier": config.minor_drawdown_inv_multiplier,
+            "major_drawdown_inv_multiplier": config.major_drawdown_inv_multiplier,
             "rolling_window": config.rolling_window,
             "fallback_day": config.fallback_day,
             "min_investment_gap_days": config.min_investment_gap_days
@@ -3821,27 +3869,24 @@ async def compare_strategies(
         strategies = {
             "Conservative": SIPConfig(
                 fixed_investment=5000,
-                drawdown_threshold_1=-15.0,
-                drawdown_threshold_2=-8.0,
-                investment_multiplier_1=1.5,
-                investment_multiplier_2=2.0,
-                investment_multiplier_3=2.5
+                major_drawdown_threshold=-15.0,
+                minor_drawdown_threshold=-8.0,
+                minor_drawdown_inv_multiplier=2.0,
+                major_drawdown_inv_multiplier=2.5
             ),
             "Balanced": SIPConfig(
                 fixed_investment=5000,
-                drawdown_threshold_1=-10.0,
-                drawdown_threshold_2=-5.0,
-                investment_multiplier_1=2.0,
-                investment_multiplier_2=3.0,
-                investment_multiplier_3=4.0
+                major_drawdown_threshold=-10.0,
+                minor_drawdown_threshold=-5.0,
+                minor_drawdown_inv_multiplier=3.0,
+                major_drawdown_inv_multiplier=4.0
             ),
             "Aggressive": SIPConfig(
                 fixed_investment=5000,
-                drawdown_threshold_1=-5.0,
-                drawdown_threshold_2=-2.0,
-                investment_multiplier_1=3.0,
-                investment_multiplier_2=5.0,
-                investment_multiplier_3=8.0
+                major_drawdown_threshold=-5.0,
+                minor_drawdown_threshold=-2.0,
+                minor_drawdown_inv_multiplier=5.0,
+                major_drawdown_inv_multiplier=8.0
             )
         }
 
@@ -3916,11 +3961,12 @@ async def quick_sip_test(
         # Create a basic config for quick testing
         config = SIPConfig(
             fixed_investment=investment_amount,
-            drawdown_threshold_1=-10.0,
-            drawdown_threshold_2=-4.0,
-            investment_multiplier_1=2.0,
-            investment_multiplier_2=3.0,
-            investment_multiplier_3=5.0
+            major_drawdown_threshold=-10.0,
+            minor_drawdown_threshold=-4.0,
+            extreme_drawdown_threshold=15.0,
+            minor_drawdown_inv_multiplier=3.0,
+            major_drawdown_inv_multiplier=5.0,
+            extreme_drawdown_inv_multiplier=4.0
         )
 
         strategy = EnhancedSIPStrategy(nsedata_session=nsedata_db)
@@ -3993,13 +4039,12 @@ async def get_strategy_templates():
             "description": "Lower risk approach with smaller multipliers and deeper drawdown thresholds",
             "config": {
                 "fixed_investment": 5000,
-                "drawdown_threshold_1": -15.0,
-                "drawdown_threshold_2": -8.0,
-                "investment_multiplier_1": 1.5,
-                "investment_multiplier_2": 2.0,
-                "investment_multiplier_3": 2.5,
+                "major_drawdown_threshold": -15.0,
+                "minor_drawdown_threshold": -8.0,
+                "minor_drawdown_inv_multiplier": 2.0,
+                "major_drawdown_inv_multiplier": 2.5,
                 "rolling_window": 100,
-                "fallback_day": 22,
+                "fallback_day": 28,
                 "min_investment_gap_days": 7
             },
             "risk_level": "Low",
@@ -4010,11 +4055,10 @@ async def get_strategy_templates():
             "description": "Moderate risk approach balancing opportunity and safety",
             "config": {
                 "fixed_investment": 5000,
-                "drawdown_threshold_1": -10.0,
-                "drawdown_threshold_2": -5.0,
-                "investment_multiplier_1": 2.0,
-                "investment_multiplier_2": 3.0,
-                "investment_multiplier_3": 4.0,
+                "major_drawdown_threshold": -10.0,
+                "minor_drawdown_threshold": -5.0,
+                "minor_drawdown_inv_multiplier": 3.0,
+                "major_drawdown_inv_multiplier": 4.0,
                 "rolling_window": 100,
                 "fallback_day": 22,
                 "min_investment_gap_days": 5
@@ -4027,11 +4071,10 @@ async def get_strategy_templates():
             "description": "High risk, high reward approach with aggressive multipliers",
             "config": {
                 "fixed_investment": 5000,
-                "drawdown_threshold_1": -5.0,
-                "drawdown_threshold_2": -2.0,
-                "investment_multiplier_1": 3.0,
-                "investment_multiplier_2": 5.0,
-                "investment_multiplier_3": 8.0,
+                "major_drawdown_threshold": -5.0,
+                "minor_drawdown_threshold": -2.0,
+                "minor_drawdown_inv_multiplier": 5.0,
+                "major_drawdown_inv_multiplier": 8.0,
                 "rolling_window": 50,
                 "fallback_day": 15,
                 "min_investment_gap_days": 3
