@@ -68,11 +68,6 @@ def create_enhanced_scheduler():
 # Create global scheduler instance
 scheduler = create_enhanced_scheduler()
 
-class SchedulerStatus(str, Enum):
-    RUNNING = "running"
-    PAUSED = "paused"
-    STOPPED = "stopped"
-
 class JobTriggerType(str, Enum):
     CRON = "cron"
     INTERVAL = "interval"
@@ -97,67 +92,12 @@ class SchedulerConfigRequest(BaseModel):
     misfire_grace_time: int = 300
     replace_existing: bool = True
 
-class JobStatusResponse(BaseModel):
-    job_id: str
-    status: str
-    next_run_time: Optional[datetime]
-    trigger_info: Dict[str, Any]
-    max_instances: int
-    pending_instances: int
-
-class SchedulerStatusResponse(BaseModel):
-    scheduler_running: bool
-    total_jobs: int
-    active_jobs: List[JobStatusResponse]
-    timezone: str
-    uptime_seconds: float
-
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     user_id = UserManager.verify_token(token)
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user_id
-
-def convert_numpy_types(obj):
-    """Convert numpy types to Python native types for JSON serialization"""
-    if isinstance(obj, np.integer):
-        return int(obj)
-    elif isinstance(obj, np.floating):
-        return float(obj)
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, dict):
-        return {key: convert_numpy_types(value) for key, value in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_numpy_types(item) for item in obj]
-    elif isinstance(obj, datetime):
-        return obj.isoformat()
-    elif isinstance(obj, date):
-        return obj.isoformat()
-    return obj
-
-def parse_date_string(date_str: str) -> date:
-    """Convert date string to datetime.date object"""
-    try:
-        if isinstance(date_str, str):
-            # Parse various date formats
-            for fmt in ['%Y-%m-%d', '%d-%m-%Y', '%m/%d/%Y', '%Y/%m/%d']:
-                try:
-                    return datetime.strptime(date_str, fmt).date()
-                except ValueError:
-                    continue
-            # If no format works, try parsing as ISO format
-            return datetime.fromisoformat(date_str).date()
-        elif isinstance(date_str, datetime):
-            return date_str.date()
-        elif isinstance(date_str, date):
-            return date_str
-        else:
-            raise ValueError(f"Cannot parse date: {date_str}")
-    except Exception as e:
-        logger.error(f"Error parsing date '{date_str}': {e}")
-        raise ValueError(f"Invalid date format: {date_str}")
 
 def safe_json_parse(data, field_name: str = "data", default=None):
     """Safely parse JSON data that might already be parsed"""
@@ -179,6 +119,22 @@ def safe_json_parse(data, field_name: str = "data", default=None):
     except Exception as e:
         logger.error(f"Unexpected error parsing {field_name}: {e}")
         return default or ([] if field_name in ['symbols', 'list'] else {})
+
+class EnhancedJSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles Pandas Timestamp and numpy types"""
+
+    def default(self, obj):
+        if pd.api.types.is_datetime64_any_dtype(obj):
+            return obj.isoformat()
+        if isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 
 class SIPSymbolConfig(BaseModel):
@@ -242,6 +198,7 @@ class SIPBacktestRequest(BaseModel):
     start_date: str
     end_date: str
     config: SIPConfigRequest
+    enable_monthly_limits: bool = True
 
     @validator('symbols')
     def validate_symbols(cls, v):
@@ -274,52 +231,6 @@ class SIPPortfolioRequest(BaseModel):
     symbol: str
     portfolio_name: Optional[str] = None
     config: SIPConfigRequest
-
-
-class SIPBacktestResponse(BaseModel):
-    """Enhanced backtest response with monthly tracking"""
-    backtest_id: str
-    symbol: str
-    strategy_name: str
-    total_investment: float
-    final_portfolio_value: float
-    total_return_percent: float
-    cagr: float
-    max_drawdown: Optional[float]
-    sharpe_ratio: Optional[float]
-    volatility: Optional[float]
-    num_trades: int
-    num_skipped: int = 0
-    monthly_limit_exceeded: int = 0
-    price_threshold_skipped: int = 0
-    max_amount_in_a_month: float
-    price_reduction_threshold: float
-    monthly_summary: Dict[str, Any] = {}
-    created_at: datetime
-
-
-class SIPPortfolioResponse(BaseModel):
-    portfolio_id: str
-    symbol: str
-    portfolio_name: Optional[str]
-    status: str
-    total_invested: float
-    current_units: float
-    current_value: float
-    next_investment_date: Optional[datetime]
-    created_at: datetime
-
-
-class SIPSignalResponse(BaseModel):
-    signal_id: str
-    symbol: str
-    signal_type: str
-    recommended_amount: float
-    multiplier: float
-    current_price: float
-    drawdown_percent: Optional[float]
-    signal_strength: str
-    created_at: datetime
 
 
 class InvestmentReportRequest(BaseModel):
@@ -391,127 +302,6 @@ def merge_symbol_config_with_fallback(symbol_config: Dict, fallback_config: Dict
     except Exception as e:
         logger.error(f"Error merging configs: {e}, using fallback")
         return fallback_config.copy()
-
-
-# async def get_monthly_investment_total(portfolio_id: str, symbol: str, trading_db: AsyncSession) -> float:
-#     """Get total investment for a symbol in current month"""
-#     try:
-#         current_month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-#         next_month_start = (current_month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
-#
-#         query = text("""
-#             SELECT COALESCE(SUM(amount), 0) as total_invested
-#             FROM sip_actual_trades
-#             WHERE portfolio_id = :portfolio_id
-#             AND symbol = :symbol
-#             AND timestamp >= :month_start
-#             AND timestamp < :next_month
-#         """)
-#
-#         result = await trading_db.execute(query, {
-#             'portfolio_id': portfolio_id,
-#             'symbol': symbol,
-#             'month_start': current_month_start,
-#             'next_month': next_month_start
-#         })
-#
-#         total = result.scalar() or 0.0
-#         logger.debug(f"Monthly investment total for {symbol}: ₹{total:.2f}")
-#         return total
-#
-#     except Exception as e:
-#         logger.error(f"Error fetching monthly investment total for {symbol}: {e}")
-#         return 0.0
-
-
-# async def get_investment_signals_with_monthly_limits(
-#         symbol: str,
-#         config_dict: Dict,
-#         strategy,
-#         nsedata_db: AsyncSession,
-#         trading_db: AsyncSession,
-#         portfolio_id: str
-# ) -> Dict:
-#     """
-#     Generate investment signals using existing enhanced strategy with monthly limits
-#     - Uses the actual get_next_investment_signals from EnhancedSIPStrategy
-#     - Adds monthly investment tracking on top
-#     - Matches backtesting logic exactly
-#     """
-#     try:
-#         # Create SIPConfig object from dictionary
-#         config_obj = SIPConfig(
-#                 fixed_investment=config_dict.get('fixed_investment', 5000),
-#                 drawdown_threshold_1=config_dict.get('drawdown_threshold_1', -10.0),
-#                 drawdown_threshold_2=config_dict.get('drawdown_threshold_2', -4.0),
-#                 investment_multiplier_1=config_dict.get('investment_multiplier_1', 2.0),
-#                 investment_multiplier_2=config_dict.get('investment_multiplier_2', 3.0),
-#                 investment_multiplier_3=config_dict.get('investment_multiplier_3', 5.0),
-#                 investment_multiplier_4=config_dict.get('investment_multiplier_4', 4.0),  # For extreme opportunities
-#                 rolling_window=config_dict.get('rolling_window', 100),
-#                 fallback_day=config_dict.get('fallback_day', 22),
-#                 min_investment_gap_days=config_dict.get('min_investment_gap_days', 5),
-#                 max_amount_in_a_month=config_dict.get('max_amount_in_a_month',
-#                                                      config_dict.get('fixed_investment', 5000) * 4),
-#                 price_reduction_threshold=config_dict.get('price_reduction_threshold', 4.0),
-#                 extreme_drawdown_threshold=config_dict.get('extreme_drawdown_threshold', -15.0),
-#                 force_remaining_investment=config_dict.get('force_remaining_investment', True)
-#             )
-#
-#         # Use existing get_next_investment_signals method - this gives us the SAME logic as backtesting
-#         signals = strategy.get_next_investment_signals(symbol, config_obj)
-#
-#         # Ensure signals is a dictionary and has required fields
-#         if not isinstance(signals, dict):
-#             signals = {
-#                 "signal": "ERROR",
-#                 "confidence": 0,
-#                 "recommended_amount": config_obj.fixed_investment,
-#                 "message": "Invalid signal format from strategy"
-#             }
-#
-#         # Check monthly investment limits AFTER getting base signals
-#         monthly_invested = await get_monthly_investment_total(portfolio_id, symbol, trading_db)
-#         max_monthly = config_obj.max_amount_in_a_month
-#
-#         # Apply monthly limit constraints to recommended amount
-#         recommended_amount = signals.get('recommended_amount', config_obj.fixed_investment)
-#
-#         # If no budget available, override signal
-#         if available_monthly_budget < config_obj.fixed_investment:
-#             signals.update({
-#                 "signal": "MONTHLY_LIMIT_REACHED",
-#                 "confidence": 0,
-#                 "recommended_amount": 0,
-#                 "message": f"Monthly limit reached. Available: ₹{available_monthly_budget:.2f}"
-#             })
-#         elif recommended_amount > available_monthly_budget:
-#             # Adjust amount to available budget
-#             signals.update({
-#                 'recommended_amount': available_monthly_budget,
-#                 'amount_adjusted': True,
-#                 'original_amount': recommended_amount,
-#                 'message': f"Amount adjusted for monthly limit. Available: ₹{available_monthly_budget:.2f}"
-#             })
-#
-#         # Add monthly tracking metadata (same as backtesting)
-#         signals.update({
-#             "monthly_invested_so_far": monthly_invested,
-#             "monthly_budget_remaining": available_monthly_budget,
-#             "monthly_limit": max_monthly
-#         })
-#
-#         return signals
-#
-#     except Exception as e:
-#         logger.error(f"Error generating enhanced signals for {symbol}: {e}")
-#         return {
-#             "signal": "ERROR",
-#             "confidence": 0,
-#             "recommended_amount": 0,
-#             "current_price": 0,
-#             "message": f"Signal generation failed: {str(e)}"
-#         }
 
 
 async def get_user_apis_for_gtt(user_id: str, trading_db: AsyncSession) -> Dict:
@@ -1668,8 +1458,7 @@ async def run_sip_backtest(
         background_tasks: BackgroundTasks,
         user_id: str = Depends(get_current_user),
         trading_db: AsyncSession = Depends(get_db),
-        nsedata_db: AsyncSession = Depends(get_nsedata_db),
-        enable_monthly_limits: bool = True,
+        nsedata_db: AsyncSession = Depends(get_nsedata_db)
 ):
     """
     Enhanced SIP strategy backtest with benchmark comparison
@@ -1681,7 +1470,7 @@ async def run_sip_backtest(
     """
     try:
         # Create enhanced strategy
-        if enable_monthly_limits:
+        if request.enable_monthly_limits:
             strategy = EnhancedSIPStrategyWithLimits(
                 nsedata_session=nsedata_db,
                 trading_session=trading_db
@@ -1844,12 +1633,12 @@ async def save_enhanced_backtest_results(
                 'price_reduction_threshold': float(request.config.price_reduction_threshold),
                 'start_date': start_date_obj,
                 'end_date': end_date_obj,
-                'config_used': json.dumps(request.config.dict()),
-                'trades': json.dumps(result.get('trades', [])),
-                'skipped_investments': json.dumps(result.get('skipped_investments', [])),
-                'monthly_summary': json.dumps(result.get('monthly_summary', {})),
-                'benchmark_data': json.dumps(result.get('benchmark', {})),
-                'comparison_metrics': json.dumps(result.get('comparison', {}))
+                'config_used': json.dumps(request.config.dict(), cls=EnhancedJSONEncoder),
+                'trades': json.dumps(result.get('trades', []), cls=EnhancedJSONEncoder),
+                'skipped_investments': json.dumps(result.get('skipped_investments', []), cls=EnhancedJSONEncoder),
+                'monthly_summary': json.dumps(result.get('monthly_summary', {}), cls=EnhancedJSONEncoder),
+                'benchmark_data': json.dumps(result.get('benchmark', {}), cls=EnhancedJSONEncoder),
+                'comparison_metrics': json.dumps(result.get('comparison', {}), cls=EnhancedJSONEncoder)
             })
 
         await trading_db.commit()

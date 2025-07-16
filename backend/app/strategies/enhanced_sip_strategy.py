@@ -298,6 +298,7 @@ class EnhancedSIPStrategy:
     def __init__(self, nsedata_session: AsyncSession = None, trading_session: AsyncSession = None):
         self.nsedata_session = nsedata_session
         self.trading_session = trading_session
+        self.monthly_tracker = None
 
     async def fetch_data_from_db_async(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """FIXED: Fetch data using proper table name handling and error recovery"""
@@ -450,10 +451,16 @@ class EnhancedSIPStrategy:
             return pd.DataFrame()
 
     async def run_backtest(self, symbol: str, start_date: str, end_date: str,
-                           config: SIPConfig) -> Optional[SIPResults]:
+                           config: SIPConfig) -> Optional[Dict]:
         """Run enhanced SIP backtest with proper error handling"""
         try:
             logger.info(f"🚀 Starting enhanced SIP backtest for {symbol} from {start_date} to {end_date}")
+
+            # Initialize monthly tracker with enhanced config
+            self.monthly_tracker = MonthlyInvestmentTracker(
+                max_monthly_amount=config.max_amount_in_a_month,
+                price_reduction_threshold=config.price_reduction_threshold
+            )
 
             # Fetch data
             data = await self.fetch_data_from_db_async(symbol, start_date, end_date)
@@ -471,6 +478,7 @@ class EnhancedSIPStrategy:
             # Track investment opportunities and skipped investments
             total_opportunities = 0
             skipped_due_to_gap = 0
+            trades = []
 
             # Simulate SIP investments with enhanced logic
             for i, row in data.iterrows():
@@ -514,6 +522,11 @@ class EnhancedSIPStrategy:
                         if trade:
                             logger.debug(
                                 f"Investment: ₹{trade.amount:,.2f} at ₹{trade.price:.2f} on {trade.timestamp.date()}")
+                            trades.append(asdict(trade))
+                            # Record the investment in tracker
+                            self.monthly_tracker.record_investment(
+                                symbol, current_date, investment_amount, current_price, is_extreme
+                            )
                     else:
                         skipped_due_to_gap += 1
                         days_since_last = portfolio.get_days_since_last_investment(current_date)
@@ -543,21 +556,21 @@ class EnhancedSIPStrategy:
                 volatility = None
                 sharpe_ratio = None
 
-            results = SIPResults(
-                strategy_name="Enhanced SIP Strategy",
-                total_investment=portfolio.total_investment,
-                final_portfolio_value=final_portfolio_value,
-                total_units=portfolio.total_units,
-                average_buy_price=portfolio.get_average_buy_price(),
-                cagr=cagr,
-                trades=portfolio.trades,
-                max_drawdown=portfolio.max_drawdown,
-                sharpe_ratio=sharpe_ratio,
-                volatility=volatility,
-                start_date=start_date,
-                end_date=end_date,
-                symbol=symbol
-            )
+            # results = SIPResults(
+            #     strategy_name="Enhanced SIP Strategy",
+            #     total_investment=portfolio.total_investment,
+            #     final_portfolio_value=final_portfolio_value,
+            #     total_units=portfolio.total_units,
+            #     average_buy_price=portfolio.get_average_buy_price(),
+            #     cagr=cagr,
+            #     trades=portfolio.trades,
+            #     max_drawdown=portfolio.max_drawdown,
+            #     sharpe_ratio=sharpe_ratio,
+            #     volatility=volatility,
+            #     start_date=start_date,
+            #     end_date=end_date,
+            #     symbol=symbol
+            # )
 
             logger.info(f"✅ Enhanced backtest completed for {symbol}:")
             logger.info(f"   📊 Investment: ₹{portfolio.total_investment:,.2f}")
@@ -566,7 +579,10 @@ class EnhancedSIPStrategy:
             logger.info(f"   🔄 Total Trades: {len(portfolio.trades)}")
             logger.info(f"   ⏭️  Opportunities: {total_opportunities}, Skipped due to gap: {skipped_due_to_gap}")
 
-            return results
+            return self._calculate_enhanced_results(
+                symbol, portfolio.total_investment, final_portfolio_value, portfolio.total_units,
+                trades, config, start_date, end_date, data,0, skipped_due_to_gap
+            )
 
         except Exception as e:
             logger.error(f"Error running enhanced backtest for {symbol}: {e}")
@@ -687,7 +703,9 @@ class EnhancedSIPStrategy:
                     return current_date.replace(day=fallback_day)
                 except ValueError:
                     # Handle months with fewer days
-                    last_day = (current_date.replace(month=current_date.month % 12 + 1, day=1) - timedelta(days=1)).day
+                    next_next_month = current_date.replace(day=1) + timedelta(days=32)
+                    next_next_month = next_next_month.replace(day=1)
+                    last_day = (next_next_month - timedelta(days=1)).day
                     return current_date.replace(day=min(fallback_day, last_day))
             else:
                 # Use next month
@@ -697,7 +715,9 @@ class EnhancedSIPStrategy:
                     return next_month.replace(day=fallback_day)
                 except ValueError:
                     # Handle months with fewer days
-                    last_day = (next_month.replace(month=next_month.month % 12 + 1, day=1) - timedelta(days=1)).day
+                    next_next_month = next_month + timedelta(days=32)
+                    next_next_month = next_next_month.replace(day=1)
+                    last_day = (next_next_month - timedelta(days=1)).day
                     return next_month.replace(day=min(fallback_day, last_day))
         except Exception as e:
             logger.error(f"Error calculating next fallback date: {e}")
@@ -1086,250 +1106,6 @@ class EnhancedSIPStrategy:
             logger.error(f"Error determining investment amount: {e}")
             return config.fixed_investment, False
 
-    async def generate_investment_report(self, symbols: List[str], config: SIPConfig) -> Dict[str, Any]:
-        """Generate comprehensive investment report for multiple symbols - OPTIMIZED VERSION"""
-        try:
-            logger.info(f"Generating investment report for {len(symbols)} symbols")
-
-            end_date = datetime.now().strftime('%Y-%m-%d')
-            start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
-
-            symbol_reports = {}
-            overall_metrics = {
-                "total_symbols": len(symbols),
-                "analyzed_symbols": 0,
-                "successful_analyses": 0,
-                "strong_buy_signals": 0,
-                "buy_signals": 0,
-                "avoid_signals": 0,
-                "error_count": 0,
-                "avg_confidence": 0,
-                "data_quality_summary": {
-                    "excellent": 0,
-                    "good": 0,
-                    "fair": 0,
-                    "poor": 0,
-                    "error": 0
-                }
-            }
-
-            total_confidence = 0
-            successful_recommendations = 0
-
-            # Process symbols with better error isolation
-            for symbol in symbols:
-                try:
-                    logger.info(f"Analyzing {symbol} for investment report")
-
-                    # Get data quality with timeout protection
-                    try:
-                        data_quality = await asyncio.wait_for(
-                            self.validate_symbol_data_quality(symbol, start_date, end_date),
-                            timeout=30.0  # 30 second timeout per symbol
-                        )
-                    except asyncio.TimeoutError:
-                        logger.warning(f"Timeout validating data quality for {symbol}")
-                        data_quality = {
-                            "symbol": symbol,
-                            "status": "ERROR",
-                            "message": "Data validation timeout",
-                            "data_points": 0,
-                            "coverage_percent": 0
-                        }
-                    except Exception as dq_error:
-                        logger.error(f"Error validating data quality for {symbol}: {dq_error}")
-                        data_quality = {
-                            "symbol": symbol,
-                            "status": "ERROR",
-                            "message": f"Data validation failed: {str(dq_error)}",
-                            "data_points": 0,
-                            "coverage_percent": 0
-                        }
-
-                    # Update data quality summary
-                    quality_status = data_quality.get('status', 'ERROR').lower()
-                    if quality_status in overall_metrics["data_quality_summary"]:
-                        overall_metrics["data_quality_summary"][quality_status] += 1
-                    else:
-                        overall_metrics["data_quality_summary"]["error"] += 1
-
-                    # Skip if no data available
-                    if data_quality.get('status') in ['NO_DATA', 'ERROR']:
-                        symbol_reports[symbol] = {
-                            "status": "DATA_UNAVAILABLE",
-                            "message": data_quality.get('message', 'Data not available'),
-                            "data_quality": data_quality,
-                            "statistics": None,
-                            "investment_signals": None,
-                            "recommendation": {
-                                "recommendation": "SKIP - No Data",
-                                "priority": "LOW",
-                                "confidence_score": 0,
-                                "considerations": ["No historical data available"]
-                            }
-                        }
-                        overall_metrics["error_count"] += 1
-                        continue
-
-                    # Get statistics with error handling
-                    try:
-                        stats = await asyncio.wait_for(
-                            self.get_symbol_statistics(symbol),
-                            timeout=45.0  # 45 second timeout for statistics
-                        )
-                        # Ensure stats is never None
-                        if stats is None:
-                            raise ValueError("get_symbol_statistics returned None")
-
-                    except asyncio.TimeoutError:
-                        logger.warning(f"Timeout getting statistics for {symbol}")
-                        stats = {
-                            "symbol": symbol,
-                            "status": "TIMEOUT",
-                            "message": "Statistics calculation timeout",
-                            "price_statistics": {},
-                            "technical_indicators": {},
-                            "risk_metrics": {}
-                        }
-                    except Exception as stats_error:
-                        logger.error(f"Error getting statistics for {symbol}: {stats_error}")
-                        stats = {
-                            "symbol": symbol,
-                            "status": "ERROR",
-                            "message": f"Statistics calculation failed: {str(stats_error)}",
-                            "price_statistics": {},
-                            "technical_indicators": {},
-                            "risk_metrics": {}
-                        }
-
-                    # Get investment signals with error handling
-                    try:
-                        data = await self.fetch_data_from_db_async(symbol, start_date, end_date)
-                        if not data.empty:
-                            signals = self.get_next_investment_signals(data, config)
-                            # Ensure signals is never None
-                            if signals is None:
-                                signals = {"signal": "ERROR", "confidence": 0, "message": "Signal generation failed"}
-                        else:
-                            signals = {"signal": "NO_DATA", "confidence": 0, "message": "No data for signals"}
-
-                    except Exception as signal_error:
-                        logger.error(f"Error getting signals for {symbol}: {signal_error}")
-                        signals = {
-                            "signal": "ERROR",
-                            "confidence": 0,
-                            "message": f"Signal generation failed: {str(signal_error)}"
-                        }
-
-                    # Generate recommendation with null safety
-                    try:
-                        recommendation = self._generate_symbol_recommendation(signals, stats, data_quality)
-                        if recommendation is None:
-                            raise ValueError("_generate_symbol_recommendation returned None")
-                    except Exception as rec_error:
-                        logger.error(f"Error generating recommendation for {symbol}: {rec_error}")
-                        recommendation = {
-                            "recommendation": "ERROR - Recommendation Failed",
-                            "priority": "LOW",
-                            "confidence_score": 0,
-                            "signal_type": "ERROR",
-                            "considerations": [f"Recommendation error: {str(rec_error)}"],
-                            "error": str(rec_error)
-                        }
-
-                    # Compile report for this symbol
-                    symbol_reports[symbol] = {
-                        "status": "SUCCESS" if stats.get('status') == 'SUCCESS' else "PARTIAL",
-                        "data_quality": data_quality,
-                        "statistics": stats,
-                        "investment_signals": signals,
-                        "recommendation": recommendation
-                    }
-
-                    # Update overall metrics
-                    overall_metrics["analyzed_symbols"] += 1
-
-                    if stats.get('status') == 'SUCCESS':
-                        overall_metrics["successful_analyses"] += 1
-
-                    confidence_val = signals.get('confidence', 0)
-                    if confidence_val > 0:
-                        total_confidence += confidence_val
-                        successful_recommendations += 1
-
-                    signal_type = signals.get('signal', 'NORMAL')
-                    if signal_type == 'STRONG_BUY':
-                        overall_metrics["strong_buy_signals"] += 1
-                    elif signal_type == 'BUY':
-                        overall_metrics["buy_signals"] += 1
-                    elif signal_type == 'AVOID':
-                        overall_metrics["avoid_signals"] += 1
-
-                except Exception as symbol_error:
-                    logger.error(f"Critical error analyzing {symbol}: {symbol_error}")
-                    symbol_reports[symbol] = {
-                        "status": "CRITICAL_ERROR",
-                        "message": f"Analysis failed: {str(symbol_error)}",
-                        "error": str(symbol_error)
-                    }
-                    overall_metrics["error_count"] += 1
-
-            # Calculate overall metrics safely
-            if successful_recommendations > 0:
-                overall_metrics["avg_confidence"] = total_confidence / successful_recommendations
-            else:
-                overall_metrics["avg_confidence"] = 0
-
-            # Generate portfolio recommendation with error handling
-            try:
-                portfolio_recommendation = self._generate_portfolio_recommendation(overall_metrics, symbol_reports)
-            except Exception as portfolio_error:
-                logger.error(f"Error generating portfolio recommendation: {portfolio_error}")
-                portfolio_recommendation = {
-                    "portfolio_action": "MANUAL_REVIEW",
-                    "recommendations": ["Portfolio analysis failed - manual review required"],
-                    "error": str(portfolio_error)
-                }
-
-            # Generate risk assessment with error handling
-            try:
-                risk_assessment = self._generate_risk_assessment(symbol_reports, overall_metrics)
-            except Exception as risk_error:
-                logger.error(f"Error generating risk assessment: {risk_error}")
-                risk_assessment = {
-                    "overall_risk_level": "UNKNOWN",
-                    "risk_factors": ["Risk assessment failed"],
-                    "mitigation_strategies": ["Manual risk review required"],
-                    "error": str(risk_error)
-                }
-
-            return {
-                "report_generated": datetime.now().isoformat(),
-                "analysis_period": f"{start_date} to {end_date}",
-                "overall_metrics": overall_metrics,
-                "portfolio_recommendation": portfolio_recommendation,
-                "risk_assessment": risk_assessment,
-                "symbol_reports": symbol_reports,
-                "processing_summary": {
-                    "total_symbols_requested": len(symbols),
-                    "symbols_analyzed": overall_metrics["analyzed_symbols"],
-                    "successful_analyses": overall_metrics["successful_analyses"],
-                    "error_count": overall_metrics["error_count"],
-                    "success_rate": round((overall_metrics["successful_analyses"] / len(symbols)) * 100, 2) if len(
-                        symbols) > 0 else 0
-                },
-                "disclaimer": "This report is for educational purposes only and should not be considered as financial advice. Always consult with a qualified financial advisor before making investment decisions."
-            }
-
-        except Exception as e:
-            logger.error(f"Critical error generating investment report: {e}")
-            return {
-                "status": "CRITICAL_ERROR",
-                "message": f"Failed to generate report: {str(e)}",
-                "report_generated": datetime.now().isoformat(),
-                "error": str(e)
-            }
-
     def _generate_symbol_recommendation(self, signals: Dict, stats: Dict, data_quality: Dict) -> Dict[str, Any]:
         """Generate recommendation for individual symbol - WITH NULL SAFETY"""
         try:
@@ -1341,33 +1117,47 @@ class EnhancedSIPStrategy:
             if data_quality is None:
                 data_quality = {"status": "ERROR"}
 
+            recommendation = "HOLD"
+            priority = "MEDIUM"
+            confidence_score = signals.get('confidence', 0)
             signal_type = signals.get('signal', 'NORMAL')
-            confidence = signals.get('confidence', 0)
-            quality_status = data_quality.get('status', 'UNKNOWN')
-
-            # Base recommendation on signal strength and data quality
-            if quality_status in ['POOR', 'ERROR']:
-                recommendation = "AVOID - Poor Data Quality"
-                priority = "LOW"
-            elif signal_type == 'STRONG_BUY' and confidence > 0.8:
-                recommendation = "STRONG BUY - Excellent Opportunity"
-                priority = "HIGH"
-            elif signal_type == 'BUY' and confidence > 0.6:
-                recommendation = "BUY - Good Opportunity"
-                priority = "MEDIUM"
-            elif signal_type == 'WEAK_BUY':
-                recommendation = "CONSIDER - Moderate Opportunity"
-                priority = "LOW"
-            elif signal_type == 'AVOID':
-                recommendation = "AVOID - Overvalued"
-                priority = "LOW"
-            else:
-                recommendation = "HOLD - Normal Conditions"
-                priority = "LOW"
-
-            # Additional considerations with null safety
             considerations = []
 
+            # Base recommendation on signal
+            if signal_type == 'STRONG_BUY':
+                recommendation = "STRONG BUY"
+                priority = "HIGH"
+                considerations.append("Strong buy signal detected")
+            elif signal_type == 'BUY':
+                recommendation = "BUY"
+                priority = "HIGH"
+                considerations.append("Buy signal detected")
+            elif signal_type == 'WEAK_BUY':
+                recommendation = "CONSIDER BUY"
+                priority = "MEDIUM"
+                considerations.append("Weak buy signal")
+            elif signal_type == 'AVOID':
+                recommendation = "AVOID"
+                priority = "LOW"
+                considerations.append("Avoid signal detected")
+            elif signal_type == 'ERROR' or signal_type == 'NO_DATA':
+                recommendation = "NO RECOMMENDATION"
+                priority = "LOW"
+                confidence_score = 0
+                considerations.append("Insufficient data or analysis error")
+
+            # Adjust based on data quality
+            quality_status = data_quality.get('status', 'UNKNOWN')
+            if quality_status == 'POOR' or quality_status == 'ERROR':
+                recommendation = "NO RECOMMENDATION"
+                priority = "LOW"
+                confidence_score = 0
+                considerations.append("Poor data quality - recommendation unreliable")
+            elif quality_status == 'FAIR':
+                confidence_score *= 0.8
+                considerations.append("Fair data quality - recommendation with caution")
+
+            # Adjust based on statistics
             if stats.get('status') == 'SUCCESS':
                 price_stats = stats.get('price_statistics', {})
                 tech_indicators = stats.get('technical_indicators', {})
@@ -1406,7 +1196,7 @@ class EnhancedSIPStrategy:
             return {
                 "recommendation": recommendation,
                 "priority": priority,
-                "confidence_score": confidence,
+                "confidence_score": round(confidence_score, 3),
                 "signal_type": signal_type,
                 "considerations": considerations,
                 "investment_horizon": "Long-term" if signal_type in ['STRONG_BUY', 'BUY'] else "Short-term",
@@ -1507,6 +1297,93 @@ class EnhancedSIPStrategy:
                 "message": f"Error validating data: {str(e)}",
                 "data_points": 0,
                 "coverage_percent": 0
+            }
+
+    def _calculate_risk_metrics(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """Calculate risk metrics"""
+        try:
+            if data.empty:
+                return {"status": "NO_DATA"}
+
+            returns = data['close'].pct_change().dropna()
+
+            if len(returns) < 2:
+                return {"status": "INSUFFICIENT_DATA"}
+
+            # Max drawdown
+            max_drawdown = self._calculate_max_drawdown(data['close'])
+
+            # Sharpe ratio (assuming 5% risk-free rate)
+            sharpe_ratio = self._calculate_sharpe_ratio(returns)
+
+            # Sortino ratio
+            sortino_ratio = self._calculate_sortino_ratio(returns)
+
+            # Value at Risk (VaR) at 5% confidence level
+            value_at_risk_5 = returns.quantile(0.05) if len(returns) > 0 else 0
+
+            # Expected Shortfall (CVaR)
+            expected_shortfall = returns[returns <= value_at_risk_5].mean() if len(
+                returns[returns <= value_at_risk_5]) > 0 else 0
+
+            return {
+                "status": "SUCCESS",
+                "max_drawdown": float(max_drawdown),
+                "sharpe_ratio": float(sharpe_ratio),
+                "sortino_ratio": float(sortino_ratio),
+                "value_at_risk_5": float(value_at_risk_5 * 100),
+                "expected_shortfall": float(expected_shortfall * 100)
+            }
+
+        except Exception as e:
+            logger.error(f"Error calculating risk metrics: {e}")
+            return {
+                "status": "ERROR",
+                "message": str(e)
+            }
+
+    def _calculate_price_statistics(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """Calculate price-related statistics"""
+        try:
+            if data.empty:
+                return {"status": "NO_DATA"}
+
+            current_price = data.iloc[-1]['close']
+
+            # Price changes
+            price_change_1d = current_price - data.iloc[-2]['close'] if len(data) > 1 else 0
+            price_change_percent_1d = (price_change_1d / data.iloc[-2]['close'] * 100) if len(data) > 1 and \
+                                                                                          data.iloc[-2][
+                                                                                              'close'] > 0 else 0
+
+            # 52-week high/low (approx 252 trading days)
+            year_data = data.tail(252)
+            high_52w = year_data['high'].max()
+            low_52w = year_data['low'].min()
+
+            # Annualized volatility
+            returns = data['close'].pct_change().dropna()
+            volatility = returns.std() * np.sqrt(252) * 100 if len(returns) > 0 else 0
+
+            # Average volume
+            average_volume = data['volume'].mean() if 'volume' in data.columns else 0
+
+            return {
+                "status": "SUCCESS",
+                "current_price": float(current_price),
+                "price_change_1d": float(price_change_1d),
+                "price_change_percent_1d": float(price_change_percent_1d),
+                "high_52w": float(high_52w),
+                "low_52w": float(low_52w),
+                "volatility_annualized": float(volatility),
+                "average_volume": int(average_volume)
+            }
+
+        except Exception as e:
+            logger.error(f"Error calculating price statistics: {e}")
+            return {
+                "status": "ERROR",
+                "message": str(e)
             }
 
     async def get_symbol_statistics(self, symbol: str, days: int = 365) -> Dict[str, Any]:
@@ -2100,6 +1977,69 @@ class EnhancedSIPStrategy:
                 "error": str(e)
             }
 
+    def _calculate_enhanced_results(self, symbol: str, total_investment: float,
+                                  final_portfolio_value: float, total_units: float,
+                                  trades: List[Dict], config, start_date: str,
+                                  end_date: str, data, monthly_exceeded_count: int,
+                                  price_threshold_skipped: int) -> Dict:
+        """Calculate comprehensive performance metrics"""
+
+        total_return_percent = ((final_portfolio_value / total_investment) - 1) * 100 if total_investment > 0 else 0
+
+        # Calculate CAGR
+        start_timestamp = data.iloc[0]['timestamp']
+        end_timestamp = data.iloc[-1]['timestamp']
+        years = (end_timestamp - start_timestamp).days / 365.25
+        cagr_percent = ((final_portfolio_value / total_investment) ** (1 / years) - 1) * 100 if years > 0 and total_investment > 0 else 0
+
+        # Get monthly summary and analytics
+        monthly_summary = self.monthly_tracker.get_monthly_summary(symbol)
+        skipped_investments = self.monthly_tracker.skipped_investments
+
+        # Count different trade types
+        extreme_trades = len([t for t in trades if t.get('is_extreme', False)])
+        force_trades = len([t for t in trades if t.get('is_force', False)])
+        regular_trades = len(trades) - extreme_trades - force_trades
+
+        results = {
+            'symbol': symbol,
+            'strategy_name': 'Enhanced SIP V4 with Comprehensive Fixes',
+            'period': f"{start_date} to {end_date}",
+            'total_investment': float(total_investment),
+            'final_portfolio_value': float(final_portfolio_value),
+            'total_units': float(total_units),
+            'average_buy_price': float(total_investment / total_units) if total_units > 0 else 0,
+            'total_return_percent': float(total_return_percent),
+            'cagr_percent': float(cagr_percent),
+            'num_trades': len(trades),
+            'num_skipped': len(skipped_investments),
+            'trade_breakdown': {
+                'regular_trades': regular_trades,
+                'extreme_trades': extreme_trades,
+                'force_trades': force_trades
+            },
+            'monthly_limit_exceeded': monthly_exceeded_count,
+            'price_threshold_skipped': price_threshold_skipped,
+            'trades': trades,
+            'skipped_investments': skipped_investments,
+            'monthly_summary': monthly_summary,
+            'config': config,
+            'enhancements_applied': [
+                'Force remaining investment at month end',
+                'Holiday handling for regular SIP dates',
+                'Extreme opportunity detection (>15% drawdown gets 4x investment)',
+                'Monthly investment limits with extreme bypass',
+                'Comprehensive trade categorization'
+            ]
+        }
+
+        logger.info(f"✅ Enhanced backtest V4 completed for {symbol}")
+        logger.info(f"📊 Results: {regular_trades} regular + {extreme_trades} extreme + {force_trades} force trades")
+        logger.info(f"💰 Total investment: ₹{total_investment:,.2f}, Final value: ₹{final_portfolio_value:,.2f}")
+        logger.info(f"📈 Return: {total_return_percent:.2f}%, CAGR: {cagr_percent:.2f}%")
+
+        return results
+
     def _calculate_max_drawdown(self, prices) -> float:
         """Calculate maximum drawdown safely"""
         try:
@@ -2135,62 +2075,6 @@ class EnhancedSIPStrategy:
             return float(excess_returns.mean() / downside_returns.std() * np.sqrt(252))
         except Exception:
             return 0.0
-
-    async def get_portfolio_recommendations(self, symbols: List[str],
-                                            config: SIPConfig) -> Dict[str, Any]:
-        """Get recommendations for multiple symbols in a portfolio"""
-        try:
-            recommendations = {}
-            overall_signal = "NORMAL"
-            total_confidence = 0
-
-            end_date = datetime.now().strftime('%Y-%m-%d')
-            start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
-
-            for symbol in symbols:
-                try:
-                    data = await self.fetch_data_from_db_async(symbol, start_date, end_date)
-                    if not data.empty:
-                        signal = self.get_next_investment_signals(data, config)
-                        recommendations[symbol] = signal
-                        total_confidence += signal.get('confidence', 0)
-                except Exception as e:
-                    logger.error(f"Error getting recommendation for {symbol}: {e}")
-                    recommendations[symbol] = {
-                        "signal": "ERROR",
-                        "confidence": 0,
-                        "message": f"Error analyzing {symbol}"
-                    }
-
-            # Determine overall portfolio signal
-            if recommendations:
-                avg_confidence = total_confidence / len(recommendations)
-                strong_buy_count = sum(1 for r in recommendations.values() if r.get('signal') == 'STRONG_BUY')
-                buy_count = sum(1 for r in recommendations.values() if r.get('signal') == 'BUY')
-
-                if strong_buy_count > len(symbols) * 0.5:
-                    overall_signal = "STRONG_BUY"
-                elif (strong_buy_count + buy_count) > len(symbols) * 0.3:
-                    overall_signal = "BUY"
-                elif avg_confidence < 0.3:
-                    overall_signal = "AVOID"
-
-            return {
-                "overall_signal": overall_signal,
-                "overall_confidence": avg_confidence if recommendations else 0,
-                "symbol_recommendations": recommendations,
-                "analysis_timestamp": datetime.now().isoformat(),
-                "symbols_analyzed": len(recommendations)
-            }
-
-        except Exception as e:
-            logger.error(f"Error getting portfolio recommendations: {e}")
-            return {
-                "overall_signal": "ERROR",
-                "overall_confidence": 0,
-                "symbol_recommendations": {},
-                "error": str(e)
-            }
 
 
 class MonthlyInvestmentTracker:
@@ -2775,6 +2659,304 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
                 "analysis_timestamp": datetime.now().isoformat()
             }
 
+    async def get_portfolio_recommendations(self, symbols: List[str],
+                                            config: SIPConfig) -> Dict[str, Any]:
+        """Get recommendations for multiple symbols in a portfolio"""
+        try:
+            recommendations = {}
+            overall_signal = "NORMAL"
+            total_confidence = 0
+
+            end_date = datetime.now().strftime('%Y-%m-%d')
+            start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+
+            for symbol in symbols:
+                try:
+                    signal = await self.get_next_investment_signals(symbol, config)
+                    recommendations[symbol] = signal
+                    total_confidence += signal.get('confidence', 0)
+                except Exception as e:
+                    logger.error(f"Error getting recommendation for {symbol}: {e}")
+                    recommendations[symbol] = {
+                        "signal": "ERROR",
+                        "confidence": 0,
+                        "message": f"Error analyzing {symbol}"
+                    }
+
+            # Determine overall portfolio signal
+            if recommendations:
+                avg_confidence = total_confidence / len(recommendations)
+                strong_buy_count = sum(1 for r in recommendations.values() if r.get('signal') == 'STRONG_BUY')
+                buy_count = sum(1 for r in recommendations.values() if r.get('signal') == 'BUY')
+
+                if strong_buy_count > len(symbols) * 0.5:
+                    overall_signal = "STRONG_BUY"
+                elif (strong_buy_count + buy_count) > len(symbols) * 0.3:
+                    overall_signal = "BUY"
+                elif avg_confidence < 0.3:
+                    overall_signal = "AVOID"
+
+            return {
+                "overall_signal": overall_signal,
+                "overall_confidence": avg_confidence if recommendations else 0,
+                "symbol_recommendations": recommendations,
+                "analysis_timestamp": datetime.now().isoformat(),
+                "symbols_analyzed": len(recommendations)
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting portfolio recommendations: {e}")
+            return {
+                "overall_signal": "ERROR",
+                "overall_confidence": 0,
+                "symbol_recommendations": {},
+                "error": str(e)
+            }
+
+    async def generate_investment_report(self, symbols: List[str], config: SIPConfig) -> Dict[str, Any]:
+        """Generate comprehensive investment report for multiple symbols - OPTIMIZED VERSION"""
+        try:
+            logger.info(f"Generating investment report for {len(symbols)} symbols")
+
+            end_date = datetime.now().strftime('%Y-%m-%d')
+            start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+
+            symbol_reports = {}
+            overall_metrics = {
+                "total_symbols": len(symbols),
+                "analyzed_symbols": 0,
+                "successful_analyses": 0,
+                "strong_buy_signals": 0,
+                "buy_signals": 0,
+                "avoid_signals": 0,
+                "error_count": 0,
+                "avg_confidence": 0,
+                "data_quality_summary": {
+                    "excellent": 0,
+                    "good": 0,
+                    "fair": 0,
+                    "poor": 0,
+                    "error": 0
+                }
+            }
+
+            total_confidence = 0
+            successful_recommendations = 0
+
+            # Process symbols with better error isolation
+            for symbol in symbols:
+                try:
+                    logger.info(f"Analyzing {symbol} for investment report")
+
+                    # Get data quality with timeout protection
+                    try:
+                        data_quality = await asyncio.wait_for(
+                            self.validate_symbol_data_quality(symbol, start_date, end_date),
+                            timeout=30.0  # 30 second timeout per symbol
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Timeout validating data quality for {symbol}")
+                        data_quality = {
+                            "symbol": symbol,
+                            "status": "ERROR",
+                            "message": "Data validation timeout",
+                            "data_points": 0,
+                            "coverage_percent": 0
+                        }
+                    except Exception as dq_error:
+                        logger.error(f"Error validating data quality for {symbol}: {dq_error}")
+                        data_quality = {
+                            "symbol": symbol,
+                            "status": "ERROR",
+                            "message": f"Data validation failed: {str(dq_error)}",
+                            "data_points": 0,
+                            "coverage_percent": 0
+                        }
+
+                    # Update data quality summary
+                    quality_status = data_quality.get('status', 'ERROR').lower()
+                    if quality_status in overall_metrics["data_quality_summary"]:
+                        overall_metrics["data_quality_summary"][quality_status] += 1
+                    else:
+                        overall_metrics["data_quality_summary"]["error"] += 1
+
+                    # Skip if no data available
+                    if data_quality.get('status') in ['NO_DATA', 'ERROR']:
+                        symbol_reports[symbol] = {
+                            "status": "DATA_UNAVAILABLE",
+                            "message": data_quality.get('message', 'Data not available'),
+                            "data_quality": data_quality,
+                            "statistics": None,
+                            "investment_signals": None,
+                            "recommendation": {
+                                "recommendation": "SKIP - No Data",
+                                "priority": "LOW",
+                                "confidence_score": 0,
+                                "considerations": ["No historical data available"]
+                            }
+                        }
+                        overall_metrics["error_count"] += 1
+                        continue
+
+                    # Get statistics with error handling
+                    try:
+                        stats = await asyncio.wait_for(
+                            self.get_symbol_statistics(symbol),
+                            timeout=45.0  # 45 second timeout for statistics
+                        )
+                        # Ensure stats is never None
+                        if stats is None:
+                            raise ValueError("get_symbol_statistics returned None")
+
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Timeout getting statistics for {symbol}")
+                        stats = {
+                            "symbol": symbol,
+                            "status": "TIMEOUT",
+                            "message": "Statistics calculation timeout",
+                            "price_statistics": {},
+                            "technical_indicators": {},
+                            "risk_metrics": {}
+                        }
+                    except Exception as stats_error:
+                        logger.error(f"Error getting statistics for {symbol}: {stats_error}")
+                        stats = {
+                            "symbol": symbol,
+                            "status": "ERROR",
+                            "message": f"Statistics calculation failed: {str(stats_error)}",
+                            "price_statistics": {},
+                            "technical_indicators": {},
+                            "risk_metrics": {}
+                        }
+
+                    # Get investment signals with error handling
+                    try:
+                        data = await self.fetch_data_from_db_async(symbol, start_date, end_date)
+                        if not data.empty:
+                            signals = await self.get_next_investment_signals(data, config)
+                            # Ensure signals is never None
+                            if signals is None:
+                                signals = {"signal": "ERROR", "confidence": 0, "message": "Signal generation failed"}
+                        else:
+                            signals = {"signal": "NO_DATA", "confidence": 0, "message": "No data for signals"}
+
+                    except Exception as signal_error:
+                        logger.error(f"Error getting signals for {symbol}: {signal_error}")
+                        signals = {
+                            "signal": "ERROR",
+                            "confidence": 0,
+                            "message": f"Signal generation failed: {str(signal_error)}"
+                        }
+
+                    # Generate recommendation with null safety
+                    try:
+                        recommendation = self._generate_symbol_recommendation(signals, stats, data_quality)
+                        if recommendation is None:
+                            raise ValueError("_generate_symbol_recommendation returned None")
+                    except Exception as rec_error:
+                        logger.error(f"Error generating recommendation for {symbol}: {rec_error}")
+                        recommendation = {
+                            "recommendation": "ERROR - Recommendation Failed",
+                            "priority": "LOW",
+                            "confidence_score": 0,
+                            "signal_type": "ERROR",
+                            "considerations": [f"Recommendation error: {str(rec_error)}"],
+                            "error": str(rec_error)
+                        }
+
+                    # Compile report for this symbol
+                    symbol_reports[symbol] = {
+                        "status": "SUCCESS" if stats.get('status') == 'SUCCESS' else "PARTIAL",
+                        "data_quality": data_quality,
+                        "statistics": stats,
+                        "investment_signals": signals,
+                        "recommendation": recommendation
+                    }
+
+                    # Update overall metrics
+                    overall_metrics["analyzed_symbols"] += 1
+
+                    if stats.get('status') == 'SUCCESS':
+                        overall_metrics["successful_analyses"] += 1
+
+                    confidence_val = signals.get('confidence', 0)
+                    if confidence_val > 0:
+                        total_confidence += confidence_val
+                        successful_recommendations += 1
+
+                    signal_type = signals.get('signal', 'NORMAL')
+                    if signal_type == 'STRONG_BUY':
+                        overall_metrics["strong_buy_signals"] += 1
+                    elif signal_type == 'BUY':
+                        overall_metrics["buy_signals"] += 1
+                    elif signal_type == 'AVOID':
+                        overall_metrics["avoid_signals"] += 1
+
+                except Exception as symbol_error:
+                    logger.error(f"Critical error analyzing {symbol}: {symbol_error}")
+                    symbol_reports[symbol] = {
+                        "status": "CRITICAL_ERROR",
+                        "message": f"Analysis failed: {str(symbol_error)}",
+                        "error": str(symbol_error)
+                    }
+                    overall_metrics["error_count"] += 1
+
+            # Calculate overall metrics safely
+            if successful_recommendations > 0:
+                overall_metrics["avg_confidence"] = total_confidence / successful_recommendations
+            else:
+                overall_metrics["avg_confidence"] = 0
+
+            # Generate portfolio recommendation with error handling
+            try:
+                portfolio_recommendation = self._generate_portfolio_recommendation(overall_metrics, symbol_reports)
+            except Exception as portfolio_error:
+                logger.error(f"Error generating portfolio recommendation: {portfolio_error}")
+                portfolio_recommendation = {
+                    "portfolio_action": "MANUAL_REVIEW",
+                    "recommendations": ["Portfolio analysis failed - manual review required"],
+                    "error": str(portfolio_error)
+                }
+
+            # Generate risk assessment with error handling
+            try:
+                risk_assessment = self._generate_risk_assessment(symbol_reports, overall_metrics)
+            except Exception as risk_error:
+                logger.error(f"Error generating risk assessment: {risk_error}")
+                risk_assessment = {
+                    "overall_risk_level": "UNKNOWN",
+                    "risk_factors": ["Risk assessment failed"],
+                    "mitigation_strategies": ["Manual risk review required"],
+                    "error": str(risk_error)
+                }
+
+            return {
+                "report_generated": datetime.now().isoformat(),
+                "analysis_period": f"{start_date} to {end_date}",
+                "overall_metrics": overall_metrics,
+                "portfolio_recommendation": portfolio_recommendation,
+                "risk_assessment": risk_assessment,
+                "symbol_reports": symbol_reports,
+                "processing_summary": {
+                    "total_symbols_requested": len(symbols),
+                    "symbols_analyzed": overall_metrics["analyzed_symbols"],
+                    "successful_analyses": overall_metrics["successful_analyses"],
+                    "error_count": overall_metrics["error_count"],
+                    "success_rate": round((overall_metrics["successful_analyses"] / len(symbols)) * 100, 2) if len(
+                        symbols) > 0 else 0
+                },
+                "disclaimer": "This report is for educational purposes only and should not be considered as financial advice. Always consult with a qualified financial advisor before making investment decisions."
+            }
+
+        except Exception as e:
+            logger.error(f"Critical error generating investment report: {e}")
+            return {
+                "status": "CRITICAL_ERROR",
+                "message": f"Failed to generate report: {str(e)}",
+                "report_generated": datetime.now().isoformat(),
+                "error": str(e)
+            }
+
     def _should_invest(self, row, config, i: int, data: pd.DataFrame, symbol: str) -> Tuple[bool, str]:
         """Determine if we should invest based on strategy conditions"""
         current_date = row['timestamp']
@@ -2870,73 +3052,14 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
 
         # Also check if we're past fallback day and approaching month end
         if current_date.day > config.fallback_day:
-            days_remaining_in_month = (current_date.replace(month=current_date.month + 1, day=1) - current_date).days
+            if current_date.month == 12:
+                first_next = datetime(current_date.year + 1, 1, 1)
+            else:
+                first_next = datetime(current_date.year, current_date.month + 1, 1)
+            days_remaining_in_month = (first_next - current_date).days
             return days_remaining_in_month <= 5
 
         return False
-
-    def _calculate_enhanced_results(self, symbol: str, total_investment: float,
-                                  final_portfolio_value: float, total_units: float,
-                                  trades: List[Dict], config, start_date: str,
-                                  end_date: str, data, monthly_exceeded_count: int,
-                                  price_threshold_skipped: int) -> Dict:
-        """Calculate comprehensive performance metrics"""
-
-        total_return_percent = ((final_portfolio_value / total_investment) - 1) * 100 if total_investment > 0 else 0
-
-        # Calculate CAGR
-        start_timestamp = data.iloc[0]['timestamp']
-        end_timestamp = data.iloc[-1]['timestamp']
-        years = (end_timestamp - start_timestamp).days / 365.25
-        cagr_percent = ((final_portfolio_value / total_investment) ** (1 / years) - 1) * 100 if years > 0 and total_investment > 0 else 0
-
-        # Get monthly summary and analytics
-        monthly_summary = self.monthly_tracker.get_monthly_summary(symbol)
-        skipped_investments = self.monthly_tracker.skipped_investments
-
-        # Count different trade types
-        extreme_trades = len([t for t in trades if t.get('is_extreme', False)])
-        force_trades = len([t for t in trades if t.get('is_force', False)])
-        regular_trades = len(trades) - extreme_trades - force_trades
-
-        results = {
-            'symbol': symbol,
-            'strategy_name': 'Enhanced SIP V4 with Comprehensive Fixes',
-            'period': f"{start_date} to {end_date}",
-            'total_investment': float(total_investment),
-            'final_portfolio_value': float(final_portfolio_value),
-            'total_units': float(total_units),
-            'average_buy_price': float(total_investment / total_units) if total_units > 0 else 0,
-            'total_return_percent': float(total_return_percent),
-            'cagr_percent': float(cagr_percent),
-            'num_trades': len(trades),
-            'num_skipped': len(skipped_investments),
-            'trade_breakdown': {
-                'regular_trades': regular_trades,
-                'extreme_trades': extreme_trades,
-                'force_trades': force_trades
-            },
-            'monthly_limit_exceeded': monthly_exceeded_count,
-            'price_threshold_skipped': price_threshold_skipped,
-            'trades': trades,
-            'skipped_investments': skipped_investments,
-            'monthly_summary': monthly_summary,
-            'config': config,
-            'enhancements_applied': [
-                'Force remaining investment at month end',
-                'Holiday handling for regular SIP dates',
-                'Extreme opportunity detection (>15% drawdown gets 4x investment)',
-                'Monthly investment limits with extreme bypass',
-                'Comprehensive trade categorization'
-            ]
-        }
-
-        logger.info(f"✅ Enhanced backtest V4 completed for {symbol}")
-        logger.info(f"📊 Results: {regular_trades} regular + {extreme_trades} extreme + {force_trades} force trades")
-        logger.info(f"💰 Total investment: ₹{total_investment:,.2f}, Final value: ₹{final_portfolio_value:,.2f}")
-        logger.info(f"📈 Return: {total_return_percent:.2f}%, CAGR: {cagr_percent:.2f}%")
-
-        return results
 
     def _convert_numpy_types(self, obj):
         """Convert numpy types to Python native types for JSON serialization"""
