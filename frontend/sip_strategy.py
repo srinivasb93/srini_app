@@ -42,14 +42,14 @@ class EnhancedSIPStrategy:
         self.active_portfolios = []
         self.default_config = {
             "fixed_investment": 5000,
-            "major_drawdown_threshold": -10.0,
-            "minor_drawdown_threshold": -4.0,
-            "extreme_drawdown_threshold": -15.0,
+            "major_drawdown_threshold": -10,
+            "minor_drawdown_threshold": -4,
+            "extreme_drawdown_threshold": -15,
             "minor_drawdown_inv_multiplier": 1.75,
-            "major_drawdown_inv_multiplier": 3.0,
-            "extreme_drawdown_inv_multiplier": 4.0,
+            "major_drawdown_inv_multiplier": 3,
+            "extreme_drawdown_inv_multiplier": 4,
             "rolling_window": 100,
-            "fallback_day": 22,
+            "fallback_day": 28,
             "min_investment_gap_days": 5,
             "max_amount_in_a_month": None,  # Will default to 4x fixed_investment
             "price_reduction_threshold": 4.0,
@@ -131,10 +131,7 @@ class EnhancedSIPStrategy:
         """Render enhanced SIP strategy interface"""
         self.fetch_api = fetch_api
         # Ensure full width
-        # ui.context.client.request.headers['viewport-width'] = '100%'
-
-        # Create tabs for different functionalities
-        with ui.tabs() as tabs:
+        with ui.tabs().classes("w-full max-w-full") as tabs:
             backtest_tab = ui.tab("📊 Backtesting", icon="analytics")
             portfolio_tab = ui.tab("💼 Portfolios", icon="account_balance_wallet")
             multi_portfolio_tab = ui.tab("🎯 Multi-Portfolio", icon="dashboard")
@@ -144,29 +141,29 @@ class EnhancedSIPStrategy:
             config_tab = ui.tab("⚙️ Configuration", icon="settings")
             scheduler_tab = ui.tab("⏰ Scheduler", icon="schedule")  # NEW TAB for scheduler controls
 
-        with ui.tab_panels(tabs, value=backtest_tab):
-            with ui.tab_panel(backtest_tab):
+        with ui.tab_panels(tabs, value=backtest_tab).classes("w-full max-w-full"):
+            with ui.tab_panel(backtest_tab).classes("w-full max-w-full"):
                 await self.render_enhanced_backtest_panel(fetch_api, user_storage)
 
-            with ui.tab_panel(portfolio_tab):
+            with ui.tab_panel(portfolio_tab).classes("w-full max-w-full"):
                 await self.render_enhanced_portfolio_panel(fetch_api, user_storage)
 
-            with ui.tab_panel(multi_portfolio_tab):
+            with ui.tab_panel(multi_portfolio_tab).classes("w-full max-w-full"):
                 await self.render_multi_portfolio_panel(fetch_api, user_storage)
 
-            with ui.tab_panel(reports_tab):
+            with ui.tab_panel(reports_tab).classes("w-full max-w-full"):
                 await self.render_investment_reports_panel(fetch_api, user_storage)
 
-            with ui.tab_panel(signals_tab):
+            with ui.tab_panel(signals_tab).classes("w-full max-w-full"):
                 await self.render_enhanced_signals_panel(fetch_api, user_storage)
 
-            with ui.tab_panel(analytics_tab):
+            with ui.tab_panel(analytics_tab).classes("w-full max-w-full"):
                 await self.render_enhanced_analytics_panel(fetch_api, user_storage)
 
-            with ui.tab_panel(config_tab):
+            with ui.tab_panel(config_tab).classes("w-full max-w-full"):
                 await self.render_enhanced_config_panel(fetch_api, user_storage)
 
-            with ui.tab_panel(scheduler_tab):  # NEW TAB
+            with ui.tab_panel(scheduler_tab).classes("w-full max-w-full"):  # NEW TAB
                 await self.render_scheduler_panel(fetch_api, user_storage)
 
     async def render_scheduler_panel(self, fetch_api, user_storage):
@@ -360,7 +357,7 @@ class EnhancedSIPStrategy:
         ui.label("Test your SIP strategy with dynamic investments, monthly limits, and benchmark comparison").classes("text-gray-600 mb-6")
 
         # Sub-tabs for different backtesting sections
-        with ui.tabs() as sub_tabs:
+        with ui.tabs().classes("w-full") as sub_tabs:
             main_backtest = ui.tab("Main Backtest")
             multi_configs = ui.tab("Batch Multi-Configs")
             optimize = ui.tab("Optimize Config")
@@ -369,22 +366,22 @@ class EnhancedSIPStrategy:
             symbols = ui.tab("Symbols Search")
 
         with ui.tab_panels(sub_tabs, value=main_backtest).classes("w-full"):
-            with ui.tab_panel(main_backtest):
+            with ui.tab_panel(main_backtest).classes("w-full"):
                 await self.render_main_backtest_section(fetch_api, user_storage)
 
-            with ui.tab_panel(multi_configs):
+            with ui.tab_panel(multi_configs).classes("w-full"):
                 await self.render_batch_multi_configs_section(fetch_api, user_storage)
 
-            with ui.tab_panel(optimize):
+            with ui.tab_panel(optimize).classes("w-full"):
                 await self.render_optimize_config_section(fetch_api, user_storage)
 
-            with ui.tab_panel(quick_test):
+            with ui.tab_panel(quick_test).classes("w-full"):
                 await self.render_quick_test_section(fetch_api, user_storage)
 
-            with ui.tab_panel(benchmark):
+            with ui.tab_panel(benchmark).classes("w-full"):
                 await self.render_benchmark_test_section(fetch_api, user_storage)
 
-            with ui.tab_panel(symbols):
+            with ui.tab_panel(symbols).classes("w-full"):
                 await self.render_symbols_search_section(fetch_api, user_storage)
 
     async def clear_results(self):
@@ -479,6 +476,18 @@ class EnhancedSIPStrategy:
                             min=1, max=30, step=1
                         ).classes("flex-1")
 
+                    self.rolling_window = ui.number(
+                        label="🔄 Rolling Window (days)",
+                        value=self.default_config["rolling_window"],
+                        min=20, max=365, step=5
+                    ).classes("w-full")
+
+                    self.price_reduction_threshold = ui.number(
+                        label="📉 Price Reduction Threshold (%)",
+                        value=self.default_config["price_reduction_threshold"],
+                        min=1, max=10, step=0.5
+                    ).classes("w-full")
+
                     self.max_monthly = ui.number(
                         label="📅 Max Monthly Amount (₹)",
                         value=self.default_config["fixed_investment"] * 4,
@@ -515,11 +524,11 @@ class EnhancedSIPStrategy:
                 "minor_drawdown_inv_multiplier": self.minor_mult.value,
                 "major_drawdown_inv_multiplier": self.major_mult.value,
                 "extreme_drawdown_inv_multiplier": self.extreme_mult.value,
-                "rolling_window": 100,
+                "rolling_window": self.rolling_window.value,
                 "fallback_day": self.fallback_day.value,
                 "min_investment_gap_days": self.min_gap_days.value,
                 "max_amount_in_a_month": self.max_monthly.value if self.enable_monthly_limits.value else None,
-                "price_reduction_threshold": 4.0,
+                "price_reduction_threshold": self.price_reduction_threshold.value,
                 "force_remaining_investment": True,
                 "enable_monthly_limits": self.enable_monthly_limits.value
             }
@@ -1216,50 +1225,40 @@ class EnhancedSIPStrategy:
                     with signals_container:
                         with ui.card().classes("w-full p-8 text-center"):
                             ui.label("🔍 No active signals found").classes("text-lg text-gray-500")
-                            ui.label("All portfolios are in normal conditions").classes("text-sm text-gray-400")
+                            ui.label("Check back later or trigger manual scan").classes("text-sm text-gray-400")
 
             except Exception as e:
-                logger.error(f"Error fetching signals: {e}")
-                with signals_container:
-                    ui.label("❌ Error loading signals").classes("text-red-500")
+                self.show_error("Failed to refresh signals", str(e))
+
+        ui.button("🔄 Refresh Signals", on_click=refresh_signals).classes("bg-blue-500 text-white mb-4")
 
         await refresh_signals()
 
-        # Auto-refresh button
-        ui.button("🔄 Refresh Signals", on_click=refresh_signals).classes("bg-blue-500 text-white mt-4")
-
-    async def render_signal_card(self, signal):
-        """Render individual signal card with enhanced information including GTT"""
-
+    async def render_signal_card(self, signal: Dict):
+        """Render individual signal card with GTT status"""
+        symbol = signal.get('symbol', 'Unknown')
         signal_type = signal.get('signal_type', 'NORMAL')
-        signal_strength = signal.get('signal_strength', 'low')
+        recommended_amount = signal.get('recommended_amount', 0)
+        current_price = signal.get('current_price', 0)
+        drawdown = signal.get('drawdown_percent', 0)
         gtt_status = signal.get('gtt_status', 'NONE')
 
-        # Determine card styling
-        if signal_strength == 'high':
-            card_style = "border-l-4 border-green-500 bg-green-50"
-            strength_icon = "🟢"
-        elif signal_strength == 'medium':
-            card_style = "border-l-4 border-yellow-500 bg-yellow-50"
-            strength_icon = "🟡"
-        else:
-            card_style = "border-l-4 border-blue-500 bg-blue-50"
-            strength_icon = "🔵"
+        card_color = {
+            'STRONG_BUY': 'border-green-500',
+            'BUY': 'border-blue-500',
+            'WEAK_BUY': 'border-yellow-500',
+            'AVOID': 'border-red-500',
+            'NORMAL': 'border-gray-500'
+        }.get(signal_type, 'border-gray-500')
 
-        with ui.card().classes(f"w-full mb-4 p-4 {card_style}"):
-            with ui.row().classes("w-full justify-between items-start"):
-                with ui.column().classes("flex-1"):
-                    ui.label(
-                        f"{strength_icon} {signal['symbol']} - {signal.get('portfolio_name', 'Portfolio')}").classes(
-                        "text-lg font-bold")
-                    ui.label(f"Signal: {signal_type}").classes("text-sm font-medium")
-                    ui.label(f"Portfolio Type: {signal.get('portfolio_type', 'single').title()}").classes(
-                        "text-xs text-gray-600")
+        with ui.card().classes(f"w-full mb-4 p-4 border-l-4 {card_color}"):
+            with ui.row().classes("w-full justify-between items-center"):
+                ui.label(f"📡 {symbol} Signal").classes("text-lg font-bold")
+                ui.label(signal_type).classes("text-sm font-medium px-2 py-1 rounded bg-gray-100")
 
-                with ui.column().classes("text-right"):
-                    ui.label(f"💰 Amount: ₹{signal.get('recommended_amount', 0):,.0f}").classes("text-sm")
-                    ui.label(f"📈 Price: ₹{signal.get('current_price', 0):.2f}").classes("text-sm")
-                    ui.label(f"🔽 Drawdown: {signal.get('drawdown_percent', 0):.2f}%").classes("text-sm text-red-600")
+            ui.label(f"💰 Recommended: ₹{recommended_amount:,.0f}").classes("text-sm")
+            ui.label(f"📈 Price: ₹{current_price:.2f}").classes("text-sm")
+            ui.label(f"🔽 Drawdown: {drawdown:.2f}%").classes("text-sm text-red-600")
 
             # GTT status badge
             gtt_color = "bg-green-200 text-green-800" if gtt_status == 'ACTIVE' else "bg-red-200 text-red-800"
@@ -1614,11 +1613,11 @@ class EnhancedSIPStrategy:
                 final_value = result.get('final_portfolio_value', 0)
                 cagr = result.get('cagr_percent', 0)
                 total_return = result.get('total_return_percent', 0)
-                max_drawdown = result.get('max_drawdown_percent', 0)
-                sharpe = result.get('sharpe_ratio', 0)
                 num_trades = result.get('num_trades', 0)
                 monthly_limit_exceeded = result.get('monthly_limit_exceeded', 0)
                 price_threshold_skipped = result.get('price_threshold_skipped', 0)
+                trade_breakdown = result.get('trade_breakdown', {})
+                period = result.get('period', 'Unknown period')
 
                 performance_color = "border-green-500" if cagr >= 12 else "border-yellow-500" if cagr >= 8 else "border-red-500"
 
@@ -1659,24 +1658,20 @@ class EnhancedSIPStrategy:
                             ui.label(f"{cagr:.2f}%").classes(f"text-sm font-bold {cagr_color}")
 
                         with ui.column():
-                            ui.label("📉 Max Drawdown").classes("text-xs text-gray-600")
-                            ui.label(f"{abs(max_drawdown):.2f}%").classes("text-sm font-bold text-red-600")
-
-                            ui.label("⚖️ Sharpe Ratio").classes("text-xs text-gray-600 mt-2")
-                            sharpe_color = "text-green-600" if sharpe >= 1 else "text-yellow-600" if sharpe >= 0.5 else "text-red-600"
-                            ui.label(f"{sharpe:.2f}" if sharpe else "N/A").classes(f"text-sm font-bold {sharpe_color}")
-
-                        with ui.column():
                             ui.label("🔄 Total Trades").classes("text-xs text-gray-600")
                             ui.label(str(num_trades)).classes("text-sm font-bold")
 
-                            ui.label("📅 Period").classes("text-xs text-gray-600 mt-2")
-                            s_date = result.get('start_date', '')
-                            e_date = result.get('end_date', '')
-                            ui.label(f"{s_date} to {e_date}").classes("text-xs")
+                            ui.label("Trade Breakdown").classes("text-xs text-gray-600 mt-2")
+                            ui.label(f"Regular: {trade_breakdown.get('regular_trades', 0)} | Extreme: {trade_breakdown.get('extreme_trades', 0)}").classes("text-xs")
 
-                    ui.label(f"📅 Monthly Limit Exceeded: {monthly_limit_exceeded} times").classes("text-sm")
-                    ui.label(f"🚫 Price Threshold Skipped: {price_threshold_skipped} times").classes("text-sm")
+                        with ui.column():
+                            ui.label("📅 Monthly Limit Exceeded").classes("text-xs text-gray-600")
+                            ui.label(str(monthly_limit_exceeded)).classes("text-sm font-bold")
+
+                            ui.label("🚫 Price Threshold Skipped").classes("text-xs text-gray-600 mt-2")
+                            ui.label(str(price_threshold_skipped)).classes("text-sm font-bold")
+
+                    ui.label(f"📅 Period: {period}").classes("text-sm")
 
                     if 'benchmark' in result:
                         bench = result['benchmark']
@@ -1692,7 +1687,7 @@ class EnhancedSIPStrategy:
                     # Chart buttons
                     with ui.row().classes("gap-2 mt-2"):
                         async def show_trade_chart(res=result):
-                            await self.display_trade_chart(res.get('symbol'), res.get('trades', []))
+                            await self.display_trade_chart(res.get('symbol'), res.get('trades', []), res.get('benchmark', {}).get('trades', []))
 
                         ui.button("📉 Trade Chart", on_click=show_trade_chart).classes("bg-blue-500 text-white text-xs")
 
@@ -1701,17 +1696,27 @@ class EnhancedSIPStrategy:
 
                         ui.button("📊 vs Benchmark", on_click=show_comparison_chart).classes("bg-purple-500 text-white text-xs")
 
-    async def display_trade_chart(self, symbol: str, trades: List[Dict]):
-        """Display candlestick chart with trade markers"""
+    async def display_trade_chart(self, symbol: str, strategy_trades: List[Dict], benchmark_trades: List[Dict]):
+        """Display candlestick chart with strategy and benchmark trade markers"""
 
-        # Fetch historical data for chart (assume endpoint /sip/market-data/{symbol})
-        data = await self.safe_api_call(self.fetch_api, f"/sip/market-data/{symbol}")
-        if not data or not data.get('recent_data', []):
+        # Parse period from trades if available
+        all_trades = strategy_trades + benchmark_trades
+        if all_trades:
+            min_date = min(t.get('date') for t in all_trades)
+            max_date = max(t.get('date') for t in all_trades)
+            endpoint = f"/sip/market-data/{symbol}?start_date={min_date}&end_date={max_date}"
+        else:
+            endpoint = f"/sip/market-data/{symbol}"
+
+        data = await self.safe_api_call(self.fetch_api, endpoint)
+        if not data or not data.get('historical_data', data.get('recent_data', [])):
             ui.notify("No data for chart", type="warning")
             return
 
+        historical_data = data.get('historical_data', data.get('recent_data', []))
+
         # Prepare dataframe
-        df = pd.DataFrame(data['recent_data'])
+        df = pd.DataFrame(historical_data)
         df['timestamp'] = pd.to_datetime(df['timestamp'])
 
         fig = go.Figure(data=[go.Candlestick(x=df['timestamp'],
@@ -1720,13 +1725,19 @@ class EnhancedSIPStrategy:
                                             low=df['ohlc'].apply(lambda x: x['low']),
                                             close=df['ohlc'].apply(lambda x: x['close']))])
 
-        # Add trade markers
-        trade_dates = [datetime.strptime(t['timestamp'], '%Y-%m-%d %H:%M:%S') for t in trades if 'timestamp' in t]
-        trade_prices = [t['price'] for t in trades if 'price' in t]
-
-        fig.add_trace(go.Scatter(x=trade_dates, y=trade_prices, mode='markers',
+        # Add strategy trade markers
+        strategy_dates = [pd.to_datetime(t['date']) for t in strategy_trades]
+        strategy_prices = [t['price'] for t in strategy_trades]
+        fig.add_trace(go.Scatter(x=strategy_dates, y=strategy_prices, mode='markers',
                                  marker=dict(symbol='star', size=12, color='red'),
-                                 name='Trades'))
+                                 name='Strategy Trades'))
+
+        # Add benchmark trade markers
+        benchmark_dates = [pd.to_datetime(t['date']) for t in benchmark_trades]
+        benchmark_prices = [t['price'] for t in benchmark_trades]
+        fig.add_trace(go.Scatter(x=benchmark_dates, y=benchmark_prices, mode='markers',
+                                 marker=dict(symbol='circle', size=10, color='blue'),
+                                 name='Benchmark Trades'))
 
         fig.update_layout(title=f"{symbol} Price Chart with Trades",
                           xaxis_title="Date",
@@ -1741,21 +1752,51 @@ class EnhancedSIPStrategy:
     async def display_comparison_chart(self, symbol: str, strategy: Dict, benchmark: Dict):
         """Display line chart comparing strategy and benchmark performance"""
 
-        # Assume time series in strategy['portfolio_values'] and benchmark['portfolio_values']
-        # For complete code, assume they are lists of dicts with 'date' and 'value'
+        # Fetch historical data for the period
+        period = strategy.get('period', 'Unknown')
+        start_date, end_date = period.split(' to ')
+        data = await self.safe_api_call(self.fetch_api, f"/sip/market-data/{symbol}?start_date={start_date}&end_date={end_date}")
+        if not data or not data.get('historical_data', data.get('recent_data', [])):
+            ui.notify("No historical data for comparison chart", type="warning")
+            return
 
-        strat_values = strategy.get('portfolio_values', [])
-        bench_values = benchmark.get('portfolio_values', [])
+        historical_data = data.get('historical_data', data.get('recent_data', []))
+        df = pd.DataFrame(historical_data)
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df = df.sort_values('timestamp').set_index('timestamp')
 
-        strat_df = pd.DataFrame(strat_values)
-        bench_df = pd.DataFrame(bench_values)
+        # Compute strategy portfolio values
+        strategy_units = 0
+        strategy_values = []
+        strategy_trades_sorted = sorted(strategy.get('trades', []), key=lambda t: t['date'])
+        trade_idx = 0
+        for date, row in df.iterrows():
+            # Add any trades on this date
+            while trade_idx < len(strategy_trades_sorted) and strategy_trades_sorted[trade_idx]['date'] == str(date.date()):
+                strategy_units += strategy_trades_sorted[trade_idx]['units']
+                trade_idx += 1
+            value = strategy_units * row['ohlc']['close']
+            strategy_values.append({'date': date, 'value': value})
+
+        # Compute benchmark portfolio values
+        benchmark_units = 0
+        benchmark_values = []
+        benchmark_trades_sorted = sorted(benchmark.get('trades', []), key=lambda t: t['date'])
+        trade_idx = 0
+        for date, row in df.iterrows():
+            # Add any trades on this date
+            while trade_idx < len(benchmark_trades_sorted) and benchmark_trades_sorted[trade_idx]['date'] == str(date.date()):
+                benchmark_units += benchmark_trades_sorted[trade_idx]['units']
+                trade_idx += 1
+            value = benchmark_units * row['ohlc']['close']
+            benchmark_values.append({'date': date, 'value': value})
+
+        strat_df = pd.DataFrame(strategy_values)
+        bench_df = pd.DataFrame(benchmark_values)
 
         if strat_df.empty or bench_df.empty:
             ui.notify("No data for comparison chart", type="warning")
             return
-
-        strat_df['date'] = pd.to_datetime(strat_df['date'])
-        bench_df['date'] = pd.to_datetime(bench_df['date'])
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=strat_df['date'], y=strat_df['value'], name='Strategy', line=dict(color='blue')))
@@ -2040,7 +2081,7 @@ class EnhancedSIPStrategy:
         drawdown_2.value = -4.0
         multiplier_2.value = 3.0
         multiplier_3.value = 5.0
-        fallback_day.value = 22
+        fallback_day.value = 28
         min_gap_days.value = 5
 
         ui.notify("✅ Loaded balanced template", type="positive")

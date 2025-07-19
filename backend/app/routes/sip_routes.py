@@ -3962,7 +3962,7 @@ async def generate_comprehensive_investment_report(
     """Generate comprehensive investment report for multiple symbols"""
     try:
         # Create strategy instance
-        strategy = EnhancedSIPStrategy(
+        strategy = EnhancedSIPStrategyWithLimits(
             nsedata_session=nsedata_db,
             trading_session=trading_db
         )

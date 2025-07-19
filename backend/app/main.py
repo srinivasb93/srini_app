@@ -1681,7 +1681,7 @@ if __name__ == "__main__":
         nsedata_db_gen = get_nsedata_db()
         nsedata_db = await nsedata_db_gen.__anext__()
 
-        await run_sip_backtest(request_config, background_tasks, trading_db=db, nsedata_db=nsedata_db)
+        await run_sip_backtest(request_config, background_tasks, trading_db=db, nsedata_db=nsedata_db, enable_monthly_limits=False)
         # await daily_signal_check()
 
 
