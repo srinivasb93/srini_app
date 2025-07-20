@@ -352,10 +352,6 @@ class EnhancedSIPStrategy:
 
     async def render_enhanced_backtest_panel(self, fetch_api, user_storage):
         """Enhanced backtesting interface with benchmark comparison and monthly limits, using sub-tabs"""
-
-        ui.label("🚀 Enhanced SIP Strategy Backtesting").classes("text-2xl font-bold mb-4")
-        ui.label("Test your SIP strategy with dynamic investments, monthly limits, and benchmark comparison").classes("text-gray-600 mb-6")
-
         # Sub-tabs for different backtesting sections
         with ui.tabs().classes("w-full") as sub_tabs:
             main_backtest = ui.tab("Main Backtest")
@@ -502,7 +498,6 @@ class EnhancedSIPStrategy:
         # Action buttons
         with ui.row().classes("gap-4 mt-4"):
             ui.button("🚀 Run Enhanced Backtest", on_click=self.run_enhanced_backtest).classes("bg-blue-600 text-white px-6 py-2")
-            ui.button("📊 Load Template", on_click=self.load_backtest_template).classes("bg-gray-500 text-white px-4 py-2")
             ui.button("📈 Compare Strategies", on_click=self.run_strategy_comparison).classes("bg-purple-500 text-white px-4 py-2")
 
     async def run_enhanced_backtest(self):
@@ -1217,9 +1212,9 @@ class EnhancedSIPStrategy:
 
                 if signals:
                     with signals_container:
-                        ui.label(f"📊 Found {len(signals)} Active Signals").classes("text-lg font-semibold mb-4")
+                        ui.label(f"📊 Found {len(signals['signals'])} Active Signals").classes("text-lg font-semibold mb-4")
 
-                        for signal in signals:
+                        for signal in signals['signals']:
                             await self.render_signal_card(signal)
                 else:
                     with signals_container:
@@ -1267,122 +1262,629 @@ class EnhancedSIPStrategy:
             ui.label(f"Created: {signal.get('created_at', '')}").classes("text-xs text-gray-500 mt-2")
 
     async def render_batch_multi_configs_section(self, fetch_api, user_storage):
-        """Render batch multi-configs backtest UI with improved input"""
+        """Enhanced batch multi-configs backtest UI aligned with endpoint response"""
 
         ui.label("🔄 Batch Backtest with Multiple Configurations").classes("text-lg font-bold mb-4")
         ui.label("Test multiple strategy configurations in batch and find the best one").classes("text-gray-600 mb-4")
 
         symbols_input = ui.textarea(
             label="Symbols (one per line)",
-            value="ICICIB22\nGOLDBEES"
+            value="ICICIB22\nCPSEETF",
+            placeholder="Enter symbols separated by new lines"
         ).classes("w-full mb-4")
 
-        # Configs table
-        configs_table = ui.table(columns=[
-            {'name': 'fixed_investment', 'label': 'Monthly Inv (₹)', 'field': 'fixed_investment', 'editable': True},
-            {'name': 'major_dd', 'label': 'Major DD (%)', 'field': 'major_drawdown_threshold', 'editable': True},
-            {'name': 'minor_dd', 'label': 'Minor DD (%)', 'field': 'minor_drawdown_threshold', 'editable': True},
-            {'name': 'extreme_dd', 'label': 'Extreme DD (%)', 'field': 'extreme_drawdown_threshold', 'editable': True},
-            {'name': 'minor_mult', 'label': 'Minor Mult', 'field': 'minor_drawdown_inv_multiplier', 'editable': True},
-            {'name': 'major_mult', 'label': 'Major Mult', 'field': 'major_drawdown_inv_multiplier', 'editable': True},
-            {'name': 'extreme_mult', 'label': 'Extreme Mult', 'field': 'extreme_drawdown_inv_multiplier', 'editable': True},
-            {'name': 'actions', 'label': 'Actions'}
-        ], rows=[], row_key='id').classes("w-full")
-
-        configs_table.add_rows([{'id': 1, 'fixed_investment': 5000, 'major_drawdown_threshold': -10.0, 'minor_drawdown_threshold': -4.0, 'extreme_drawdown_threshold': -15.0, 'minor_drawdown_inv_multiplier': 1.75, 'major_drawdown_inv_multiplier': 3.0, 'extreme_drawdown_inv_multiplier': 4.0}])
-
-        def add_config_row():
-            new_id = max([r['id'] for r in configs_table.rows] or [0]) + 1
-            new_row = {'id': new_id, 'fixed_investment': 5000, 'major_drawdown_threshold': -10.0, 'minor_drawdown_threshold': -4.0, 'extreme_drawdown_threshold': -15.0, 'minor_drawdown_inv_multiplier': 1.75, 'major_drawdown_inv_multiplier': 3.0, 'extreme_drawdown_inv_multiplier': 4.0}
-            configs_table.add_rows([new_row])
-
-        ui.button("➕ Add Config", on_click=add_config_row).classes("bg-green-500 text-white mb-4")
-
-        with ui.row().classes("gap-4"):
+        with ui.row().classes("gap-4 mb-4"):
             start_date = ui.date(value="2020-01-01")
             end_date = ui.date(value=datetime.now().strftime("%Y-%m-%d"))
 
+            # FIXED: Use individual input fields instead of editable table for better UX
+            ui.label("⚙️ Configuration Management").classes("text-lg font-bold mb-2")
+            ui.label("Add and customize multiple configurations to test").classes("text-gray-600 mb-4")
+
+            # Configuration storage
+            configs_data = []
+            configs_container = ui.column().classes("w-full mb-4")
+
+            def create_config_card(config_data: dict, config_index: int):
+                """Create an editable configuration card"""
+
+                with ui.card().classes("w-full mb-4 p-4 border"):
+                    with ui.row().classes("w-full justify-between items-center mb-4"):
+                        ui.label(f"Configuration {config_index + 1}").classes("text-lg font-bold")
+
+                        def remove_config():
+                            if len(configs_data) > 1:  # Keep at least one config
+                                configs_data.pop(config_index)
+                                refresh_configs_display()
+                                ui.notify(f"Configuration {config_index + 1} removed", type="positive")
+                            else:
+                                ui.notify("Keep at least one configuration", type="warning")
+
+                        if len(configs_data) > 1:
+                            ui.button("🗑️ Remove", on_click=remove_config).classes("bg-red-500 text-white text-xs")
+
+                    # Investment Settings
+                    with ui.expansion("💰 Investment Settings", value=True).classes("w-full mb-2"):
+                        with ui.row().classes("gap-4"):
+                            fixed_investment = ui.number(
+                                label="Monthly Investment (₹)",
+                                value=config_data.get('fixed_investment', 5000),
+                                step=100,
+                                min=100
+                            ).classes("w-48")
+
+                            max_amount = ui.number(
+                                label="Max Monthly Amount (₹)",
+                                value=config_data.get('max_amount_in_a_month', 18000),
+                                step=1000,
+                                min=1000
+                            ).classes("w-48")
+
+                            force_remaining = ui.checkbox(
+                                text="Force Remaining Investment",
+                                value=config_data.get('force_remaining_investment', True)
+                            )
+
+                    # Drawdown Thresholds
+                    with ui.expansion("📉 Drawdown Thresholds").classes("w-full mb-2"):
+                        with ui.row().classes("gap-4"):
+                            minor_dd = ui.number(
+                                label="Minor Drawdown (%)",
+                                value=config_data.get('minor_drawdown_threshold', -4),
+                                step=0.5,
+                                max=-1
+                            ).classes("w-48")
+
+                            major_dd = ui.number(
+                                label="Major Drawdown (%)",
+                                value=config_data.get('major_drawdown_threshold', -10),
+                                step=0.5,
+                                max=-5
+                            ).classes("w-48")
+
+                            extreme_dd = ui.number(
+                                label="Extreme Drawdown (%)",
+                                value=config_data.get('extreme_drawdown_threshold', -15),
+                                step=0.5,
+                                max=-10
+                            ).classes("w-48")
+
+                    # Investment Multipliers
+                    with ui.expansion("📈 Investment Multipliers").classes("w-full mb-2"):
+                        with ui.row().classes("gap-4"):
+                            minor_mult = ui.number(
+                                label="Minor Multiplier",
+                                value=config_data.get('minor_drawdown_inv_multiplier', 1.75),
+                                step=0.25,
+                                min=1.0,
+                                max=5.0
+                            ).classes("w-48")
+
+                            major_mult = ui.number(
+                                label="Major Multiplier",
+                                value=config_data.get('major_drawdown_inv_multiplier', 3.0),
+                                step=0.25,
+                                min=1.0,
+                                max=5.0
+                            ).classes("w-48")
+
+                            extreme_mult = ui.number(
+                                label="Extreme Multiplier",
+                                value=config_data.get('extreme_drawdown_inv_multiplier', 4.0),
+                                step=0.25,
+                                min=1.0,
+                                max=10.0
+                            ).classes("w-48")
+
+                    # Advanced Settings
+                    with ui.expansion("🔧 Advanced Settings").classes("w-full mb-2"):
+                        with ui.row().classes("gap-4"):
+                            rolling_window = ui.number(
+                                label="Rolling Window (days)",
+                                value=config_data.get('rolling_window', 100),
+                                step=10,
+                                min=20,
+                                max=200
+                            ).classes("w-48")
+
+                            fallback_day = ui.number(
+                                label="Fallback Day",
+                                value=config_data.get('fallback_day', 28),
+                                step=1,
+                                min=1,
+                                max=31
+                            ).classes("w-48")
+
+                        with ui.row().classes("gap-4"):
+                            min_gap_days = ui.number(
+                                label="Min Investment Gap (days)",
+                                value=config_data.get('min_investment_gap_days', 5),
+                                step=1,
+                                min=1,
+                                max=30
+                            ).classes("w-48")
+
+                            price_threshold = ui.number(
+                                label="Price Reduction Threshold (%)",
+                                value=config_data.get('price_reduction_threshold', 5),
+                                step=0.5,
+                                min=0,
+                                max=20
+                            ).classes("w-48")
+
+                    # Update config data when values change
+                    def update_config():
+                        configs_data[config_index] = {
+                            'fixed_investment': fixed_investment.value,
+                            'max_amount_in_a_month': max_amount.value,
+                            'force_remaining_investment': force_remaining.value,
+                            'minor_drawdown_threshold': minor_dd.value,
+                            'major_drawdown_threshold': major_dd.value,
+                            'extreme_drawdown_threshold': extreme_dd.value,
+                            'minor_drawdown_inv_multiplier': minor_mult.value,
+                            'major_drawdown_inv_multiplier': major_mult.value,
+                            'extreme_drawdown_inv_multiplier': extreme_mult.value,
+                            'rolling_window': int(rolling_window.value),
+                            'fallback_day': int(fallback_day.value),
+                            'min_investment_gap_days': int(min_gap_days.value),
+                            'price_reduction_threshold': price_threshold.value
+                        }
+
+                    # Bind update function to all inputs
+                    for input_field in [fixed_investment, max_amount, force_remaining, minor_dd, major_dd, extreme_dd,
+                                        minor_mult, major_mult, extreme_mult, rolling_window, fallback_day,
+                                        min_gap_days, price_threshold]:
+                        input_field.on('update:model-value', lambda: update_config())
+
+            def refresh_configs_display():
+                """Refresh the configs display"""
+                configs_container.clear()
+                with configs_container:
+                    for idx, config in enumerate(configs_data):
+                        create_config_card(config, idx)
+
+            # Initialize with default configurations
+            default_configs = [
+                {
+                    'fixed_investment': 5000,
+                    'max_amount_in_a_month': 18000,
+                    'force_remaining_investment': True,
+                    'minor_drawdown_threshold': -4.0,
+                    'major_drawdown_threshold': -10.0,
+                    'extreme_drawdown_threshold': -15.0,
+                    'minor_drawdown_inv_multiplier': 1.75,
+                    'major_drawdown_inv_multiplier': 3.0,
+                    'extreme_drawdown_inv_multiplier': 4.0,
+                    'rolling_window': 100,
+                    'fallback_day': 28,
+                    'min_investment_gap_days': 5,
+                    'price_reduction_threshold': 5.0
+                },
+                {
+                    'fixed_investment': 3000,
+                    'max_amount_in_a_month': 20000,
+                    'force_remaining_investment': True,
+                    'minor_drawdown_threshold': -5.0,
+                    'major_drawdown_threshold': -10.0,
+                    'extreme_drawdown_threshold': -15.0,
+                    'minor_drawdown_inv_multiplier': 2.0,
+                    'major_drawdown_inv_multiplier': 3.0,
+                    'extreme_drawdown_inv_multiplier': 4.0,
+                    'rolling_window': 100,
+                    'fallback_day': 28,
+                    'min_investment_gap_days': 5,
+                    'price_reduction_threshold': 4.0
+                }
+            ]
+
+            configs_data.extend(default_configs)
+
+            def add_new_config():
+                """Add a new configuration"""
+                new_config = {
+                    'fixed_investment': 5000,
+                    'max_amount_in_a_month': 18000,
+                    'force_remaining_investment': True,
+                    'minor_drawdown_threshold': -4.0,
+                    'major_drawdown_threshold': -10.0,
+                    'extreme_drawdown_threshold': -15.0,
+                    'minor_drawdown_inv_multiplier': 1.75,
+                    'major_drawdown_inv_multiplier': 3.0,
+                    'extreme_drawdown_inv_multiplier': 4.0,
+                    'rolling_window': 100,
+                    'fallback_day': 28,
+                    'min_investment_gap_days': 5,
+                    'price_reduction_threshold': 5.0
+                }
+                configs_data.append(new_config)
+                refresh_configs_display()
+                ui.notify(f"Configuration {len(configs_data)} added", type="positive")
+
+            def add_preset_config(preset_name: str):
+                """Add preset configuration"""
+                presets = {
+                    'Conservative': {
+                        'fixed_investment': 3000,
+                        'max_amount_in_a_month': 15000,
+                        'minor_drawdown_threshold': -3.0,
+                        'major_drawdown_threshold': -8.0,
+                        'extreme_drawdown_threshold': -12.0,
+                        'minor_drawdown_inv_multiplier': 1.5,
+                        'major_drawdown_inv_multiplier': 2.5,
+                        'extreme_drawdown_inv_multiplier': 3.5,
+                        'price_reduction_threshold': 3.0
+                    },
+                    'Aggressive': {
+                        'fixed_investment': 7000,
+                        'max_amount_in_a_month': 25000,
+                        'minor_drawdown_threshold': -5.0,
+                        'major_drawdown_threshold': -12.0,
+                        'extreme_drawdown_threshold': -18.0,
+                        'minor_drawdown_inv_multiplier': 2.0,
+                        'major_drawdown_inv_multiplier': 3.5,
+                        'extreme_drawdown_inv_multiplier': 5.0,
+                        'price_reduction_threshold': 6.0
+                    }
+                }
+
+                if preset_name in presets:
+                    base_config = {
+                        'fixed_investment': 5000,
+                        'max_amount_in_a_month': 18000,
+                        'force_remaining_investment': True,
+                        'rolling_window': 100,
+                        'fallback_day': 28,
+                        'min_investment_gap_days': 5
+                    }
+                    base_config.update(presets[preset_name])
+                    configs_data.append(base_config)
+                    refresh_configs_display()
+                    ui.notify(f"{preset_name} configuration added", type="positive")
+
+            # Configuration management buttons
+            with ui.row().classes("gap-2 mb-4"):
+                ui.button("➕ Add Configuration", on_click=add_new_config).classes("bg-green-500 text-white")
+                ui.button("🛡️ Add Conservative", on_click=lambda: add_preset_config('Conservative')).classes(
+                    "bg-blue-500 text-white")
+                ui.button("🚀 Add Aggressive", on_click=lambda: add_preset_config('Aggressive')).classes(
+                    "bg-red-500 text-white")
+
+            # Display configurations
+            refresh_configs_display()
+
+        # Results Section
         batch_results = ui.column().classes("w-full mt-4")
 
         async def run_batch_multi():
             try:
                 symbols = [s.strip() for s in symbols_input.value.split('\n') if s.strip()]
                 if not symbols:
-                    self.show_warning("No symbols")
+                    ui.notify("Please enter at least one symbol", type="warning")
                     return
 
-                configs = [ {k: r[k] for k in r if k != 'id'} for r in configs_table.rows ]
-
-                if not configs:
-                    self.show_warning("No configs added")
+                if not configs_data:
+                    ui.notify("Please add at least one configuration", type="warning")
                     return
 
                 request_data = {
                     "symbols": symbols,
-                    "start_date": start_date.value,
-                    "end_date": end_date.value,
-                    "configs": configs
+                    "configs": configs_data
                 }
 
-                results = await self.safe_api_call(fetch_api, "/sip/batch-backtest/multi-configs", "POST", request_data)
+                ui.notify("Running batch backtest...", type="info")
+                url = f"/sip/batch-backtest/multi-configs?start_date={start_date.value}&end_date={end_date.value}"
+                results = await self.safe_api_call(fetch_api, url, "POST", request_data)
 
                 if results:
-                    batch_results.clear()
-                    with batch_results:
-                        ui.label("Batch Results").classes("font-bold mb-2")
-                        for idx, res in enumerate(results):
-                            with ui.expansion(f"Config {idx+1}").classes("w-full mb-2"):
-                                await self.display_enhanced_backtest_results(res, batch_results)
-                        if 'best_config' in results:
-                            with ui.card().classes("mt-4 p-4 bg-green-50"):
-                                ui.label("Best Configuration").classes("font-bold")
-                                for k, v in results['best_config'].items():
-                                    ui.label(f"{k}: {v}").classes("text-sm")
-            except Exception as e:
-                self.show_error("Batch run failed", str(e))
+                    await self.display_batch_multi_config_results(results, batch_results)
+                else:
+                    ui.notify("No results received", type="warning")
 
-        ui.button("🚀 Run Batch", on_click=run_batch_multi).classes("bg-orange-500 text-white")
+            except Exception as e:
+                self.show_error("Batch backtest failed", str(e))
+
+        ui.button("🚀 Run Batch Backtest", on_click=run_batch_multi).classes("bg-blue-600 text-white px-6 py-2")
+
+        # Configuration summary
+        with ui.card().classes("w-full mt-4 p-4 bg-gray-50"):
+            ui.label("📊 Current Configurations Summary").classes("font-bold mb-2")
+
+            def show_config_summary():
+                """Show a summary of current configurations"""
+                if configs_data:
+                    summary_text = f"Total Configurations: {len(configs_data)}\n"
+                    for i, config in enumerate(configs_data):
+                        summary_text += f"Config {i + 1}: ₹{config['fixed_investment']:,}/month, "
+                        summary_text += f"DD: {config['minor_drawdown_threshold']:.1f}%/{config['major_drawdown_threshold']:.1f}%/{config['extreme_drawdown_threshold']:.1f}%, "
+                        summary_text += f"Mult: {config['minor_drawdown_inv_multiplier']:.1f}x/{config['major_drawdown_inv_multiplier']:.1f}x/{config['extreme_drawdown_inv_multiplier']:.1f}x\n"
+
+                    ui.label(summary_text.strip()).classes("text-xs text-gray-600 whitespace-pre-line")
+                else:
+                    ui.label("No configurations added").classes("text-gray-500")
+
+            show_config_summary()
+
+    async def display_batch_multi_config_results(self, results: dict, container):
+        """Display comprehensive batch multi-config results aligned with endpoint response"""
+
+        container.clear()
+
+        with container:
+            # Header Information
+            with ui.card().classes("w-full mb-4 p-4 bg-blue-50"):
+                ui.label("📊 Batch Backtest Results").classes("text-xl font-bold mb-2")
+
+                with ui.row().classes("gap-8"):
+                    ui.label(f"🆔 Batch ID: {results.get('batch_id', 'N/A')}").classes("text-sm")
+                    ui.label(f"📈 Symbols: {', '.join(results.get('symbols', []))}").classes("text-sm")
+                    ui.label(f"📅 Period: {results.get('period', 'N/A')}").classes("text-sm")
+                    ui.label(f"⚙️ Configs Tested: {results.get('configurations_tested', 0)}").classes("text-sm")
+
+            # Best Configuration Recommendation
+            best_config = results.get('best_config_recommendation', {})
+            if best_config.get('recommended_config'):
+                with ui.card().classes("w-full mb-4 p-4 bg-green-50 border-l-4 border-green-500"):
+                    ui.label("🏆 Best Configuration Recommendation").classes("text-lg font-bold mb-2")
+                    ui.label(f"📈 Average Outperformance: {best_config.get('average_outperformance', 0):.2f}%").classes(
+                        "text-sm font-semibold text-green-700")
+                    ui.label(f"💡 Reason: {best_config.get('reason', 'N/A')}").classes("text-sm mb-2")
+
+                    # Display recommended config in a compact format
+                    recommended = best_config['recommended_config']
+                    with ui.expansion("View Recommended Parameters").classes("w-full"):
+                        config_table = ui.table(
+                            columns=[
+                                {'name': 'parameter', 'label': 'Parameter', 'field': 'parameter'},
+                                {'name': 'value', 'label': 'Value', 'field': 'value'}
+                            ],
+                            rows=[
+                                {'parameter': k.replace('_', ' ').title(), 'value': v}
+                                for k, v in recommended.items()
+                            ]
+                        ).classes("w-full")
+
+            # Individual Configuration Results
+            batch_results_data = results.get('batch_results', [])
+
+            for config_idx, batch_result in enumerate(batch_results_data):
+                with ui.expansion(f"Configuration {config_idx + 1} Results", value=config_idx == 0).classes(
+                        "w-full mb-4"):
+
+                    # Configuration Details
+                    with ui.card().classes("w-full mb-4 p-4 bg-gray-50"):
+                        ui.label("⚙️ Configuration Parameters").classes("font-semibold mb-2")
+                        config = batch_result.get('config', {})
+
+                        with ui.grid(columns=4).classes("gap-2"):
+                            for key, value in config.items():
+                                if isinstance(value, bool):
+                                    display_value = "✅" if value else "❌"
+                                elif isinstance(value, (int, float)):
+                                    display_value = f"{value:,}" if isinstance(value, int) else f"{value:.2f}"
+                                else:
+                                    display_value = str(value)
+
+                                ui.label(f"{key.replace('_', ' ').title()}: {display_value}").classes("text-xs")
+
+                    # Summary Statistics
+                    summary = batch_result.get('summary', {})
+                    benchmark_summary = batch_result.get('benchmark_summary', {})
+
+                    with ui.row().classes("gap-4 mb-4"):
+                        # Strategy Summary
+                        with ui.card().classes("flex-1 p-4"):
+                            ui.label("📊 Strategy Summary").classes("font-semibold mb-2")
+                            ui.label(f"💰 Total Investment: ₹{summary.get('total_investment', 0):,.0f}").classes(
+                                "text-sm")
+                            ui.label(f"💎 Portfolio Value: ₹{summary.get('total_portfolio_value', 0):,.0f}").classes(
+                                "text-sm")
+                            ui.label(f"📈 Overall Return: {summary.get('overall_return_percent', 0):.2f}%").classes(
+                                "text-sm font-semibold text-green-600")
+                            ui.label(f"🔄 Total Trades: {summary.get('total_trades', 0)}").classes("text-sm")
+                            ui.label(f"⏭️ Skipped: {summary.get('total_skipped', 0)}").classes("text-sm")
+
+                        # Benchmark Summary
+                        if benchmark_summary:
+                            with ui.card().classes("flex-1 p-4"):
+                                ui.label("📋 Benchmark Summary").classes("font-semibold mb-2")
+                                ui.label(
+                                    f"💰 Total Investment: ₹{benchmark_summary.get('total_investment', 0):,.0f}").classes(
+                                    "text-sm")
+                                ui.label(
+                                    f"💎 Portfolio Value: ₹{benchmark_summary.get('total_portfolio_value', 0):,.0f}").classes(
+                                    "text-sm")
+                                ui.label(
+                                    f"📈 Overall Return: {benchmark_summary.get('overall_return_percent', 0):.2f}%").classes(
+                                    "text-sm font-semibold text-blue-600")
+                                ui.label(f"🔄 Total Trades: {benchmark_summary.get('total_trades', 0)}").classes(
+                                    "text-sm")
+
+                    # Individual Symbol Results
+                    symbol_results = batch_result.get('results', [])
+
+                    for symbol_result in symbol_results:
+                        symbol = symbol_result.get('symbol', 'Unknown')
+
+                        with ui.expansion(f"📈 {symbol} Detailed Results").classes("w-full mb-2"):
+                            await self.display_symbol_result_details(symbol_result)
+
+    async def display_symbol_result_details(self, result: dict):
+        """Display detailed results for a single symbol"""
+
+        symbol = result.get('symbol', 'Unknown')
+
+        # Key Metrics
+        with ui.row().classes("gap-4 mb-4"):
+            with ui.card().classes("flex-1 p-4 bg-blue-50"):
+                ui.label("📊 Performance Metrics").classes("font-semibold mb-2")
+                ui.label(f"💰 Total Investment: ₹{result.get('total_investment', 0):,.0f}").classes("text-sm")
+                ui.label(f"💎 Final Value: ₹{result.get('final_portfolio_value', 0):,.0f}").classes("text-sm")
+                ui.label(f"📈 Total Return: {result.get('total_return_percent', 0):.2f}%").classes("text-sm font-bold")
+                ui.label(f"📊 CAGR: {result.get('cagr_percent', 0):.2f}%").classes("text-sm font-bold")
+                ui.label(f"💹 Avg Buy Price: ₹{result.get('average_buy_price', 0):.2f}").classes("text-sm")
+
+            # Benchmark Comparison
+            comparison = result.get('comparison', {})
+            if comparison:
+                with ui.card().classes("flex-1 p-4 bg-green-50"):
+                    ui.label("🆚 vs Benchmark").classes("font-semibold mb-2")
+                    ui.label(
+                        f"📈 Return Outperformance: {comparison.get('return_outperformance_percent', 0):.2f}%").classes(
+                        "text-sm font-bold text-green-600")
+                    ui.label(f"📊 CAGR Outperformance: {comparison.get('cagr_outperformance_percent', 0):.2f}%").classes(
+                        "text-sm font-bold text-green-600")
+                    ui.label(
+                        f"⚡ Investment Efficiency: {comparison.get('investment_efficiency_percent', 0):.1f}%").classes(
+                        "text-sm")
+                    ui.label(f"💡 {comparison.get('performance_summary', 'N/A')}").classes("text-sm font-medium")
+
+        # Trade Breakdown
+        trade_breakdown = result.get('trade_breakdown', {})
+        if trade_breakdown:
+            with ui.card().classes("w-full mb-4 p-4"):
+                ui.label("🔄 Trade Analysis").classes("font-semibold mb-2")
+
+                with ui.row().classes("gap-4"):
+                    ui.label(f"📅 Regular Trades: {trade_breakdown.get('regular_trades', 0)}").classes("text-sm")
+                    ui.label(f"🚨 Extreme Trades: {trade_breakdown.get('extreme_trades', 0)}").classes(
+                        "text-sm text-red-600")
+                    ui.label(f"⚡ Force Trades: {trade_breakdown.get('force_trades', 0)}").classes(
+                        "text-sm text-orange-600")
+                    ui.label(f"🚫 Monthly Limits Hit: {result.get('monthly_limit_exceeded', 0)}").classes("text-sm")
+                    ui.label(f"⏭️ Price Threshold Skipped: {result.get('price_threshold_skipped', 0)}").classes(
+                        "text-sm")
+
+        # Monthly Summary (show first few months as sample)
+        monthly_summary = result.get('monthly_summary', {})
+        if monthly_summary:
+            with ui.expansion("📅 Monthly Investment Summary (Sample)").classes("w-full mb-4"):
+                sample_months = list(monthly_summary.items())[:6]  # Show first 6 months
+
+                monthly_table = ui.table(
+                    columns=[
+                        {'name': 'month', 'label': 'Month', 'field': 'month'},
+                        {'name': 'invested', 'label': 'Invested (₹)', 'field': 'invested'},
+                        {'name': 'investments', 'label': 'Count', 'field': 'investments'},
+                        {'name': 'remaining', 'label': 'Remaining (₹)', 'field': 'remaining'},
+                        {'name': 'utilization', 'label': 'Utilization %', 'field': 'utilization'}
+                    ],
+                    rows=[
+                        {
+                            'month': month,
+                            'invested': f"₹{data.get('total_invested', 0):,.0f}",
+                            'investments': data.get('num_investments', 0),
+                            'remaining': f"₹{data.get('remaining_budget', 0):,.0f}",
+                            'utilization': f"{data.get('budget_utilization_percent', 0):.1f}%"
+                        }
+                        for month, data in sample_months
+                    ]
+                ).classes("w-full")
+
+                if len(monthly_summary) > 6:
+                    ui.label(f"... and {len(monthly_summary) - 6} more months").classes("text-sm text-gray-500 mt-2")
+
+        # Recent Trades (show last 5)
+        trades = result.get('trades', [])
+        if trades:
+            with ui.expansion("💼 Recent Trades (Last 5)").classes("w-full"):
+                recent_trades = trades[-5:]
+
+                trades_table = ui.table(
+                    columns=[
+                        {'name': 'date', 'label': 'Date', 'field': 'date'},
+                        {'name': 'price', 'label': 'Price (₹)', 'field': 'price'},
+                        {'name': 'units', 'label': 'Units', 'field': 'units'},
+                        {'name': 'amount', 'label': 'Amount (₹)', 'field': 'amount'},
+                        {'name': 'type', 'label': 'Type', 'field': 'type'},
+                        {'name': 'drawdown', 'label': 'Drawdown %', 'field': 'drawdown'}
+                    ],
+                    rows=[
+                        {
+                            'date': trade.get('date', ''),
+                            'price': f"₹{trade.get('price', 0):.2f}",
+                            'units': f"{trade.get('units', 0):.2f}",
+                            'amount': f"₹{trade.get('amount', 0):,.0f}",
+                            'type': trade.get('trade_type', '').replace('_', ' ').title(),
+                            'drawdown': f"{trade.get('drawdown', 0):.2f}%" if trade.get('drawdown') else 'N/A'
+                        }
+                        for trade in recent_trades
+                    ]
+                ).classes("w-full")
+
+            # Enhanced Features Applied
+            enhancements = result.get('enhancements_applied', [])
+            if enhancements:
+                with ui.card().classes("w-full mt-4 p-4 bg-yellow-50"):
+                    ui.label("✨ Applied Enhancements").classes("font-semibold mb-2")
+                    for enhancement in enhancements:
+                        ui.label(f"• {enhancement}").classes("text-sm")
 
     async def render_optimize_config_section(self, fetch_api, user_storage):
         """Render config optimization section"""
 
-        ui.label("⚙️ Optimize Configuration").classes("text-lg font-bold mb-4")
+        ui.label("⚙️ Optimize Configuration").classes("text-lg font-bold mb-1")
         ui.label("Find the optimal strategy parameters based on historical data").classes("text-gray-600 mb-4")
 
-        symbols_input = ui.textarea(
-            label="Symbols (one per line)",
-            value="ICICIB22\nGOLDBEES"
-        ).classes("w-full mb-4")
+        with ui.row().classes("gap-2 mb-2"):
+            with ui.column().classes("w-full"):
+                with ui.card().classes("w-full"):
+                    symbol_input = ui.input(
+                        label="Symbol",
+                        value="ICICIB22"
+                    ).classes("w-40 mb-1")
 
-        with ui.row().classes("gap-4"):
-            start_date = ui.date(value="2020-01-01")
-            end_date = ui.date(value=datetime.now().strftime("%Y-%m-%d"))
+                    target_monthly_utilization = ui.number(
+                        label="Target Monthly Utilization (%)",
+                        value=80,
+                        min=50,
+                        max=100,
+                        step=1
+                    ).classes("w-40 mb-1")
 
-        optimize_results = ui.column().classes("w-full mt-4")
+                    risk_tolerance = ui.select(
+                        label="Risk Tolerance",
+                        options=[
+                            "conservative",
+                            "moderate",
+                            "aggressive"
+                        ],
+                        value="conservative",
+                    ).classes("w-40 mb-1")
+
+            with ui.column().classes("gap-4 mb-4"):
+                optimize_results = ui.column().classes("w-full mt-4")
 
         async def run_optimize():
             try:
-                symbols = [s.strip() for s in symbols_input.value.split('\n') if s.strip()]
-                if not symbols:
+                if not symbol_input:
                     self.show_warning("No symbols")
                     return
 
-                request_data = {
-                    "symbols": symbols,
-                    "start_date": start_date.value,
-                    "end_date": end_date.value
-                }
+                url = f"/sip/optimize-config?symbol={symbol_input}&target_monthly_utilization={target_monthly_utilization.value}&risk_tolerance={risk_tolerance.value}"
 
-                optimized = await self.safe_api_call(fetch_api, "/sip/optimize-config", "POST", request_data)
+                optimized = await self.safe_api_call(fetch_api, url, "POST", data={})
 
                 if optimized:
                     optimize_results.clear()
                     with optimize_results:
                         ui.label("Optimized Configuration").classes("font-bold mb-2")
                         config = optimized.get("optimized_config", {})
-                        table = ui.table(columns=[{'name': 'param', 'label': 'Parameter', 'field': 'param'},
-                                                 {'name': 'value', 'label': 'Value', 'field': 'value'}],
-                                         rows=[{'param': k, 'value': v} for k, v in config.items()]).classes("w-full")
+
+                        with ui.card().classes("p-4 bg-cyan-50"):
+                            with ui.grid(columns=5).classes("gap-4"):
+                                for key, value in config.items():
+                                    with ui.column().classes("p-2 border rounded bg-white"):
+                                        ui.label(key.replace('_', ' ').title()).classes("text-xs text-gray-500")
+                                        if isinstance(value, bool):
+                                            display_value = "✅ Yes" if value else "❌ No"
+                                            color = "text-green-600" if value else "text-red-600"
+                                        elif isinstance(value, (int, float)):
+                                            display_value = f"{value:,.2f}"
+                                            color = "text-blue-600"
+                                        else:
+                                            display_value = str(value)
+                                            color = "text-gray-800"
+                                        ui.label(display_value).classes(f"font-semibold {color}")
                         ui.label(f"Expected CAGR: {optimized.get('expected_cagr', 0):.2f}%").classes("mt-2")
             except Exception as e:
                 self.show_error("Optimization failed", str(e))
@@ -1697,120 +2199,295 @@ class EnhancedSIPStrategy:
                         ui.button("📊 vs Benchmark", on_click=show_comparison_chart).classes("bg-purple-500 text-white text-xs")
 
     async def display_trade_chart(self, symbol: str, strategy_trades: List[Dict], benchmark_trades: List[Dict]):
-        """Display candlestick chart with strategy and benchmark trade markers"""
+        """Display candlestick chart with strategy and benchmark trade markers - FIXED VERSION"""
 
-        # Parse period from trades if available
-        all_trades = strategy_trades + benchmark_trades
-        if all_trades:
-            min_date = min(t.get('date') for t in all_trades)
-            max_date = max(t.get('date') for t in all_trades)
-            endpoint = f"/sip/market-data/{symbol}?start_date={min_date}&end_date={max_date}"
-        else:
-            endpoint = f"/sip/market-data/{symbol}"
+        try:
+            # Parse period from trades if available
+            all_trades = strategy_trades + benchmark_trades
+            if all_trades:
+                min_date = min(t.get('date') for t in all_trades if t.get('date'))
+                max_date = max(t.get('date') for t in all_trades if t.get('date'))
+                endpoint = f"/sip/market-data/{symbol}?start_date={min_date}&end_date={max_date}"
+            else:
+                # Fallback to recent data if no trades
+                endpoint = f"/sip/market-data/{symbol}"
 
-        data = await self.safe_api_call(self.fetch_api, endpoint)
-        if not data or not data.get('historical_data', data.get('recent_data', [])):
-            ui.notify("No data for chart", type="warning")
-            return
+            data = await self.safe_api_call(self.fetch_api, endpoint)
+            if not data or not data.get('historical_data', data.get('recent_data', [])):
+                ui.notify("No market data available for chart", type="warning")
+                return
 
-        historical_data = data.get('historical_data', data.get('recent_data', []))
+            historical_data = data.get('historical_data', data.get('recent_data', []))
 
-        # Prepare dataframe
-        df = pd.DataFrame(historical_data)
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
+            # FIXED: Proper dataframe preparation with error handling
+            try:
+                df = pd.DataFrame(historical_data)
+                if df.empty:
+                    ui.notify("No historical data available", type="warning")
+                    return
 
-        fig = go.Figure(data=[go.Candlestick(x=df['timestamp'],
-                                            open=df['ohlc'].apply(lambda x: x['open']),
-                                            high=df['ohlc'].apply(lambda x: x['high']),
-                                            low=df['ohlc'].apply(lambda x: x['low']),
-                                            close=df['ohlc'].apply(lambda x: x['close']))])
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df = df.sort_values('timestamp')
 
-        # Add strategy trade markers
-        strategy_dates = [pd.to_datetime(t['date']) for t in strategy_trades]
-        strategy_prices = [t['price'] for t in strategy_trades]
-        fig.add_trace(go.Scatter(x=strategy_dates, y=strategy_prices, mode='markers',
-                                 marker=dict(symbol='star', size=12, color='red'),
-                                 name='Strategy Trades'))
+                # Extract OHLC data properly
+                df_ohlc = pd.json_normalize(df['ohlc'].tolist())
+                df = pd.concat([df[['timestamp']], df_ohlc], axis=1)
 
-        # Add benchmark trade markers
-        benchmark_dates = [pd.to_datetime(t['date']) for t in benchmark_trades]
-        benchmark_prices = [t['price'] for t in benchmark_trades]
-        fig.add_trace(go.Scatter(x=benchmark_dates, y=benchmark_prices, mode='markers',
-                                 marker=dict(symbol='circle', size=10, color='blue'),
-                                 name='Benchmark Trades'))
+            except Exception as e:
+                ui.notify(f"Error processing market data: {str(e)}", type="negative")
+                return
 
-        fig.update_layout(title=f"{symbol} Price Chart with Trades",
-                          xaxis_title="Date",
-                          yaxis_title="Price")
+            # Create enhanced candlestick chart
+            fig = go.Figure()
 
-        with ui.dialog() as dialog, ui.card().classes("w-[800px] h-[600px]"):
-            ui.plotly(fig).classes("w-full h-full")
-            ui.button("Close", on_click=dialog.close)
+            # Add candlestick chart
+            fig.add_trace(go.Candlestick(
+                x=df['timestamp'],
+                open=df['open'],
+                high=df['high'],
+                low=df['low'],
+                close=df['close'],
+                name=f"{symbol} Price",
+                showlegend=True
+            ))
 
-        dialog.open()
+            # FIXED: Enhanced strategy trade markers with better visibility
+            if strategy_trades:
+                strategy_dates = []
+                strategy_prices = []
+                strategy_amounts = []
+                strategy_units = []
+
+                for trade in strategy_trades:
+                    if trade.get('date') and trade.get('price'):
+                        strategy_dates.append(pd.to_datetime(trade['date']))
+                        strategy_prices.append(float(trade['price']))
+                        strategy_amounts.append(trade.get('amount', 0))
+                        strategy_units.append(trade.get('units', 0))
+
+                if strategy_dates:
+                    # Add strategy trades as scatter plot with enhanced markers
+                    fig.add_trace(go.Scatter(
+                        x=strategy_dates,
+                        y=strategy_prices,
+                        mode='markers+text',
+                        marker=dict(
+                            symbol='star',
+                            size=15,
+                            color='red',
+                            line=dict(width=2, color='darkred')
+                        ),
+                        text=[f"₹{amt:,.0f}" for amt in strategy_amounts],
+                        textposition="top center",
+                        textfont=dict(size=10, color='red'),
+                        name=f'Strategy Trades ({len(strategy_trades)})',
+                        hovertemplate="<b>Strategy Trade</b><br>" +
+                                      "Date: %{x}<br>" +
+                                      "Price: ₹%{y:.2f}<br>" +
+                                      "Amount: ₹%{text}<br>" +
+                                      "<extra></extra>",
+                        showlegend=True
+                    ))
+
+            # FIXED: Enhanced benchmark trade markers
+            if benchmark_trades:
+                benchmark_dates = []
+                benchmark_prices = []
+                benchmark_amounts = []
+
+                for trade in benchmark_trades:
+                    if trade.get('date') and trade.get('price'):
+                        benchmark_dates.append(pd.to_datetime(trade['date']))
+                        benchmark_prices.append(float(trade['price']))
+                        benchmark_amounts.append(trade.get('amount', 0))
+
+                if benchmark_dates:
+                    fig.add_trace(go.Scatter(
+                        x=benchmark_dates,
+                        y=benchmark_prices,
+                        mode='markers+text',
+                        marker=dict(
+                            symbol='circle',
+                            size=12,
+                            color='blue',
+                            line=dict(width=2, color='darkblue')
+                        ),
+                        text=[f"₹{amt:,.0f}" for amt in benchmark_amounts],
+                        textposition="bottom center",
+                        textfont=dict(size=9, color='blue'),
+                        name=f'Benchmark Trades ({len(benchmark_trades)})',
+                        hovertemplate="<b>Benchmark Trade</b><br>" +
+                                      "Date: %{x}<br>" +
+                                      "Price: ₹%{y:.2f}<br>" +
+                                      "Amount: ₹%{text}<br>" +
+                                      "<extra></extra>",
+                        showlegend=True
+                    ))
+
+            # Enhanced layout with better styling
+            fig.update_layout(
+                title=f"{symbol} - Price Chart with Trade Overlays",
+                xaxis_title="Date",
+                yaxis_title="Price (₹)",
+                template="plotly_white",
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                ),
+                height=600,
+                hovermode='x unified'
+            )
+
+            # Enhanced dialog with full-screen option
+            with ui.dialog() as dialog, ui.card().classes("w-[90vw] h-[80vh] max-w-none"):
+                with ui.row().classes("w-full justify-between items-center mb-4"):
+                    ui.label(f"{symbol} Trade Analysis Chart").classes("text-xl font-bold")
+                    with ui.row().classes("gap-2"):
+                        ui.button("📊 Download Chart",
+                                  on_click=lambda: ui.download(fig.to_html(),
+                                                               f"{symbol}_trade_chart.html")).classes("text-xs")
+                        ui.button("❌ Close", on_click=dialog.close).classes("text-xs")
+
+                ui.plotly(fig).classes("w-full h-full")
+
+            dialog.open()
+
+        except Exception as e:
+            logger.error(f"Error creating trade chart: {e}")
+            ui.notify(f"Failed to create trade chart: {str(e)}", type="negative")
 
     async def display_comparison_chart(self, symbol: str, strategy: Dict, benchmark: Dict):
-        """Display line chart comparing strategy and benchmark performance"""
+        """Display line chart comparing strategy and benchmark performance - FIXED VERSION"""
 
-        # Fetch historical data for the period
-        period = strategy.get('period', 'Unknown')
-        start_date, end_date = period.split(' to ')
-        data = await self.safe_api_call(self.fetch_api, f"/sip/market-data/{symbol}?start_date={start_date}&end_date={end_date}")
-        if not data or not data.get('historical_data', data.get('recent_data', [])):
-            ui.notify("No historical data for comparison chart", type="warning")
-            return
+        try:
+            # FIXED: Extract ROI data directly from the response structure
+            strategy_roi_data = strategy.get('return_on_investment', [])
+            benchmark_roi_data = benchmark.get('return_on_investment', [])
 
-        historical_data = data.get('historical_data', data.get('recent_data', []))
-        df = pd.DataFrame(historical_data)
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df = df.sort_values('timestamp').set_index('timestamp')
+            # If ROI data is available, use it directly
+            if strategy_roi_data and benchmark_roi_data:
+                return await self._display_roi_comparison_chart(symbol, strategy_roi_data, benchmark_roi_data, strategy,
+                                                                benchmark)
 
-        # Compute strategy portfolio values
-        strategy_units = 0
-        strategy_values = []
-        strategy_trades_sorted = sorted(strategy.get('trades', []), key=lambda t: t['date'])
-        trade_idx = 0
-        for date, row in df.iterrows():
-            # Add any trades on this date
-            while trade_idx < len(strategy_trades_sorted) and strategy_trades_sorted[trade_idx]['date'] == str(date.date()):
-                strategy_units += strategy_trades_sorted[trade_idx]['units']
-                trade_idx += 1
-            value = strategy_units * row['ohlc']['close']
-            strategy_values.append({'date': date, 'value': value})
+            # Fallback to historical data method if ROI not available
+            return await self._display_historical_comparison_chart(symbol, strategy, benchmark)
 
-        # Compute benchmark portfolio values
-        benchmark_units = 0
-        benchmark_values = []
-        benchmark_trades_sorted = sorted(benchmark.get('trades', []), key=lambda t: t['date'])
-        trade_idx = 0
-        for date, row in df.iterrows():
-            # Add any trades on this date
-            while trade_idx < len(benchmark_trades_sorted) and benchmark_trades_sorted[trade_idx]['date'] == str(date.date()):
-                benchmark_units += benchmark_trades_sorted[trade_idx]['units']
-                trade_idx += 1
-            value = benchmark_units * row['ohlc']['close']
-            benchmark_values.append({'date': date, 'value': value})
+        except Exception as e:
+            logger.error(f"Error in comparison chart: {e}")
+            ui.notify(f"Failed to create comparison chart: {str(e)}", type="negative")
 
-        strat_df = pd.DataFrame(strategy_values)
-        bench_df = pd.DataFrame(benchmark_values)
+    async def _display_roi_comparison_chart(self, symbol: str, strategy_roi: List, benchmark_roi: List, strategy: Dict,
+                                            benchmark: Dict):
+        """Create comparison chart using ROI data - NEW METHOD"""
 
-        if strat_df.empty or bench_df.empty:
-            ui.notify("No data for comparison chart", type="warning")
-            return
+        try:
+            # Convert ROI data to dataframes
+            strategy_df = pd.DataFrame(strategy_roi)
+            benchmark_df = pd.DataFrame(benchmark_roi)
 
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=strat_df['date'], y=strat_df['value'], name='Strategy', line=dict(color='blue')))
-        fig.add_trace(go.Scatter(x=bench_df['date'], y=bench_df['value'], name='Benchmark', line=dict(color='orange')))
+            if strategy_df.empty or benchmark_df.empty:
+                ui.notify("Insufficient ROI data for comparison", type="warning")
+                return
 
-        fig.update_layout(title=f"{symbol} Performance vs Benchmark",
-                          xaxis_title="Date",
-                          yaxis_title="Portfolio Value")
+            # Ensure date columns are datetime
+            strategy_df['date'] = pd.to_datetime(strategy_df['date'])
+            benchmark_df['date'] = pd.to_datetime(benchmark_df['date'])
 
-        with ui.dialog() as dialog, ui.card().classes("w-[800px] h-[600px]"):
-            ui.plotly(fig).classes("w-full h-full")
-            ui.button("Close", on_click=dialog.close)
+            # Sort by date
+            strategy_df = strategy_df.sort_values('date')
+            benchmark_df = benchmark_df.sort_values('date')
 
-        dialog.open()
+            # Create enhanced comparison chart
+            fig = go.Figure()
+
+            # Add strategy performance line
+            fig.add_trace(go.Scatter(
+                x=strategy_df['date'],
+                y=strategy_df['portfolio_value'],
+                name='Strategy Portfolio',
+                line=dict(color='#1f77b4', width=3),
+                hovertemplate="<b>Strategy</b><br>" +
+                              "Date: %{x}<br>" +
+                              "Value: ₹%{y:,.0f}<br>" +
+                              "<extra></extra>"
+            ))
+
+            # Add benchmark performance line
+            fig.add_trace(go.Scatter(
+                x=benchmark_df['date'],
+                y=benchmark_df['portfolio_value'],
+                name='Benchmark Portfolio',
+                line=dict(color='#ff7f0e', width=3, dash='dash'),
+                hovertemplate="<b>Benchmark</b><br>" +
+                              "Date: %{x}<br>" +
+                              "Value: ₹%{y:,.0f}<br>" +
+                              "<extra></extra>"
+            ))
+
+            # Calculate and add performance metrics
+            strategy_final = strategy_df['portfolio_value'].iloc[-1]
+            benchmark_final = benchmark_df['portfolio_value'].iloc[-1]
+            outperformance = ((strategy_final / benchmark_final) - 1) * 100
+
+            # Enhanced layout
+            fig.update_layout(
+                title=f"{symbol} - Strategy vs Benchmark Performance<br>" +
+                      f"<sub>Outperformance: {outperformance:+.2f}%</sub>",
+                xaxis_title="Date",
+                yaxis_title="Portfolio Value (₹)",
+                template="plotly_white",
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                ),
+                height=500
+            )
+
+            # Show performance summary
+            strategy_return = strategy.get('total_return_percent', 0)
+            benchmark_return = benchmark.get('total_return_percent', 0)
+
+            with ui.dialog() as dialog, ui.card().classes("w-[90vw] h-[85vh] max-w-none"):
+                with ui.row().classes("w-full justify-between items-center mb-4"):
+                    ui.label(f"{symbol} Performance Comparison").classes("text-xl font-bold")
+                    ui.button("❌ Close", on_click=dialog.close)
+
+                # Performance metrics summary
+                with ui.card().classes("w-full p-4 mb-4 bg-gray-50"):
+                    ui.label("📊 Performance Summary").classes("text-lg font-semibold mb-2")
+                    with ui.grid(columns=4).classes("w-full gap-4"):
+                        with ui.card().classes("p-3 text-center"):
+                            ui.label("Strategy Return").classes("text-sm text-gray-600")
+                            color = "text-green-600" if strategy_return >= 0 else "text-red-600"
+                            ui.label(f"{strategy_return:+.2f}%").classes(f"text-lg font-bold {color}")
+
+                        with ui.card().classes("p-3 text-center"):
+                            ui.label("Benchmark Return").classes("text-sm text-gray-600")
+                            color = "text-green-600" if benchmark_return >= 0 else "text-red-600"
+                            ui.label(f"{benchmark_return:+.2f}%").classes(f"text-lg font-bold {color}")
+
+                        with ui.card().classes("p-3 text-center"):
+                            ui.label("Outperformance").classes("text-sm text-gray-600")
+                            color = "text-green-600" if outperformance >= 0 else "text-red-600"
+                            ui.label(f"{outperformance:+.2f}%").classes(f"text-lg font-bold {color}")
+
+                        with ui.card().classes("p-3 text-center"):
+                            ui.label("Final Portfolio").classes("text-sm text-gray-600")
+                            ui.label(f"₹{strategy_final:,.0f}").classes("text-lg font-bold text-blue-600")
+
+                ui.plotly(fig).classes("w-full flex-1")
+
+            dialog.open()
+
+        except Exception as e:
+            logger.error(f"Error creating ROI comparison chart: {e}")
+            ui.notify(f"Failed to create ROI comparison: {str(e)}", type="negative")
 
     async def render_enhanced_analytics_panel(self, fetch_api, user_storage):
         """Enhanced analytics panel with comprehensive portfolio insights and benchmarks"""
@@ -1939,152 +2616,165 @@ class EnhancedSIPStrategy:
                             ui.label(f"Return: {return_pct:+.2f}%").classes(f"text-sm {return_color}")
 
     async def render_enhanced_config_panel(self, fetch_api, user_storage):
-        """Enhanced configuration panel with templates and presets"""
+        """Enhanced configuration panel with all user input parameters - FIXED VERSION"""
 
-        ui.label("⚙️ Strategy Configuration").classes("text-2xl font-bold mb-4")
-        ui.label("Configure your SIP strategy parameters and save templates").classes("text-gray-600 mb-6")
+        ui.label("⚙️ Enhanced SIP Configuration").classes("text-2xl font-bold mb-4")
+        ui.label("Complete configuration including all strategy parameters").classes("text-gray-600 mb-6")
 
-        # Load default config
+        # Load current configuration
         try:
-            default_config = await self.safe_api_call(fetch_api, "/sip/config/defaults")
-            config_data = default_config.get('default_config', self.default_config)
-        except:
-            config_data = self.default_config
+            config_data = await self.safe_api_call(fetch_api, "/sip/config/defaults")
+            current_config = config_data.get('enhanced_config', {}) if config_data else {}
+        except Exception as e:
+            logger.error(f"Error loading config: {e}")
+            current_config = {
+                "fixed_investment": 5000,
+                "max_amount_in_a_month": 20000,
+                "price_reduction_threshold": 4.0,
+                "major_drawdown_threshold": -10.0,
+                "minor_drawdown_threshold": -4.0,
+                "rolling_window": 100,
+                "fallback_day": 15,
+                "min_investment_gap_days": 5
+            }
 
-        with ui.card().classes("w-full p-6 mb-6"):
-            ui.label("🎯 Strategy Parameters").classes("text-lg font-bold mb-4")
+        # FIXED: Complete configuration form with all parameters
+        with ui.card().classes("w-full max-w-4xl mx-auto p-6"):
+            ui.label("💰 Investment Parameters").classes("text-lg font-semibold mb-4")
 
             with ui.grid(columns=2).classes("w-full gap-6"):
-                # Left column - Investment settings
-                with ui.column().classes("flex-1"):
-                    ui.label("💰 Investment Settings").classes("font-medium mb-3")
-
+                # Left column - Basic Investment Settings
+                with ui.column().classes("gap-4"):
                     fixed_investment = ui.number(
-                        label="Monthly Investment (₹)",
-                        value=config_data.get('fixed_investment', 5000),
-                        min=500, step=500
-                    ).classes("w-full mb-3")
-
-                    fallback_day = ui.number(
-                        label="Investment Day of Month",
-                        value=config_data.get('fallback_day', 22),
-                        min=1, max=28
-                    ).classes("w-full mb-3")
-
-                    min_gap_days = ui.number(
-                        label="Minimum Gap Between Investments (days)",
-                        value=config_data.get('min_investment_gap_days', 5),
-                        min=1, max=30
+                        label="💵 Fixed Investment Amount (₹)",
+                        value=current_config.get("fixed_investment", 5000),
+                        min=500, max=100000, step=500
                     ).classes("w-full")
 
                     max_monthly = ui.number(
-                        label="Max Monthly Amount (₹)",
-                        value=config_data.get('max_amount_in_a_month', 20000),
-                        min=1000, step=1000
-                    ).classes("w-full mb-3")
+                        label="📅 Max Monthly Investment (₹)",
+                        value=current_config.get("max_amount_in_a_month", 20000),
+                        min=2000, max=500000, step=1000
+                    ).classes("w-full")
 
-                # Right column - Drawdown settings
-                with ui.column().classes("flex-1"):
-                    ui.label("📉 Drawdown Thresholds").classes("font-medium mb-3")
+                    # FIXED: Added missing price_reduction_threshold input
+                    price_reduction_threshold = ui.number(
+                        label="📉 Price Reduction Threshold (%)",
+                        value=current_config.get("price_reduction_threshold", 4.0),
+                        min=1.0, max=15.0, step=0.5
+                    ).classes("w-full")
 
-                    major_dd = ui.number(
-                        label="Major Drawdown Threshold (%)",
-                        value=config_data.get('major_drawdown_threshold', -10),
-                        min=-50, max=0
-                    ).classes("w-full mb-3")
+                    fallback_day = ui.number(
+                        label="📆 Investment Day of Month",
+                        value=current_config.get("fallback_day", 15),
+                        min=1, max=28, step=1
+                    ).classes("w-full")
 
-                    minor_dd = ui.number(
-                        label="Minor Drawdown Threshold (%)",
-                        value=config_data.get('minor_drawdown_threshold', -4),
-                        min=-20, max=0
-                    ).classes("w-full mb-3")
-
-                    extreme_dd = ui.number(
-                        label="Extreme Drawdown Threshold (%)",
-                        value=config_data.get('extreme_drawdown_threshold', -15),
-                        min=-50, max=0
-                    ).classes("w-full mb-3")
-
+                # Right column - Advanced Parameters
+                with ui.column().classes("gap-4"):
+                    # FIXED: Added missing rolling_window input
                     rolling_window = ui.number(
-                        label="Rolling Window (days)",
-                        value=config_data.get('rolling_window', 100),
-                        min=20, max=200
+                        label="🔄 Rolling Window (days)",
+                        value=current_config.get("rolling_window", 100),
+                        min=20, max=365, step=10
                     ).classes("w-full")
 
-            # Investment multipliers
-            with ui.card().classes("w-full p-4 mt-6 bg-yellow-50"):
-                ui.label("🚀 Investment Multipliers").classes("font-medium mb-3")
-                ui.label("How much to increase investment during different market conditions").classes(
-                    "text-sm text-gray-600 mb-3")
-
-                with ui.grid(columns=3).classes("w-full gap-4"):
-                    minor_mult = ui.number(
-                        label="Minor Dip Multiplier",
-                        value=config_data.get('minor_drawdown_inv_multiplier', 1.75),
-                        min=1.0, max=5.0, step=0.1
+                    min_gap_days = ui.number(
+                        label="⏱️ Min Investment Gap (days)",
+                        value=current_config.get("min_investment_gap_days", 5),
+                        min=1, max=30, step=1
                     ).classes("w-full")
 
-                    major_mult = ui.number(
-                        label="Major Drawdown Multiplier",
-                        value=config_data.get('major_drawdown_inv_multiplier', 3.0),
-                        min=1.0, max=8.0, step=0.1
+                    major_drawdown = ui.number(
+                        label="📊 Major Drawdown Threshold (%)",
+                        value=current_config.get("major_drawdown_threshold", -10.0),
+                        min=-30.0, max=0.0, step=1.0
                     ).classes("w-full")
 
-                    extreme_mult = ui.number(
-                        label="Extreme Drawdown Multiplier",
-                        value=config_data.get('extreme_drawdown_inv_multiplier', 4.0),
-                        min=1.0, max=10.0, step=0.1
+                    minor_drawdown = ui.number(
+                        label="📈 Minor Drawdown Threshold (%)",
+                        value=current_config.get("minor_drawdown_threshold", -4.0),
+                        min=-15.0, max=0.0, step=0.5
                     ).classes("w-full")
 
-        # Configuration templates
-        with ui.card().classes("w-full p-6"):
-            ui.label("📋 Configuration Templates").classes("text-lg font-bold mb-4")
+        # FIXED: Enhanced parameter explanations
+        with ui.card().classes("w-full max-w-4xl mx-auto p-6 mt-6 bg-blue-50"):
+            ui.label("📚 Parameter Explanations").classes("text-lg font-semibold mb-4")
 
-            async def load_templates():
-                try:
-                    templates_data = await self.safe_api_call(fetch_api, "/sip/templates")
-                    if templates_data:
-                        return templates_data.get("templates", {})
-                except Exception as e:
-                    self.show_error("Failed to load templates", str(e))
-                    return {}
+            with ui.grid(columns=2).classes("w-full gap-4"):
+                with ui.column():
+                    ui.label("🔄 Rolling Window").classes("font-medium")
+                    ui.label(
+                        "Number of days to look back for calculating moving averages and market conditions. Higher values = smoother signals, lower values = more responsive.").classes(
+                        "text-sm text-gray-600 mb-3")
 
-            templates = await load_templates()
+                    ui.label("📉 Price Reduction Threshold").classes("font-medium")
+                    ui.label(
+                        "Minimum price drop (%) required for additional investments within the same month. Prevents over-investing on minor fluctuations.").classes(
+                        "text-sm text-gray-600 mb-3")
 
-            def apply_template(template_name):
-                template_config = templates[template_name]["config"]
+                with ui.column():
+                    ui.label("📅 Max Monthly Investment").classes("font-medium")
+                    ui.label(
+                        "Maximum amount to invest per symbol per month. Usually 3-5x the fixed investment amount for drawdown opportunities.").classes(
+                        "text-sm text-gray-600 mb-3")
 
-                # Update UI components
-                major_dd.value = template_config["major_drawdown_threshold"]
-                minor_dd.value = template_config["minor_drawdown_threshold"]
-                minor_mult.value = template_config["minor_drawdown_inv_multiplier"]
-                major_mult.value = template_config["major_drawdown_inv_multiplier"]
-                extreme_mult.value = template_config.get("extreme_drawdown_multiplier", 4.0)  # Assuming key if present
-                min_gap_days.value = template_config["min_investment_gap_days"]
+                    ui.label("⏱️ Min Investment Gap").classes("font-medium")
+                    ui.label(
+                        "Minimum days between investments to avoid frequent trading and allow market movements to develop.").classes(
+                        "text-sm text-gray-600")
 
-                ui.notify(f"✅ Applied {template_name} template", type="positive")
+        # Configuration templates section
+        with ui.card().classes("w-full max-w-4xl mx-auto p-6 mt-6"):
+            ui.label("📋 Configuration Templates").classes("text-lg font-semibold mb-4")
 
-            with ui.grid(columns=3).classes("w-full gap-4"):
-                for template_name, template_data in templates.items():
-                    with ui.card().classes("p-4 text-center hover:shadow-lg cursor-pointer"):
-                        ui.label(template_name).classes("font-bold mb-2")
-                        ui.label(template_data["description"]).classes("text-sm text-gray-600 mb-3")
-                        ui.button(f"Apply {template_name}",
-                                  on_click=lambda name=template_name: apply_template(name)).classes(
-                            "w-full bg-blue-500 text-white text-sm")
+            async def apply_conservative_template():
+                fixed_investment.value = 5000
+                rolling_window.value = 150
+                price_reduction_threshold.value = 5.0
+                max_monthly.value = 20000
+                min_gap_days.value = 7
+                ui.notify("Conservative template applied", type="positive")
 
-    def load_backtest_template(self, fixed_investment, drawdown_1, drawdown_2, multiplier_2, multiplier_3, fallback_day,
-                               min_gap_days):
-        """Load a balanced template for backtesting"""
-        fixed_investment.value = 5000
-        drawdown_1.value = -10.0
-        drawdown_2.value = -4.0
-        multiplier_2.value = 3.0
-        multiplier_3.value = 5.0
-        fallback_day.value = 28
-        min_gap_days.value = 5
+            async def apply_aggressive_template():
+                fixed_investment.value = 7500
+                rolling_window.value = 50
+                price_reduction_threshold.value = 2.5
+                max_monthly.value = 35000
+                min_gap_days.value = 3
+                ui.notify("Aggressive template applied", type="positive")
 
-        ui.notify("✅ Loaded balanced template", type="positive")
+            with ui.row().classes("gap-4"):
+                ui.button("🛡️ Conservative", on_click=apply_conservative_template).classes("bg-green-600 text-white")
+                ui.button("⚡ Aggressive", on_click=apply_aggressive_template).classes("bg-red-600 text-white")
+                ui.button("⚖️ Balanced",
+                          on_click=lambda: ui.notify("Balanced template coming soon", type="info")).classes(
+                    "bg-blue-600 text-white")
+
+        # Save configuration
+        async def save_configuration():
+            try:
+                config = {
+                    "fixed_investment": fixed_investment.value,
+                    "max_amount_in_a_month": max_monthly.value,
+                    "price_reduction_threshold": price_reduction_threshold.value,
+                    "rolling_window": rolling_window.value,
+                    "fallback_day": fallback_day.value,
+                    "min_investment_gap_days": min_gap_days.value,
+                    "major_drawdown_threshold": major_drawdown.value,
+                    "minor_drawdown_threshold": minor_drawdown.value
+                }
+
+                # Save to user storage or send to backend
+                if user_storage:
+                    user_storage["sip_config"] = config
+
+                ui.notify("✅ Configuration saved successfully!", type="positive")
+
+            except Exception as e:
+                ui.notify(f"❌ Failed to save configuration: {str(e)}", type="negative")
+
+        ui.button("💾 Save Configuration", on_click=save_configuration).classes("bg-blue-600 text-white mt-6")
 
     async def render_investment_reports_panel(self, fetch_api, user_storage):
         """Render investment reports panel with report generation and history"""

@@ -305,7 +305,6 @@ class EnhancedSIPStrategy:
         try:
             if not self.nsedata_session:
                 logger.warning("No nsedata session provided, falling back to sync method")
-                return await self._fetch_data_sync_fallback(symbol, start_date, end_date)
 
             # Convert string dates to datetime objects for PostgreSQL
             start_datetime = datetime.strptime(start_date, '%Y-%m-%d').date()
@@ -325,7 +324,8 @@ class EnhancedSIPStrategy:
 
             if not table_exists:
                 logger.warning(f"Table {symbol} does not exist in database")
-                return await self._fetch_data_sync_fallback(symbol, start_date, end_date)
+                return pd.DataFrame()
+
 
             # FIXED: Use proper table name quoting for PostgreSQL
             query = text(f"""
@@ -344,7 +344,7 @@ class EnhancedSIPStrategy:
 
             if not rows:
                 logger.warning(f"No data found for {symbol} between {start_date} and {end_date}")
-                return await self._fetch_data_sync_fallback(symbol, start_date, end_date)
+                return pd.DataFrame()
 
             # Convert to DataFrame
             df = pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -364,90 +364,6 @@ class EnhancedSIPStrategy:
 
         except Exception as e:
             logger.error(f"Error fetching data for {symbol} using async method: {e}")
-            return await self._fetch_data_sync_fallback(symbol, start_date, end_date)
-
-    async def _fetch_data_sync_fallback(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """FIXED: Fallback to synchronous data fetching with proper error handling"""
-        try:
-            logger.info(f"Using sync fallback for {symbol}")
-
-            # Try to get database URL from environment or use default
-            nsedata_url = os.getenv("NSEDATA_URL")
-            if not nsedata_url:
-                # Try to construct from trading DB URL
-                trading_url = os.getenv("DATABASE_URL",
-                                        "postgresql://trading_user:password123@localhost:5432/trading_db")
-                nsedata_url = trading_url.replace("/trading_db", "/nsedata")
-
-            # Convert async URL to sync URL if needed
-            if "asyncpg" in nsedata_url:
-                nsedata_url = nsedata_url.replace("postgresql+asyncpg://", "postgresql://")
-
-            def fetch_sync():
-                try:
-                    # Create synchronous engine
-                    engine = create_engine(nsedata_url)
-
-                    # Check if table exists first
-                    with engine.connect() as conn:
-                        table_exists_query = text("""
-                            SELECT EXISTS (
-                                SELECT FROM information_schema.tables 
-                                WHERE table_schema = 'public' 
-                                AND table_name = :table_name
-                            )
-                        """)
-
-                        exists_result = conn.execute(table_exists_query, {"table_name": symbol})
-                        table_exists = exists_result.scalar()
-
-                        if not table_exists:
-                            logger.warning(f"Table {symbol} does not exist in sync database either")
-                            return pd.DataFrame()
-
-                        # Fetch data with proper quoting
-                        query = text(f"""
-                            SELECT timestamp, open, high, low, close, volume 
-                            FROM "{symbol}"
-                            WHERE timestamp BETWEEN :start_date AND :end_date
-                            ORDER BY timestamp ASC
-                        """)
-
-                        df = pd.read_sql(
-                            query,
-                            conn,
-                            params={
-                                'start_date': start_date,
-                                'end_date': end_date
-                            }
-                        )
-
-                        if not df.empty:
-                            df['timestamp'] = pd.to_datetime(df['timestamp'])
-
-                            # Ensure numeric columns
-                            numeric_columns = ['open', 'high', 'low', 'close', 'volume']
-                            for col in numeric_columns:
-                                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-                            # Remove any rows with NaN values
-                            df = df.dropna()
-
-                            logger.info(f"✅ Sync fallback successful: {len(df)} records for {symbol}")
-                            return df.sort_values('timestamp').reset_index(drop=True)
-
-                        return pd.DataFrame()
-
-                except Exception as e:
-                    logger.error(f"Sync fallback failed for {symbol}: {e}")
-                    return pd.DataFrame()
-
-            # Run sync operation in thread pool
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, fetch_sync)
-
-        except Exception as e:
-            logger.error(f"Fallback method completely failed: {e}")
             return pd.DataFrame()
 
     async def run_backtest(self, symbol: str, start_date: str, end_date: str,
@@ -1173,9 +1089,9 @@ class EnhancedSIPStrategy:
                 # RSI consideration
                 rsi = tech_indicators.get('rsi')
                 if rsi and rsi < 30:
-                    considerations.append("Oversold conditions detected")
+                    considerations.append("Oversold conditions detected. Consider for buying")
                 elif rsi and rsi > 70:
-                    considerations.append("Overbought conditions detected")
+                    considerations.append("Overbought conditions detected. Consider for selling or avoiding")
 
                 # Trend consideration
                 sma_20 = tech_indicators.get('sma_20')
@@ -1184,14 +1100,14 @@ class EnhancedSIPStrategy:
 
                 if sma_20 and sma_50 and current_price:
                     if current_price > sma_20 > sma_50:
-                        considerations.append("Strong upward trend")
+                        considerations.append("Strong upward trend. Current Price > SMA(20) > SMA(50)")
                     elif current_price < sma_20 < sma_50:
-                        considerations.append("Strong downward trend")
+                        considerations.append("Strong downward trend. Current Price < SMA(20) < SMA(50)")
 
                 # Risk consideration
                 max_drawdown = risk_metrics.get('max_drawdown')
                 if max_drawdown and abs(max_drawdown) > 30:
-                    considerations.append("High historical drawdown risk")
+                    considerations.append("High historical drawdown risk. Consider for high-risk portfolios")
 
             return {
                 "recommendation": recommendation,
@@ -1876,13 +1792,13 @@ class EnhancedSIPStrategy:
             for symbol, report in symbol_reports.items():
                 if report.get('status') == 'SUCCESS':
                     recommendation = report.get('recommendation', {})
-                    risk_rating = recommendation.get('risk_rating', 'UNKNOWN')
+                    risk_tolerance = recommendation.get('risk_tolerance', 'UNKNOWN')
 
-                    if risk_rating == 'HIGH':
+                    if risk_tolerance == 'LOW':
                         high_risk_count += 1
-                    elif risk_rating == 'MEDIUM':
+                    elif risk_tolerance == 'MEDIUM':
                         medium_risk_count += 1
-                    elif risk_rating == 'LOW':
+                    elif risk_tolerance == 'HIGH':
                         low_risk_count += 1
 
                     # Collect volatility data
@@ -2833,7 +2749,7 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
                     try:
                         data = await self.fetch_data_from_db_async(symbol, start_date, end_date)
                         if not data.empty:
-                            signals = await self.get_next_investment_signals(data, config)
+                            signals = await self.get_next_investment_signals(symbol, config)
                             # Ensure signals is never None
                             if signals is None:
                                 signals = {"signal": "ERROR", "confidence": 0, "message": "Signal generation failed"}

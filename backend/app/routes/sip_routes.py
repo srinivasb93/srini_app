@@ -4032,7 +4032,7 @@ async def generate_quick_investment_report(
             raise HTTPException(status_code=400, detail="Maximum 10 symbols for quick report")
 
         # Create strategy instance
-        strategy = EnhancedSIPStrategy(
+        strategy = EnhancedSIPStrategyWithLimits(
             nsedata_session=nsedata_db,
             trading_session=trading_db
         )
@@ -4048,7 +4048,7 @@ async def generate_quick_investment_report(
         symbol_stats = {}
         for symbol in symbol_list:
             try:
-                quick_check = await strategy.quick_symbol_check(symbol)
+                quick_check = await strategy.get_symbol_statistics(symbol)
                 symbol_stats[symbol] = quick_check
             except Exception as e:
                 logger.error(f"Error checking {symbol}: {e}")
