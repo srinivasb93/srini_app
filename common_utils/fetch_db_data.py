@@ -161,7 +161,7 @@ def get_table_data(selected_database='nsedata', selected_table='TATAMOTORS', que
         return pd.DataFrame()
 
 
-def load_sql_data(data_to_load, table_name, database='nsedata', load_type='replace',
+def load_data_to_sql(data_to_load, table_name, database='nsedata', load_type='replace',
                   index_required=False, schema='public'):
     """
     Loads a DataFrame into a SQL table in a specific database.
@@ -411,7 +411,7 @@ def load_index_sector_history(symbol, start_date_obj, end_date_obj, database='ns
     if formatted_data.empty:
         return "Failed to fetch data from all available sources."
 
-    return load_sql_data(
+    return load_data_to_sql(
         data_to_load=formatted_data, table_name=table_name, database=database,
         load_type='replace', index_required=False
     )
@@ -442,7 +442,7 @@ def update_index_sector_daily(symbol, database='nsedata'):
         if formatted_data.empty:
             return f"No new data to update for '{table_name}'."
 
-        return load_sql_data(
+        return load_data_to_sql(
             data_to_load=formatted_data, table_name=table_name, database=database,
             load_type='append', index_required=False
         )
@@ -465,7 +465,7 @@ def load_stock_history(symbol, start_date_obj, end_date_obj, database='nsedata',
     if not load:
         return formatted_data
 
-    return load_sql_data(
+    return load_data_to_sql(
         data_to_load=formatted_data, table_name=table_name, database=database,
         load_type='replace', index_required=False
     )
@@ -489,7 +489,7 @@ def update_stock_daily(symbol, database='nsedata'):
         formatted_data = _fetch_stock_historical_data_with_openchart(symbol, start_date_obj, end_date_obj)
         if formatted_data.empty:
             return f"No new data to update for '{table_name}'."
-        return load_sql_data(data_to_load=formatted_data, table_name=table_name, database=database, load_type='append', index_required=False)
+        return load_data_to_sql(data_to_load=formatted_data, table_name=table_name, database=database, load_type='append', index_required=False)
     except Exception as e:
         logger.error(f"Error during daily update for '{table_name}': {e}")
         if "does not exist" in str(e):

@@ -23,6 +23,7 @@ from livetrading import render_live_trading_page
 from sip_strategy import render_sip_strategy_page
 from watchlist import render_watchlist_page
 from settings import render_settings_page
+from dashboard import render_dashboard_page
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -146,11 +147,52 @@ async def connect_websocket(max_retries=5, initial_backoff=2):
 def apply_theme_from_storage():
     try:
         if hasattr(app, 'storage') and hasattr(app.storage, 'user') and app.storage.user is not None:
-            theme = app.storage.user.get(STORAGE_THEME_KEY, "Dark")
-            if theme == "Dark":
-                ui.dark_mode().enable()
+            current_theme = app.storage.user.get(STORAGE_THEME_KEY, "Dark")
+
+            if current_theme == "Dark":
+                # Enhanced dark theme
+                ui.add_head_html("""
+                    <style>
+                    body { 
+                        background: linear-gradient(135deg, #0a0f23 0%, #1a1f3a 100%);
+                        color: #ffffff;
+                    }
+                    .q-header { 
+                        background: rgba(0, 0, 0, 0.6) !important;
+                        backdrop-filter: blur(20px);
+                        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+                    }
+                    .q-btn {
+                        transition: all 0.3s ease;
+                    }
+                    .q-btn:hover {
+                        transform: translateY(-1px);
+                    }
+                    </style>
+                    """)
             else:
-                ui.dark_mode().disable()
+                # Enhanced light theme
+                ui.add_head_html("""
+                    <style>
+                    body { 
+                        background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+                        color: #1a202c;
+                    }
+                    .q-header { 
+                        background: rgba(255, 255, 255, 0.9) !important;
+                        backdrop-filter: blur(20px);
+                        border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+                    }
+                    .enhanced-dashboard {
+                        background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+                        color: #1a202c;
+                    }
+                    .dashboard-card {
+                        background: rgba(255, 255, 255, 0.9) !important;
+                        color: #1a202c !important;
+                    }
+                    </style>
+                    """)
         else:
             logger.warning("app.storage.user not available for theme application. Defaulting to Dark.")
             ui.dark_mode().enable()
@@ -192,26 +234,48 @@ def toggle_theme():
 
 def render_header():
     with ui.header(elevated=True).classes('justify-between text-white items-center q-pa-sm'):
-        ui.label("Xpress Trader").classes("text-2xl font-semibold")
-        with ui.row().classes("items-center"):
+
+        # Left side - Logo and Title
+        with ui.row().classes("items-center gap-4"):
+            ui.icon("candlestick_chart", size="2rem").classes("text-cyan-400")
+            ui.label("AlgoTrade Pro").classes("text-2xl font-bold")
+            ui.chip("LIVE", color="green").classes("text-xs")
+
+        with ui.row().classes("items-center gap-2"):
             pages = ["Dashboard", "Order Management", "Order Book", "Positions",
                      "Portfolio", "Mutual Funds", "Analytics", "Strategies", "SIP Strategy",
                      "Backtesting", "Live Trading", "Watchlist", "Settings"]
             for page_name in pages:
                 route = f"/{page_name.lower().replace(' ', '-')}"
-                ui.button(page_name, on_click=lambda r=route: ui.navigate.to(r)).props('flat color=white dense')
+                ui.button(page_name, on_click=lambda r=route: ui.navigate.to(r)).props(
+                    'flat color=white dense').classes("text-sm hover:bg-white/10 transition-all")
+
+        # Right side - Controls
+        with ui.row().classes("items-center gap-4"):
+            # Status indicators
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("circle", size="0.5rem").classes("text-green-400")
+                ui.label("Market Open").classes("text-sm")
+
+            # Current time
+            current_time = datetime.now().strftime("%H:%M:%S")
+            ui.label(current_time).classes("text-sm font-mono")
+
+            # Theme toggle
             ui.button(icon="brightness_6", on_click=toggle_theme).props("flat color=white round dense")
 
-        async def handle_logout():
-            try:
-                if hasattr(app, 'storage') and hasattr(app.storage, 'user') and app.storage.user is not None:
-                    app.storage.user.clear()
-            except Exception as e:
-                logger.error(f"Error during logout: {e}")
-            ui.navigate.to('/')
-            ui.notify("Logged out successfully.", type="positive")
+            # Logout
+            async def handle_logout():
+                try:
+                    if hasattr(app, 'storage') and hasattr(app.storage,
+                                                           'user') and app.storage.user is not None:
+                        app.storage.user.clear()
+                except Exception as e:
+                    logger.error(f"Error during logout: {e}")
+                ui.navigate.to('/')
+                ui.notify("Logged out successfully.", type="positive")
 
-        ui.button("Logout", on_click=handle_logout).props("flat color=white dense")
+            ui.button("Logout", on_click=handle_logout).props("flat color=white dense")
 
 
 @ui.page('/')
@@ -280,7 +344,7 @@ async def login_page(client: Client):
 
     with ui.column().classes('absolute-center items-center gap-4'):
         ui.label("Algo Trader").classes('text-3xl font-bold text-center mb-4')
-        with ui.card().classes('w-96 shadow-xl p-8 rounded-lg'):
+        with ui.card().classes('w-96 shadow-2xl p-8 rounded-lg'):
             with ui.tabs().props("dense").classes("w-full") as tabs:
                 ui.tab(name="Login", label="Login")
                 ui.tab(name="Sign Up", label="Sign Up")
@@ -309,102 +373,51 @@ async def login_page(client: Client):
 @ui.page('/dashboard')
 async def dashboard_page(client: Client):
     await client.connected()
+
+    # Authentication check
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
+
+    # Apply enhanced theme and render header
     apply_theme_from_storage()
     render_header()
+
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
-    ui.label(f"{broker} Trading Dashboard").classes("text-2xl font-semibold p-4")
 
     # Display WebSocket messages
     with ui.column().classes("w-full p-4"):
-        for message in list(websocket_messages):
-            ui.notify(message, type="info" if "connected" in message.lower() else "warning")
-            websocket_messages.remove(message)
+        try:
+            for message in list(websocket_messages):
+                ui.notify(message, type="info" if "connected" in message.lower() else "warning")
+                websocket_messages.remove(message)
+        except Exception as e:
+            logger.error(f"Error handling WebSocket messages: {e}")
 
-    metrics_container = ui.grid(columns='repeat(auto-fit, minmax(250px, 1fr))').classes("w-full p-4 gap-4")
-    market_watch_container = ui.column().classes("w-full p-4 gap-2")
-    chart_container = ui.column().classes("w-full p-4")
+        # Render the enhanced dashboard using the new module
+        try:
+            await render_dashboard_page(fetch_api, app.storage.user, get_cached_instruments)
+        except Exception as e:
+            logger.error(f"Error rendering enhanced dashboard: {e}")
 
-    async def fetch_and_update_dashboard():
-        funds_data = await fetch_api(f"/funds/{broker}")
-        portfolio_data = await fetch_api(f"/portfolio/{broker}") or []
-        positions_data = await fetch_api(f"/positions/{broker}") or []
-        all_instruments_map = await get_cached_instruments(broker)
+            # Fallback to basic dashboard if enhanced version fails
+            broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
+            ui.label(f"Dashboard Error - Fallback Mode").classes("text-xl text-red-500 p-4")
+            ui.label(f"Error: {str(e)}").classes("text-gray-500 p-4")
 
-        metrics_container.clear()
-        with metrics_container:
-            with ui.card().classes("p-4 items-center text-center shadow-md rounded-lg"):
-                ui.label("Available Funds").classes("text-lg font-medium")
-                funds_val = "N/A"
-                if funds_data and isinstance(funds_data, dict):
-                    equity = funds_data.get('equity', {})
-                    available = equity.get('available', 0.0)
-                    funds_val = f"₹{float(available):,.2f}"
-                ui.label(funds_val).classes("text-2xl font-bold mt-1")
-            with ui.card().classes("p-4 items-center text-center shadow-md rounded-lg"):
-                ui.label("Portfolio Value").classes("text-lg font-medium")
-                portfolio_val_num = sum(
-                    h.get("Quantity", 0) * h.get("LastPrice", 0) for h in portfolio_data if isinstance(h, dict))
-                ui.label(f"₹{portfolio_val_num:,.2f}").classes("text-2xl font-bold mt-1")
-            with ui.card().classes("p-4 items-center text-center shadow-md rounded-lg"):
-                ui.label("Open Positions").classes("text-lg font-medium")
-                open_pos_count = len([p for p in positions_data if isinstance(p, dict) and p.get("Quantity", 0) != 0])
-                ui.label(str(open_pos_count)).classes("text-2xl font-bold mt-1")
+            # Basic metrics as fallback
+            with ui.row().classes("w-full gap-4 p-4"):
+                with ui.card().classes("p-4"):
+                    ui.label("Available Funds").classes("text-lg font-medium")
+                    ui.label("Loading...").classes("text-2xl font-bold mt-1")
 
-        market_watch_container.clear()
-        with market_watch_container:
-            ui.label("Market Watch").classes("text-xl font-semibold mb-2")
+                with ui.card().classes("p-4"):
+                    ui.label("Portfolio Value").classes("text-lg font-medium")
+                    ui.label("Loading...").classes("text-2xl font-bold mt-1")
 
-            async def update_ltp(instrument_symbol_input, ltp_label_display):
-                if instrument_symbol_input.value and instrument_symbol_input.value in all_instruments_map:
-                    instrument_token = all_instruments_map[instrument_symbol_input.value]
-                    ltp_response = await fetch_api(f"/ltp/{broker}", params={"instruments": instrument_token})
-                    if ltp_response and isinstance(ltp_response, list) and ltp_response:
-                        ltp_item = ltp_response[0]
-                        ltp_label_display.text = f"LTP: ₹{ltp_item.get('last_price', 'N/A'):,.2f}"
-                    else:
-                        ltp_label_display.text = "LTP: N/A"
-                else:
-                    ltp_label_display.text = "LTP: N/A"
-
-            with ui.row().classes("items-center gap-2 w-full"):
-                instrument_input = ui.select(options=list(all_instruments_map.keys()),
-                                             clearable=True, with_input=True, label="Select Instrument for LTP") \
-                    .props("outlined dense").classes("flex-grow")
-                ltp_label = ui.label("LTP: N/A").classes("text-lg p-2 bg-gray-100 dark:bg-gray-700 rounded-md shadow")
-            instrument_input.on('update:model-value',
-                                lambda: asyncio.create_task(update_ltp(instrument_input, ltp_label)))
-
-        chart_container.clear()
-        with chart_container:
-            if portfolio_data:
-                try:
-                    labels = [p["Symbol"] for p in portfolio_data if
-                              isinstance(p, dict) and "Symbol" in p and p.get("Quantity", 0) * p.get("LastPrice",
-                                                                                                     0) > 0]
-                    values = [p["Quantity"] * p["LastPrice"] for p in portfolio_data if
-                              isinstance(p, dict) and "Quantity" in p and "LastPrice" in p and p.get("Quantity",
-                                                                                                     0) * p.get(
-                                  "LastPrice", 0) > 0]
-                    if labels and values:
-                        fig_pie = go.Figure(data=[
-                            go.Pie(labels=labels, values=values, hole=.3, textinfo='percent+label',
-                                   pull=[0.05] * len(labels))])
-                        fig_pie.update_layout(title_text='Portfolio Allocation', showlegend=True,
-                                              legend_orientation="h", legend_yanchor="bottom", legend_y=1.02)
-                        ui.plotly(fig_pie).classes("w-full h-96 rounded-lg shadow-md")
-                    else:
-                        ui.label("Not enough data for portfolio allocation chart.").classes("text-gray-500")
-                except Exception as e:
-                    logger.error(f"Error creating pie chart: {e}")
-                    ui.label("Could not load portfolio allocation chart.").classes("text-red-500")
-            else:
-                ui.label("No portfolio data available for chart.").classes("text-gray-500")
-
-    await fetch_and_update_dashboard()
-    ui.timer(30, fetch_and_update_dashboard)
+                with ui.card().classes("p-4"):
+                    ui.label("Open Positions").classes("text-lg font-medium")
+                    ui.label("Loading...").classes("text-2xl font-bold mt-1")
 
 
 @ui.page('/order-management')
@@ -582,9 +595,12 @@ async def on_client_connect(client: Client):
 
 if __name__ in {"__main__", "__mp_main__"}:
     storage_secret_key = "my_super_secret_key_for_testing_123_please_change_for_prod"
-    ui.run(title="Algo Trader",
-           port=8080,
+    # Add static files support for CSS
+    ui.add_css('/static', shared=True)
+    ui.run(title="AlgoTrade Pro - Advanced Trading Platform",
+           port=8082,
            reload=True,
            uvicorn_reload_dirs='.',
            uvicorn_reload_includes='*.py',
-           storage_secret=storage_secret_key)
+           storage_secret=storage_secret_key,
+           favicon="🚀")
