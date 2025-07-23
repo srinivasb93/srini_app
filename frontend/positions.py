@@ -119,4 +119,4 @@ async def render_positions_page(fetch_api, user_storage, broker):
             logger.exception("Unexpected error fetching positions")
 
     await refresh_positions()
-    ui.timer(15, refresh_positions)
+    ui.timer(1500, refresh_positions)

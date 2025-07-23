@@ -59,7 +59,7 @@ async def render_dashboard_page(fetch_api, user_storage, get_cached_instruments)
 
             # Center Panel - Chart and Portfolio Overview (50% width)
             with ui.element('div').classes("dashboard-center-panel"):
-                await render_enhanced_chart_section(fetch_api, user_storage, broker)
+                await render_enhanced_chart_section(fetch_api, user_storage, get_cached_instruments,broker)
                 await render_enhanced_portfolio_section(fetch_api, user_storage, broker)
 
             # Right Panel - Quick Trade, Orders, Strategies, News (25% width)
@@ -188,7 +188,7 @@ async def render_enhanced_watchlist_item(symbol, instruments_map, fetch_api, bro
             ui.label("Error").classes("text-red-500")
 
 
-async def render_enhanced_chart_section(fetch_api, user_storage, broker):
+async def render_enhanced_chart_section(fetch_api, user_storage, instruments_map, broker):
     """Enhanced chart section using existing analytics.py functionality"""
 
     with ui.card().classes("dashboard-card chart-card w-full"):
@@ -218,12 +218,12 @@ async def render_enhanced_chart_section(fetch_api, user_storage, broker):
 
         with chart_container:
             # Create lightweight trading chart using existing analytics functionality
-            await create_dashboard_chart(fetch_api, user_storage, broker)
+            await create_dashboard_chart(fetch_api, user_storage, instruments_map, broker)
 
         return chart_container
 
 
-async def create_dashboard_chart(fetch_api, user_storage, broker):
+async def create_dashboard_chart(fetch_api, user_storage, instruments_map, broker):
     """Create dashboard chart using existing analytics functionality"""
 
     try:
@@ -236,7 +236,7 @@ async def create_dashboard_chart(fetch_api, user_storage, broker):
             # Create a compact version of the analytics chart
             with ui.element('div').classes('chart-container'):
                 # This would call a simplified version of your analytics chart
-                await render_analytics_page(fetch_api, user_storage, broker)
+                await render_analytics_page(fetch_api, user_storage, instruments_map, broker)
 
         # Chart controls
         with ui.row().classes("chart-controls w-full justify-center gap-2 mt-2"):
