@@ -51,19 +51,19 @@ async def render_dashboard_page(fetch_api, user_storage, get_cached_instruments)
         render_enhanced_dashboard_title(broker)
 
         # Main Dashboard Grid Layout (matches reference image)
-        with ui.row().classes("dashboard-main-grid w-full gap-4 p-4"):
+        with ui.element('div').classes("dashboard-grid w-full p-4"):
             # Left Panel - Enhanced Watchlist (25% width)
-            with ui.column().classes("dashboard-left-panel w-1/5 gap-2"):
+            with ui.element('div').classes("dashboard-left-panel"):
                 await render_enhanced_watchlist_section(fetch_api, user_storage, get_cached_instruments, broker)
                 await render_enhanced_quick_trade_section(fetch_api, user_storage, get_cached_instruments, broker)
 
             # Center Panel - Chart and Portfolio Overview (50% width)
-            with ui.column().classes("dashboard-center-panel w-3/5 gap-2"):
+            with ui.element('div').classes("dashboard-center-panel"):
                 await render_enhanced_chart_section(fetch_api, user_storage, broker)
                 await render_enhanced_portfolio_section(fetch_api, user_storage, broker)
 
             # Right Panel - Quick Trade, Orders, Strategies, News (25% width)
-            with ui.column().classes("dashboard-right-panel w-1/5 gap-2"):
+            with ui.element('div').classes("dashboard-right-panel"):
                 await render_enhanced_order_book_section(fetch_api, user_storage, broker)
                 await render_enhanced_strategies_section(fetch_api, user_storage, broker)
                 await render_enhanced_market_summary_section(fetch_api, user_storage, broker)
@@ -75,8 +75,7 @@ async def render_dashboard_page(fetch_api, user_storage, get_cached_instruments)
 
 def apply_enhanced_dashboard_styles():
     """Apply enhanced CSS styles for the dashboard"""
-    ui.add_css('static/dashboard.css')
-    pass
+    ui.add_css('static/styles.css')
 
 def render_enhanced_dashboard_title(broker):
     """Enhanced dashboard title with status indicators"""

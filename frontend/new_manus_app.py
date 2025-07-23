@@ -441,7 +441,7 @@ async def analytics_page(client: Client):
     apply_theme_from_storage()
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
-    await render_analytics_page(fetch_api, app.storage.user, await get_cached_instruments(broker))
+    await render_analytics_page(fetch_api, app.storage.user, await get_cached_instruments(broker), broker)
 
 
 @ui.page('/strategies')
@@ -599,7 +599,7 @@ if __name__ in {"__main__", "__mp_main__"}:
     ui.add_css('static/styles.css')
 
     ui.run(title="AlgoTrade Pro - Advanced Trading Platform",
-           port=8083,
+           port=8080,
            reload=True,
            uvicorn_reload_dirs='.',
            uvicorn_reload_includes='*.py',
