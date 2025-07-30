@@ -4,12 +4,18 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 
+def apply_enhanced_dashboard_styles():
+    """Apply enhanced CSS styles for the dashboard"""
+    ui.add_css('static/styles.css')
+
 async def render_settings_page(fetch_api, user_storage, apply_theme_from_storage):
+    apply_enhanced_dashboard_styles()
+
     broker = user_storage.get('default_broker', "Zerodha")
     ui.label("Application Settings").classes("text-h4")
 
     with ui.card().classes("card"):
-        ui.label("Preferences").classes("text-h6 border-b pb-2 mb-4")
+        ui.label("Preferences").classes("strategy-card")
         with ui.column().classes("space-y-4"):
             current_theme = user_storage.get('app_theme', "Dark")
             ui.label("Select Theme").classes("text-subtitle1")

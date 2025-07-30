@@ -1,7 +1,7 @@
 import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
-from backend.app.services import place_order, execute_strategy, place_mf_sip, schedule_strategy_execution, stop_strategy_execution
+from backend.app.services import place_order, execute_strategy, schedule_strategy_execution, stop_strategy_execution
 from backend.app.schemas import MFSIPRequest
 from datetime import datetime
 
@@ -44,22 +44,6 @@ async def test_execute_strategy():
     )
     assert isinstance(result, str)
     mock_db.execute.assert_called()
-
-@pytest.mark.asyncio
-async def test_place_mf_sip():
-    mock_api = MagicMock()
-    mock_api.mf_sip.return_value = {"sip_id": "SIP123"}
-    mock_db = AsyncMock()
-    mock_db.execute.return_value = AsyncMock(scalars=MagicMock(first=MagicMock(email="test@example.com")))
-    sip_request = MFSIPRequest(
-        scheme_code="INF123",
-        amount=5000.0,
-        frequency="monthly",
-        start_date=datetime.now()
-    )
-    response = await place_mf_sip(mock_api, sip_request, mock_db, "test_user")
-    assert response.sip_id == "SIP123"
-    mock_api.mf_sip.assert_called_once()
 
 @pytest.mark.asyncio
 async def test_schedule_strategy_execution():

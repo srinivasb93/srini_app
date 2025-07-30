@@ -12,6 +12,7 @@ import json
 from datetime import datetime, timedelta
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, patch
+from backend.app.strategies.enhanced_sip_strategy import MonthlyInvestmentTracker
 import pandas as pd
 import numpy as np
 
@@ -81,8 +82,6 @@ class TestEnhancedSIPFeatures:
 
     def test_requirement_2_price_threshold_edge_cases(self):
         """Test edge cases for price reduction threshold"""
-        from backend.app.routes.sip_routes import MonthlyInvestmentTracker
-
         # Test with different thresholds
         test_thresholds = [2.0, 4.0, 6.0, 10.0]
 
@@ -116,8 +115,6 @@ class TestEnhancedSIPFeatures:
         """
         INTEGRATION TEST: Both requirements working together
         """
-        from backend.app.routes.sip_routes import MonthlyInvestmentTracker
-
         # Setup: 5000 fixed investment, 20000 monthly limit (4x), 4% threshold
         tracker = MonthlyInvestmentTracker(
             max_monthly_amount=20000,  # 4x of 5000
@@ -271,7 +268,6 @@ class TestEnhancedSIPFeatures:
 
     def test_monthly_limit_enforcement_detailed(self):
         """Detailed test of monthly limit enforcement scenarios"""
-        from backend.app.routes.sip_routes import MonthlyInvestmentTracker
 
         scenarios = [
             {
@@ -334,8 +330,6 @@ class TestEnhancedSIPFeatures:
 
     def test_cross_month_independence(self):
         """Test that monthly limits reset across months"""
-        from backend.app.routes.sip_routes import MonthlyInvestmentTracker
-
         tracker = MonthlyInvestmentTracker(
             max_monthly_amount=15000,
             price_reduction_threshold=4.0
@@ -381,7 +375,6 @@ class TestEnhancedSIPFeatures:
 
     def test_multiple_symbols_independence(self):
         """Test that different symbols have independent monthly tracking"""
-        from backend.app.routes.sip_routes import MonthlyInvestmentTracker
 
         tracker = MonthlyInvestmentTracker(
             max_monthly_amount=20000,
@@ -415,7 +408,6 @@ class TestEnhancedSIPFeatures:
 
     def test_analytics_and_reporting(self):
         """Test analytics features for enhanced SIP"""
-        from backend.app.routes.sip_routes import MonthlyInvestmentTracker
 
         tracker = MonthlyInvestmentTracker(
             max_monthly_amount=25000,
@@ -541,7 +533,6 @@ class TestPerformanceBenchmarks:
     def test_large_dataset_performance(self):
         """Test performance with large datasets"""
         import time
-        from backend.app.routes.sip_routes import MonthlyInvestmentTracker
 
         tracker = MonthlyInvestmentTracker(
             max_monthly_amount=50000,

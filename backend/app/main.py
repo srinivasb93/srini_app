@@ -1,7 +1,8 @@
 import sys
 import os
 import logging
-import signal
+import asyncio
+
 # Create logs directory if it doesn't exist
 os.makedirs('logs', exist_ok=True)
 
@@ -31,7 +32,6 @@ from typing import List, Optional
 from datetime import datetime, timedelta
 import uuid
 import pandas as pd
-import asyncio
 import bcrypt
 from collections import defaultdict
 from uuid import uuid4
@@ -44,7 +44,10 @@ from backend.app.database import (
     get_nsedata_db
 )
 
-from backend.app.routes.sip_routes import sip_router, SIPBacktestRequest, SIPConfigRequest, daily_signal_check
+from backend.app.api_manager import initialize_user_apis
+from backend.app.routes.sip_routes import sip_router
+from backend.app.routes.equity_data_routes import equity_router, nse_openchart
+from backend.app.routes.mutual_fund_routes import mf_router
 from backend.app.routes import data
 
 # Continue with your other imports...
@@ -57,29 +60,27 @@ from models import Order, ScheduledOrder as ScheduledOrderModel, AutoOrder as Au
     GTTOrder as GTTOrderModel, User, Strategy
 
 from services import (
-    OrderManager, OrderMonitor, init_upstox_api, init_zerodha_api,
-    fetch_upstox_access_token, fetch_zerodha_access_token, place_order,
-    get_order_book, get_positions, get_portfolio, get_funds_data,
-    get_quotes, get_ohlc, get_ltp, get_historical_data, fetch_instruments,
-    get_order_history, get_order_trades, modify_order, TokenExpiredError,
-    execute_strategy, backtest_strategy, get_analytics_data, place_mf_sip,
-    get_mf_sips, cancel_mf_sip, schedule_strategy_execution, stop_strategy_execution
+    OrderManager, OrderMonitor, fetch_upstox_access_token, fetch_zerodha_access_token, place_order,
+    get_order_book, get_positions, get_portfolio, get_funds_data, get_quotes, get_ohlc, get_ltp,
+    get_historical_data, fetch_instruments, get_order_history, get_order_trades, modify_order, TokenExpiredError,
+    execute_strategy, backtest_strategy, get_mf_sips, schedule_strategy_execution, stop_strategy_execution,
+    get_quotes_from_nse, get_ltp_openchart, get_ltp_from_nse, get_ohlc_openchart, get_ohlc_from_nse
 )
 from common_utils.db_utils import async_fetch_query
 from common_utils.utils import sanitize_floats
 from common_utils.read_write_sql_data import load_sql_data
+from common_utils.market_data import MarketData
 from schemas import (
     PlaceOrderRequest, UserCreate, UserResponse, ScheduledOrder, ScheduledOrderRequest, AutoOrder, AutoOrderRequest,
     GTTOrder, GTTOrderRequest, ProfileResponse, MarginResponse, QuoteResponse, OHLCResponse, LTPResponse,
     HistoricalDataResponse, Instrument, OrderHistory, Trade, ModifyOrderRequest, StrategyRequest, StrategyResponse,
-    BacktestRequest, MFSIPRequest, MFSIPResponse
+    BacktestRequest, MFSIPResponse
 )
 from auth import UserManager, oauth2_scheme
 
 # Initialize global variables that existing functions depend on
 order_monitor = None
 order_manager = None
-user_apis = {}
 background_tasks = []
 
 
@@ -88,24 +89,25 @@ async def lifespan(app: FastAPI):
     """Simplified lifespan with reliable startup and shutdown"""
     global order_monitor, order_manager, user_apis, background_tasks
 
-    logger.info("🚀 Starting Modern Trading Platform...")
+    logger.info("Starting Modern Trading Platform...")
     startup_tasks = []
 
     try:
         # Step 1: Initialize databases
-        logger.info("🔧 Initializing database system...")
+        logger.info("Initializing database system...")
         await init_databases()
-        logger.info("✅ Databases initialized successfully")
+        logger.info("Databases initialized successfully")
 
         # Step 2: Initialize services
-        logger.info("🔄 Initializing services...")
+        logger.info("Initializing services...")
         order_monitor = OrderMonitor()
         order_manager = OrderManager(monitor=order_monitor)
+        market_data = MarketData()
         user_apis = {}
-        logger.info("✅ Services initialized")
+        logger.info("Services initialized")
 
         # Step 3: Start background services with error handling
-        logger.info("🚀 Starting background services...")
+        logger.info("Starting background services...")
 
         async def safe_monitor_task():
             try:
@@ -125,19 +127,20 @@ async def lifespan(app: FastAPI):
         startup_tasks = [monitor_task, manager_task]
         background_tasks = startup_tasks.copy()
 
-        logger.info("✅ Background services started")
-        logger.info("🎯 Trading platform is ready!")
+        logger.info("Background services started")
+        logger.info("Trading platform is ready!")
 
         # Store in app state
         app.state.order_monitor = order_monitor
         app.state.order_manager = order_manager
         app.state.user_apis = user_apis
+        app.state.market_data = market_data
 
         # Application runs here
         yield
 
     except Exception as e:
-        logger.error(f"❌ Startup failed: {e}")
+        logger.error(f"Startup failed: {e}")
         # Cancel any tasks that were started
         for task in startup_tasks:
             if not task.done():
@@ -145,7 +148,7 @@ async def lifespan(app: FastAPI):
         raise
     finally:
         # Simple, reliable shutdown
-        logger.info("🛑 Shutting down...")
+        logger.info("Shutting down...")
 
         try:
             # Step 1: Stop services
@@ -172,7 +175,7 @@ async def lifespan(app: FastAPI):
             # Step 4: Close databases
             await cleanup_databases()
 
-            logger.info("✅ Shutdown completed")
+            logger.info("Shutdown completed")
 
         except Exception as e:
             logger.error(f"Shutdown error: {e}")
@@ -189,7 +192,6 @@ app = FastAPI(
         {"name": "market-data", "description": "Market data endpoints"},
         {"name": "gtt-orders", "description": "Good Till Triggered (GTT) order endpoints"},
         {"name": "algo-trading", "description": "Algorithmic trading endpoints"},
-        {"name": "analytics", "description": "Analytics and indicators"},
         {"name": "mutual-funds", "description": "Mutual fund operations"},
         {"name": "sip-strategy", "description": "SIP strategy endpoints"},
         {"name": "system", "description": "System health and monitoring"}
@@ -239,6 +241,8 @@ async def log_requests(request: Request, call_next):
 # Include routers
 app.include_router(sip_router, tags=["sip-strategy"])
 app.include_router(data.router, prefix="/api", tags=["data"])
+app.include_router(equity_router)
+app.include_router(mf_router)
 
 # Custom in-memory rate limiter
 class InMemoryRateLimiter:
@@ -270,45 +274,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user_id
-
-
-async def initialize_user_apis(user_id: str, db: AsyncSession, force_reinitialize: bool = False):
-    """Initialize trading APIs for user - enhanced with better error handling"""
-    global user_apis
-
-    # Check if already initialized and not forcing reinitialize
-    if user_id in user_apis and not force_reinitialize:
-        return user_apis[user_id]
-
-    try:
-        logger.info(f"Initializing APIs for user {user_id}")
-
-        # Initialize Upstox APIs
-        upstox_apis = await init_upstox_api(db, user_id)
-
-        # Initialize Zerodha APIs
-        kite_apis = await init_zerodha_api(db, user_id)
-
-        # Store in global user_apis
-        user_apis[user_id] = {
-            "upstox": upstox_apis,
-            "zerodha": kite_apis
-        }
-
-        logger.info(f"✅ APIs initialized successfully for user {user_id}")
-
-    except TokenExpiredError as e:
-        logger.info(f"Token expired for user {user_id}: {e.message}")
-        user_apis[user_id] = {
-            "upstox": {"user": None, "order": None, "portfolio": None, "market_data": None, "history": None},
-            "zerodha": {"kite": None}
-        }
-    except Exception as e:
-        logger.error(f"Failed to initialize APIs for user {user_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"API initialization failed: {str(e)}")
-
-    return user_apis[user_id]
-
 
 @app.get("/health", tags=["system"])
 async def health_check():
@@ -379,8 +344,8 @@ async def root():
 @app.on_event("startup")
 async def log_startup():
     """Log startup completion"""
-    logger.info("🎉 FastAPI application startup completed")
-    logger.info(f"📊 Global services status:")
+    logger.info("FastAPI application startup completed")
+    logger.info(f"Global services status:")
     logger.info(f"   • order_monitor: {'✅ Ready' if order_monitor else '❌ Not initialized'}")
     logger.info(f"   • order_manager: {'✅ Ready' if order_manager else '❌ Not initialized'}")
     logger.info(f"   • user_apis: {len(user_apis)} users")
@@ -1055,14 +1020,13 @@ async def get_market_quotes(broker: str, instruments: str, user_id: str = Depend
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail="Invalid broker")
     user_apis_dict = await initialize_user_apis(user_id, db)
-    # upstox_api = user_apis_dict["upstox"]["history"] if broker == "Upstox" else None
-    # kite_api = user_apis_dict["zerodha"]["kite"] if broker == "Zerodha" else None
+
     upstox_api = user_apis_dict["upstox"]["market_data"]
     if not upstox_api:
-        raise HTTPException(status_code=400, detail="Upstox API not initialized")
+        logger.debug(f"No upstox api found for {user_id}. Trying with NSE data")
     try:
         instrument_list = instruments.split(",")
-        quotes = await get_quotes(upstox_api, None, instrument_list)
+        quotes = await get_quotes(upstox_api, None, instrument_list, db)
         return quotes
     except Exception as e:
         logger.error(f"Error fetching {broker} quotes: {str(e)}")
@@ -1073,14 +1037,13 @@ async def get_ohlc_data(broker: str, instruments: str, user_id: str = Depends(ge
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail="Invalid broker")
     user_apis_dict = await initialize_user_apis(user_id, db)
-    # upstox_api = user_apis_dict["upstox"]["history"] if broker == "Upstox" else None
-    # kite_api = user_apis_dict["zerodha"]["kite"] if broker == "Zerodha" else None
     upstox_api = user_apis_dict["upstox"]["market_data"]
     if not upstox_api:
-        raise HTTPException(status_code=400, detail="Upstox API not initialized")
+        logger.debug(f"No upstox api found for {user_id}. Trying with NSE data")
     try:
         instrument_list = instruments.split(",")
-        ohlc_data = await get_ohlc(upstox_api, None, instrument_list)
+        ohlc_data = await get_ohlc(upstox_api, None, instrument_list, db)
+        # ohlc_data = await get_ohlc(upstox_api, None, instrument_list)
         return ohlc_data
     except Exception as e:
         logger.error(f"Error fetching {broker} OHLC data: {str(e)}")
@@ -1091,14 +1054,13 @@ async def get_ltp_data(broker: str, instruments: str, user_id: str = Depends(get
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail="Invalid broker")
     user_apis_dict = await initialize_user_apis(user_id, db)
-    # upstox_api = user_apis_dict["upstox"]["history"] if broker == "Upstox" else None
-    # kite_api = user_apis_dict["zerodha"]["kite"] if broker == "Zerodha" else None
     upstox_api = user_apis_dict["upstox"]["market_data"]
+
     if not upstox_api:
-        raise HTTPException(status_code=400, detail="Upstox API not initialized")
+        logger.debug(f"No upstox api found for {user_id}. Trying with NSE data")
     try:
         instrument_list = instruments.split(",")
-        ltp_data = await get_ltp(upstox_api, None, instrument_list)
+        ltp_data = await get_ltp(upstox_api, None, instrument_list, db)
         return ltp_data
     except Exception as e:
         logger.error(f"Error fetching {broker} LTP: {str(e)}")
@@ -1106,20 +1068,22 @@ async def get_ltp_data(broker: str, instruments: str, user_id: str = Depends(get
 
 @app.get("/historical-data/{broker}", response_model=HistoricalDataResponse, tags=["market-data"])
 async def get_historical(broker: str, instrument: str, from_date: str, to_date: str, unit: str,  interval: str,
-                        user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+                        user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+                         nse_db: AsyncSession = Depends(get_nsedata_db)):
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail="Invalid broker")
     user_apis_dict = await initialize_user_apis(user_id, db)
     upstox_api = user_apis_dict["upstox"]["history"]
     if not upstox_api:
-        raise HTTPException(status_code=400, detail="Upstox API not initialized")
+        logger.debug(f"No upstox api found for {user_id}. Trying with NSE data")
     try:
         result = await db.execute(select(User).filter(User.user_id == user_id))
         user = result.scalars().first()
         if not user:
             raise ValueError(f"User {user_id} not found")
 
-        historical_data = await get_historical_data(upstox_api, user.upstox_access_token, instrument, from_date, to_date, unit, interval)
+        historical_data = await get_historical_data(upstox_api, user.upstox_access_token, instrument,
+                                                    from_date, to_date, unit, interval, db, nse_db)
         return historical_data
     except Exception as e:
         logger.error(f"Error fetching {broker} historical data: {str(e)}")
@@ -1155,38 +1119,6 @@ async def get_mutual_fund_instruments(user_id: str = Depends(get_current_user), 
         return instruments
     except Exception as e:
         logger.error(f"Error fetching mutual fund instruments: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/mutual-funds/orders", tags=["mutual-funds"])
-async def place_mutual_fund_order(
-    scheme_code: str, amount: float, transaction_type: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)
-):
-    user_apis_dict = await initialize_user_apis(user_id, db)
-    kite_api = user_apis_dict["zerodha"]["kite"]
-    if not kite_api:
-        raise HTTPException(status_code=400, detail="Zerodha API not initialized")
-    try:
-        order = kite_api.place_mf_order(
-            tradingsymbol=scheme_code,
-            transaction_type=transaction_type,
-            amount=amount,
-        )
-        return {"status": "success", "order_id": order["order_id"]}
-    except Exception as e:
-        logger.error(f"Error placing mutual fund order: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/mutual-funds/orders/{order_id}", tags=["mutual-funds"])
-async def cancel_mutual_fund_order(order_id: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    user_apis_dict = await initialize_user_apis(user_id, db)
-    kite_api = user_apis_dict["zerodha"]["kite"]
-    if not kite_api:
-        raise HTTPException(status_code=400, detail="Zerodha API not initialized")
-    try:
-        kite_api.cancel_mf_order(order_id=order_id)
-        return {"status": "success", "message": f"Mutual fund order {order_id} cancelled"}
-    except Exception as e:
-        logger.error(f"Error cancelling mutual fund order {order_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/mutual-funds/orders", tags=["mutual-funds"])
@@ -1411,85 +1343,6 @@ async def websocket_backtest(websocket: WebSocket, user_id: str):
         except Exception as e:
             logger.error(f"Error closing WebSocket for user {user_id}: {str(e)}")
 
-@app.get("/analytics/data", tags=["analytics"])
-async def get_analytics(
-    instrument_token: str,
-    unit: str = "days",
-    interval: str = "1",
-    ema_period: int = 20,
-    rsi_period: int = 14,
-    lr_period: int = 20,
-    stochastic_k: int = 14,
-    stochastic_d: int = 3,
-    user_id: str = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    user_apis_dict = await initialize_user_apis(user_id, db)
-    upstox_api = user_apis_dict["upstox"]["history"]
-    try:
-        result = await db.execute(select(User).filter(User.user_id == user_id))
-        user = result.scalars().first()
-        if not user:
-            raise ValueError(f"User {user_id} not found")
-
-        data = await get_analytics_data(
-            upstox_api=upstox_api,
-            upstox_access_token=user.upstox_access_token,
-            instrument_token=instrument_token,
-            unit=unit,
-            interval=interval,
-            ema_period=ema_period,
-            rsi_period=rsi_period,
-            lr_period=lr_period,
-            stochastic_k=stochastic_k,
-            stochastic_d=stochastic_d
-        )
-        return data
-    except Exception as e:
-        if not upstox_api:
-            raise HTTPException(status_code=400, detail="Upstox API not initialized")
-        logger.error(f"Error fetching analytics data: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/mutual-funds/sips", response_model=MFSIPResponse, tags=["mutual-funds"], dependencies=[Depends(gtt_limiter)])
-async def create_mf_sip(sip: MFSIPRequest, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    user_apis_dict = await initialize_user_apis(user_id, db)
-    kite_api = user_apis_dict["zerodha"]["kite"]
-    if not kite_api:
-        raise HTTPException(status_code=400, detail="Zerodha API not initialized")
-    try:
-        response = await place_mf_sip(kite_api, sip, db, user_id)
-        return response
-    except Exception as e:
-        logger.error(f"Error creating SIP: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/mutual-funds/sips", response_model=List[MFSIPResponse], tags=["mutual-funds"], dependencies=[Depends(portfolio_limiter)])
-async def list_mf_sips(user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    user_apis_dict = await initialize_user_apis(user_id, db)
-    kite_api = user_apis_dict["zerodha"]["kite"]
-    if not kite_api:
-        raise HTTPException(status_code=400, detail="Zerodha API not initialized")
-    try:
-        sips = await get_mf_sips(kite_api, db, user_id)
-        return sips
-    except Exception as e:
-        logger.error(f"Error listing SIPs: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/mutual-funds/sips/{sip_id}", tags=["mutual-funds"], dependencies=[Depends(gtt_limiter)])
-async def delete_mf_sip(sip_id: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    user_apis_dict = await initialize_user_apis(user_id, db)
-    kite_api = user_apis_dict["zerodha"]["kite"]
-    if not kite_api:
-        raise HTTPException(status_code=400, detail="Zerodha API not initialized")
-    try:
-        response = await cancel_mf_sip(kite_api, sip_id, db, user_id)
-        return response
-    except Exception as e:
-        logger.error(f"Error cancelling SIP {sip_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/scheduled-orders/{broker}",  response_model=List[ScheduledOrder], tags=["orders"])
 async def get_scheduled_orders(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if broker not in ["Upstox", "Zerodha"]:
@@ -1649,40 +1502,49 @@ async def general_exception_handler(request, exc):
 if __name__ == "__main__":
     import asyncio
     async def main():
-        from backend.app.routes.sip_routes import run_sip_backtest, SIPBacktestRequest, SIPConfigRequest
-        from fastapi import BackgroundTasks
+        # from backend.app.routes.sip_routes import run_sip_backtest, SIPBacktestRequest, SIPConfigRequest
+        # from fastapi import BackgroundTasks
         from backend.app.database import get_db, get_nsedata_db
-
-        request_config = SIPBacktestRequest(
-            symbols=["GOLDBEES", "ITBEES"],
-            start_date="2020-01-01",
-            end_date="2025-06-30",
-            config=SIPConfigRequest(
-                fixed_investment=3000,
-                max_amount_in_a_month=6000,
-                major_drawdown_threshold=-10,
-                minor_drawdown_threshold=-4,
-                extreme_drawdown_threshold=-15,
-                major_drawdown_inv_multiplier=3,
-                minor_drawdown_inv_multiplier=2,
-                extreme_drawdown_inv_multiplier=4,
-                rolling_window=100,
-                fallback_day=28,
-                min_investment_gap_days=7,
-                price_reduction_threshold=5,
-                force_remaining_investment=True
-            )
-        )
-
-        background_tasks = BackgroundTasks()
+        from backend.app.routes.equity_data_routes import get_quote, get_historical_data
+        #
+        # request_config = SIPBacktestRequest(
+        #     symbols=["GOLDBEES", "ITBEES"],
+        #     start_date="2020-01-01",
+        #     end_date="2025-06-30",
+        #     config=SIPConfigRequest(
+        #         fixed_investment=3000,
+        #         max_amount_in_a_month=6000,
+        #         major_drawdown_threshold=-10,
+        #         minor_drawdown_threshold=-4,
+        #         extreme_drawdown_threshold=-15,
+        #         major_drawdown_inv_multiplier=3,
+        #         minor_drawdown_inv_multiplier=2,
+        #         extreme_drawdown_inv_multiplier=4,
+        #         rolling_window=100,
+        #         fallback_day=28,
+        #         min_investment_gap_days=7,
+        #         price_reduction_threshold=5,
+        #         force_remaining_investment=True
+        #     )
+        # )
+        #
+        # background_tasks = BackgroundTasks()
         db_gen = get_db()
         db = await db_gen.__anext__()
-
+        #
         nsedata_db_gen = get_nsedata_db()
         nsedata_db = await nsedata_db_gen.__anext__()
 
-        await run_sip_backtest(request_config, background_tasks, trading_db=db, nsedata_db=nsedata_db, enable_monthly_limits=False)
-        # await daily_signal_check()
-
-
+        # await run_sip_backtest(request_config, background_tasks, trading_db=db, nsedata_db=nsedata_db, enable_monthly_limits=False)
+        # print(await get_market_quotes(broker='Upstox', instruments="NSE_EQ|INE669E01016,NSE_EQ|INE002A01018", user_id="4fbba468-6a86-4516-8236-2f8abcbfd2ef", db=db))
+        # await get_quote(symbol='RELIANCE', source='nsepython', fallback_sources=['nsetools', 'openchart'],
+        #                         user_id="4fbba468-6a86-4516-8236-2f8abcbfd2ef", db=db)
+        # await get_historical_data(upstox_api=None, upstox_access_token='None', instrument='RELIANCE', from_date='2023-01-01', to_date='2023-10-01', unit='days', interval='1', db=nsedata_db)
+        print(await get_ohlc_data(broker='Zerodha', instruments='NSE_EQ|INE002A01018,NSE_EQ|INE669E01016', user_id="4fbba468-6a86-4516-8236-2f8abcbfd2ef", db=db))
+        # print(await get_ltp_openchart(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
+        # print(await get_ltp_from_nse(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
+        # print(await get_ohlc_openchart(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
+        # print(await get_ohlc_from_nse(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
+        # print(await get_quotes_from_nse(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
+        # await get_ohlc()
     asyncio.run(main())

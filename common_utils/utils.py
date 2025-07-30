@@ -29,16 +29,10 @@ def insert_commas(num):
         result = digit + result
     return result
 
-
 def format_currency(value):
     if isinstance(value, (int, float)):
         return f"₹{value:,.2f}"
     return value
-
-
-def notify(title, message, type='success'):
-    logger.info(f"Notification: {title} - {message} ({type})")
-
 
 def calculate_atr(df, period):
     df['high_low'] = df['high'] - df['low']
@@ -47,11 +41,6 @@ def calculate_atr(df, period):
     df['tr'] = df[['high_low', 'high_close', 'low_close']].max(axis=1)
     df['atr'] = df['tr'].rolling(window=period).mean()
     return df['atr']
-
-
-def get_historical_data(instrument_token):
-    # Placeholder: Implement API call to fetch historical data
-    return []
 
 def sanitize_floats(obj):
     if isinstance(obj, dict):

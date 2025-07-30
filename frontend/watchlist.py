@@ -32,37 +32,7 @@ async def render_watchlist_page(fetch_api, user_storage, get_cached_instruments,
                 ui.label("Real-time market data for your tracked instruments").classes(
                     "text-gray-400 dashboard-subtitle")
 
-            # Right side - Status indicators
-            with ui.row().classes("items-center gap-4"):
-                # Market Status
-                with ui.row().classes("status-indicator market-status"):
-                    ui.icon("circle", size="0.5rem").classes("status-dot")
-                    ui.label("Market Open").classes("status-text")
-
-                # Connection Status
-                with ui.row().classes("status-indicator connection-status"):
-                    ui.icon("wifi", size="1rem").classes("text-cyan-400")
-                    ui.label("Connected").classes("status-text")
-
-        # Main content area
-        with ui.row().classes("w-full gap-4 p-4"):
-
-            # Main watchlist card (enhanced styling)
-            with ui.card().classes("dashboard-card watchlist-card w-2/3"):
-                # Header with enhanced styling
-                with ui.row().classes("card-header w-full justify-between items-center p-4"):
-                    with ui.row().classes("items-center gap-2"):
-                        ui.icon("trending_up", size="1.5rem").classes("text-green-400")
-                        ui.label("Live Quotes").classes("card-title")
-
-                    with ui.row().classes("items-center gap-2"):
-                        ui.button(icon="refresh").props("flat round").classes("text-cyan-400 refresh-button")
-                        ui.button(icon="settings").props("flat round").classes("text-gray-400")
-
-                ui.separator().classes("card-separator")
-
-                # Watchlist content with enhanced styling
-                watchlist_display_area = ui.column().classes("watchlist-content w-full p-2")
+        with ui.row().classes("w-full no-wrap"):
 
             # Add instrument card (enhanced styling)
             with ui.card().classes("dashboard-card w-1/3"):
@@ -102,6 +72,25 @@ async def render_watchlist_page(fetch_api, user_storage, get_cached_instruments,
                     ui.button("Add to Watchlist", on_click=add_to_watchlist_action, icon="add").classes(
                         "buy-button w-full")
 
+            # Main watchlist card (enhanced styling)
+            with ui.card().classes("dashboard-card watchlist-card w-2/3"):
+                # Header with enhanced styling
+                with ui.row().classes("card-header w-full justify-between items-center p-4"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.icon("trending_up", size="1.5rem").classes("text-green-400")
+                        ui.label("Live Quotes").classes("card-title")
+
+                    with ui.row().classes("items-center gap-2"):
+                        ui.button(icon="refresh").props("flat round").classes("text-cyan-400 refresh-button")
+                        ui.button(icon="settings").props("flat round").classes("text-gray-400")
+
+                ui.separator().classes("card-separator")
+
+                # Watchlist content with enhanced styling
+                watchlist_display_area = ui.column().classes("watchlist-content w-full p-2")
+
+
+
     # Enhanced watchlist refresh function
     async def refresh_watchlist_ltps():
         """Refresh watchlist with enhanced styling"""
@@ -131,25 +120,25 @@ async def render_watchlist_page(fetch_api, user_storage, get_cached_instruments,
                 instrument_token = all_instruments_map.get(symbol_name)
 
                 # Enhanced watchlist item with glassmorphism effect
-                with ui.row().classes("watchlist-item w-full justify-between items-center p-3 mb-2"):
+                with ui.row().classes("watchlist-item w-full items-center p-3 mb-2"):
 
-                    # Symbol column with enhanced styling
+                    # Symbol column with enhanced styling - matches header w-1/3
                     with ui.column().classes("w-1/3 gap-1"):
                         ui.label(symbol_name).classes("font-semibold text-white text-sm symbol-text")
                         ui.label("NSE").classes("text-xs text-gray-400")
 
-                    # Price column
+                    # Price column - matches header w-1/4
                     ltp_container = ui.column().classes("w-1/4 items-end")
                     with ltp_container:
                         ltp_label = ui.label("Fetching...").classes("text-right font-mono text-white price-text")
 
-                    # Change column
+                    # Change column - matches header w-1/4
                     change_container = ui.column().classes("w-1/4 items-end")
                     with change_container:
                         change_label = ui.label("--").classes("text-right text-sm change-text")
                         change_pct_label = ui.label("--").classes("text-right text-xs change-pct-text")
 
-                    # Actions column with enhanced styling
+                    # Actions column - matches header w-1/6
                     with ui.row().classes("w-1/6 justify-end gap-2"):
                         async def remove_from_watchlist(sym=symbol_name):
                             watchlist_symbols.remove(sym)
@@ -185,15 +174,12 @@ async def render_watchlist_page(fetch_api, user_storage, get_cached_instruments,
 
                             with change_container:
                                 change_container.clear()
-                                with ui.row().classes("items-center gap-1"):
+                                with ui.row().classes("items-center gap-1 justify-end"):
                                     ui.icon(trend_icon, size="0.75rem").classes(change_class)
                                     ui.label(f"{change:+.2f}").classes(
                                         f"text-sm {change_class} change-text font-semibold")
-                                ui.label(f"({change_pct:+.2f}%)").classes(f"text-xs {change_class} change-pct-text")
-
-                            # Apply border color based on change
-                            border_class = "watchlist-positive" if change > 0 else "watchlist-negative" if change < 0 else "watchlist-neutral"
-                            # Note: This would need to be applied to the watchlist-item element
+                                ui.label(f"({change_pct:+.2f}%)").classes(
+                                    f"text-xs {change_class} change-pct-text text-right")
 
                         else:
                             ltp_label.text = "N/A"

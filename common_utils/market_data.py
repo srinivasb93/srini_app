@@ -2,11 +2,16 @@
 This module fetches data from NSE API
 """
 import datetime
-
+import json
 import pandas as pd
 import requests
-from common_utils import read_write_sql_data as rd
+from common_utils import fetch_load_db_data as rd
 import datetime as dt
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
+logger = logging.getLogger(__name__)
 
 headers = {
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -56,17 +61,160 @@ class MarketData:
             "NIFTY COMMODITIES", "NIFTY MNC", "NIFTY INDIA CONSUMPTION",  "NIFTY MIDCAP LIQUID 15",
             "NIFTY SERVICES SECTOR", "NIFTY INDIA DIGITAL", "NIFTY INDIA MANUFACTURING"]
 
-    def get_corporate_actions_data(self, stock_type=None, event='all'):
+    @staticmethod
+    def get_corporate_actions(symbol, event_type='corporate_actions'):
         """
-        Get corporate actions for all stocks or for selected stock
+        Get corporate actions for a given symbol and event type
+        :param symbol: Stock symbol
+        :param event_type: Type of corporate action
+        (e.g., 'latest_announcements', 'corporate_actions', 'shareholdings_patterns', 'financial_results', 'borad_meeting')
+        :return: DataFrame with corporate actions
         """
-        url = self.base_url
-        event_type = self.event_type
+        url = f"https://www.nseindia.com/api/top-corp-info?symbol={symbol}&market=equities"
+        try:
+            payload = fetch_nse_data(url)
+            return payload[event_type]
+        except Exception:
+            logger.error(f"Error fetching corporate actions for {symbol}")
+            return pd.DataFrame()
 
-        # fetch data from nse api
-        response = requests.get(url, headers=headers)
-        data = response.json()
-        return data
+    @staticmethod
+    def fetch_and_load_nse_events():
+        output = fetch_nse_data('https://www.nseindia.com/api/event-calendar')
+        if not output or 'data' not in output:
+            logger.info(f"No NSE events found ")
+            return "No data found"
+        else:
+            # Load data to SQL
+            df = pd.DataFrame(output['data'])
+            df['eventDate'] = pd.to_datetime(df['eventDate'], format='%d-%b-%Y')
+            df['eventType'] = df['eventType'].str.lower()
+            df.rename(columns={'symbol': 'Symbol', 'eventDate': 'Event_Date', 'eventType': 'Event_Type',
+                               'description': 'Description'}, inplace=True)
+            msg = rd.load_data_to_sql(data_to_load=df, table_name='NSE_EVENTS')
+            logger.info(msg)
+            return "Success" if "success" in msg else "Failure"
+
+    @staticmethod
+    def nse_get_quote(symbol):
+        payload = fetch_nse_data('https://www.nseindia.com/api/equity-stockIndices?index=SECURITIES%20IN%20F%26O')
+        for m in range(len(payload['data'])):
+            if payload['data'][m]['symbol'] == symbol.upper():
+                return payload['data'][m]
+        return {}
+
+    @staticmethod
+    def nse_symbol_quote(symbol):
+        payload = {}
+        try:
+            payload = fetch_nse_data('https://www.nseindia.com/api/quote-equity?symbol=' + symbol)
+            payload = payload['priceInfo']
+        except KeyError:
+            print("Getting Error While Fetching.")
+        return payload
+
+    @staticmethod
+    def nse_fno_quote(symbol):
+        payload = {}
+        try:
+            payload = fetch_nse_data('https://www.nseindia.com/api/quote-derivative?symbol=' + symbol)
+        except KeyError:
+            print("Getting Error While Fetching.")
+        return payload
+
+    def equity_history_virgin(self, symbol, series, start_date, end_date):
+        url = 'https://www.nseindia.com/api/historical/cm/equity?symbol=' + symbol + '&series=["' + series + '"]&from=' + start_date + '&to=' + end_date
+
+        payload = fetch_nse_data(url)
+        return pd.DataFrame.from_records(payload["data"])
+
+    def equity_history(self, symbol, series, start_date, end_date):
+        # We are getting the input in text. So it is being converted to Datetime object from String.
+        start_date = datetime.datetime.strptime(start_date, "%d-%m-%Y")
+        end_date = datetime.datetime.strptime(end_date, "%d-%m-%Y")
+        logging.info("Starting Date: " + str(start_date))
+        logging.info("Ending Date: " + str(end_date))
+
+        # We are calculating the difference between the days
+        diff = end_date - start_date
+        logging.info("Total Number of Days: " + str(diff.days))
+        logging.info("Total FOR Loops in the program: " + str(int(diff.days / 40)))
+        logging.info("Remainder Loop: " + str(diff.days - (int(diff.days / 40) * 40)))
+
+        total = pd.DataFrame()
+        for i in range(0, int(diff.days / 40)):
+            temp_date = (start_date + datetime.timedelta(days=(40))).strftime("%d-%m-%Y")
+            start_date = datetime.datetime.strftime(start_date, "%d-%m-%Y")
+
+            logging.info("Loop = " + str(i))
+            logging.info("====")
+            logging.info("Starting Date: " + str(start_date))
+            logging.info("Ending Date: " + str(temp_date))
+            logging.info("====")
+
+            # total=total.append(equity_history_virgin(symbol,series,start_date,temp_date))
+            # total=total.concat(equity_history_virgin(symbol,series,start_date,temp_date))
+            total = pd.concat([total, self.equity_history_virgin(symbol, series, start_date, temp_date)])
+
+            logging.info("Length of the Table: " + str(len(total)))
+
+            # Preparation for the next loop
+            start_date = datetime.datetime.strptime(temp_date, "%d-%m-%Y")
+
+        start_date = datetime.datetime.strftime(start_date, "%d-%m-%Y")
+        end_date = datetime.datetime.strftime(end_date, "%d-%m-%Y")
+
+        logging.info("End Loop")
+        logging.info("====")
+        logging.info("Starting Date: " + str(start_date))
+        logging.info("Ending Date: " + str(end_date))
+        logging.info("====")
+
+        # total=total.append(equity_history_virgin(symbol,series,start_date,end_date))
+        # total=total.concat(equity_history_virgin(symbol,series,start_date,end_date))
+        total = pd.concat([total, self.equity_history_virgin(symbol, series, start_date, end_date)])
+
+        logging.info("Finale")
+        logging.info("Length of the Total Dataset: " + str(len(total)))
+        payload = total.iloc[::-1].reset_index(drop=True)
+        return payload
+
+    @staticmethod
+    def security_wise_archive(from_date, to_date, symbol, series="ALL"):
+        base_url = "https://www.nseindia.com/api/historical/securityArchives"
+        url = f"{base_url}?from={from_date}&to={to_date}&symbol={symbol.upper()}&dataType=priceVolumeDeliverable&series={series.upper()}"
+        payload = fetch_nse_data(url)
+        return pd.DataFrame(payload['data'])
+
+    @staticmethod
+    def nse_get_fno_snapshot_live(mode="pandas"):
+        try:
+            if mode == "pandas":
+                positions = fetch_nse_data('https://www.nseindia.com/api/equity-stockIndices?index=SECURITIES%20IN%20F%26O')
+                df = pd.DataFrame(positions['data'])
+                df['lastUpdateTime'] = pd.to_datetime(df['timestamp'], format='%d-%b-%Y %H:%M:%S')
+                return df
+            else:
+                return fetch_nse_data('https://www.nseindia.com/api/equity-stockIndices?index=SECURITIES%20IN%20F%26O')
+        except:
+            return fetch_nse_data('https://www.nseindia.com/api/equity-stockIndices?index=SECURITIES%20IN%20F%26O')
+
+    def load_fno_snapshot_live(self, mode="pandas"):
+        """
+        Load FNO snapshot live data to SQL
+        :param mode: 'pandas' or 'raw'
+        :return: Success or Failure message
+        """
+        fno_snapshot = self.nse_get_fno_snapshot_live(mode=mode)
+        if mode == "pandas":
+            fno_snapshot.rename(columns={'symbol': 'Symbol', 'open': 'Open', 'high': 'High', 'low': 'Low',
+                                         'lastPrice': 'Close', 'previousClose': 'Prev_Close', 'change': 'Day_Change',
+                                         'pChange': 'Pct_Change', 'yearHigh': 'Year_High', 'yearLow': 'Year_Low',
+                                         'totalTradedVolume': 'Traded_Volume', 'totalTradedValue': 'Traded_Value',
+                                         'lastUpdateTime': 'Last_Updated'}, inplace=True)
+
+        msg = rd.load_data_to_sql(data_to_load=fno_snapshot, table_name='FNO_SNAPSHOT_LIVE')
+        return "Success" if "success" in msg else "Failure"
 
     def fetch_and_load_etf_data(self, as_df=True, load=True):
         url = self.base_url + "etf"
@@ -87,7 +235,7 @@ class MarketData:
             etf_data.drop('Info', axis=1, inplace=True)
 
             if load:
-                msg = rd.load_sql_data(data_to_load=etf_data, table_name='ETF_DATA')
+                msg = rd.load_data_to_sql(data_to_load=etf_data, table_name='ETF_DATA')
                 print(msg)
         return etf_data
 
@@ -108,7 +256,7 @@ class MarketData:
         Load indices data
         """
         data_to_load = self.get_nse_indices_data()
-        load_msg = rd.load_sql_data(data_to_load, table_name="NSE_INDICES_DATA")
+        load_msg = rd.load_data_to_sql(data_to_load, table_name="NSE_INDICES_DATA")
         print(load_msg)
         return "Success" if "success" in load_msg else "Failure"
 
@@ -157,7 +305,7 @@ class MarketData:
             table_name = stock_index.replace(" ", "_") + "_REF"
             if '&' in table_name:
                 table_name = table_name.replace('&', 'AND')
-            load_msg = rd.load_sql_data(data_to_load, table_name=table_name)
+            load_msg = rd.load_data_to_sql(data_to_load, table_name=table_name)
             if 'success' in load_msg:
                 status_list.append(True)
             else:
@@ -185,8 +333,47 @@ class MarketData:
             stock_idx_data.rename(columns={'Symbol': 'SYMBOL'}, inplace=True)
 
             all_stocks_df = pd.concat([all_stocks_df, stock_idx_data], ignore_index=True, axis=0)
-        load_msg = rd.load_sql_data(all_stocks_df, table_name='ALL_STOCKS')
+        load_msg = rd.load_data_to_sql(all_stocks_df, table_name='ALL_STOCKS')
         return "Success" if "success" in load_msg else "Failure"
+
+
+# # Nifty Indicies Site
+
+niftyindices_headers = {
+    'Connection': 'keep-alive',
+    'sec-ch-ua': '" Not;A Brand";v="99", "Google Chrome";v="91", "Chromium";v="91"',
+    'Accept': 'application/json, text/javascript, */*; q=0.01',
+    'DNT': '1',
+    'X-Requested-With': 'XMLHttpRequest',
+    'sec-ch-ua-mobile': '?0',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.77 Safari/537.36',
+    'Content-Type': 'application/json; charset=UTF-8',
+    'Origin': 'https://niftyindices.com',
+    'Sec-Fetch-Site': 'same-origin',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Dest': 'empty',
+    'Referer': 'https://niftyindices.com/reports/historical-data',
+    'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
+}
+
+def index_history(symbol,start_date,end_date):
+    data = {'cinfo': "{'name':'" + symbol + "','startDate':'" + start_date + "','endDate':'" + end_date + "','indexName':'" + symbol + "'}"}
+    payload = requests.post('https://niftyindices.com/Backpage.aspx/getHistoricalDBtoString', headers=niftyindices_headers,  json=data).json()
+    payload = json.loads(payload["d"])
+    payload=pd.DataFrame.from_records(payload)
+    return payload
+
+def index_pe_pb_div(symbol,start_date,end_date):
+    data = {'cinfo': "{'name':'" + symbol + "','startDate':'" + start_date + "','endDate':'" + end_date + "','indexName':'" + symbol + "'}"}
+    payload = requests.post('https://niftyindices.com/Backpage.aspx/getpepbHistoricaldataDBtoString', headers=niftyindices_headers,  json=data).json()
+    payload = json.loads(payload["d"])
+    payload=pd.DataFrame.from_records(payload)
+    return payload
+
+def get_bhavcopy(date):
+    date = date.replace("-","")
+    payload=pd.read_csv("https://archives.nseindia.com/products/content/sec_bhavdata_full_"+date+".csv")
+    return payload
 
 
 def load_index_and_stocks_data(load_type="Index_data_load"):
@@ -220,10 +407,21 @@ if __name__ == "__main__":
     # thematic_indices_list = []
     # indices_list = broad_indices_list + sector_indices_list + thematic_indices_list
     md = MarketData()
-    print(md.fetch_and_load_etf_data())
+    # print(md.fetch_and_load_etf_data())
+    # print(md.get_corporate_actions_data())
+    # print(md.nse_events())
+    print(md.nse_get_fno_snapshot_live())
+    # print(md.nse_fno_quote('SBIN'))
+    # print(md.equity_history('SBIN', 'EQ', '01-01-2023', '01-02-2023'))
+    # print(md.security_wise_archive('01-01-2023', '01-01-2024', 'SBIN', series='EQ'))
+    # print(md.nse_get_advances_declines())
     # data = md.fetch_index_pe_pb_div_data(start_date="1-1-2020",
     #                                      end_date="1-1-2025")
     # print(data)
     # print(md.load_index_stocks_data(indices_list))
     # print(md.load_all_stocks_table_with_stock_index(indices_list))
     # print(md.get_main_nse_indices_list())
+    # print(index_history("NIFTY 50", "01-01-2023", "01-01-2024"))
+    # print(index_pe_pb_div("NIFTY 50", "01-01-2023", "01-01-2024"))
+    # print(index_total_returns("NIFTY 50", "01-01-2023", "01-01-2024"))
+    # print(get_bhavcopy("2023-01-01"))

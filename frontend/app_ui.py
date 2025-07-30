@@ -15,7 +15,6 @@ from order_management import render_order_management
 from strategies import render_strategies_page
 from backtesting import render_backtesting_page
 from analytics import render_analytics_page
-from mutual_funds import render_mutual_funds_page
 from orderbook import render_order_book_page
 from portfolio import render_portfolio_page
 from positions import render_positions_page
@@ -243,7 +242,7 @@ def render_header():
 
         with ui.row().classes("items-center gap-2"):
             pages = ["Dashboard", "Order Management", "Order Book", "Positions",
-                     "Portfolio", "Mutual Funds", "Analytics", "Strategies", "SIP Strategy",
+                     "Portfolio", "Analytics", "Strategies", "SIP Strategy",
                      "Backtesting", "Live Trading", "Watchlist", "Settings"]
             for page_name in pages:
                 route = f"/{page_name.lower().replace(' ', '-')}"
@@ -252,14 +251,19 @@ def render_header():
 
         # Right side - Controls
         with ui.row().classes("items-center gap-4"):
-            # Status indicators
-            with ui.row().classes("items-center gap-2"):
-                ui.icon("circle", size="0.5rem").classes("text-green-400")
-                ui.label("Market Open").classes("text-sm")
+            # Market Status
+            with ui.row().classes("status-indicator market-status"):
+                ui.icon("circle", size="0.5rem").classes("status-dot")
+                ui.label("Market Open").classes("status-text")
 
-            # Current time
-            current_time = datetime.now().strftime("%H:%M:%S")
-            ui.label(current_time).classes("text-sm font-mono")
+            # Connection Status
+            with ui.row().classes("status-indicator connection-status"):
+                ui.icon("wifi", size="1rem").classes("text-cyan-400")
+                ui.label("Connected").classes("status-text")
+
+            # Current Time
+            current_time = datetime.now().strftime("%H:%M:%S IST")
+            ui.label(current_time).classes("status-text time-display")
 
             # Theme toggle
             ui.button(icon="brightness_6", on_click=toggle_theme).props("flat color=white round dense")
@@ -478,18 +482,6 @@ async def backtesting_page(client: Client):
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_backtesting_page(fetch_api, app.storage.user, await get_cached_instruments(broker))
-
-
-@ui.page('/mutual-funds')
-async def mutual_funds_page(client: Client):
-    await client.connected()
-    if not app.storage.user.get(STORAGE_TOKEN_KEY):
-        ui.navigate.to('/')
-        return
-    apply_theme_from_storage()
-    render_header()
-    broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
-    await render_mutual_funds_page(fetch_api, broker)
 
 
 @ui.page('/order-book')

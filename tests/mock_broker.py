@@ -1,3 +1,6 @@
+from unittest.mock import MagicMock
+
+
 class MockUpstoxApi:
     class OrderApi:
         def place_order(self, order, api_version="v2"):

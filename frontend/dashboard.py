@@ -59,7 +59,7 @@ async def render_dashboard_page(fetch_api, user_storage, get_cached_instruments)
 
             # Center Panel - Chart and Portfolio Overview (50% width)
             with ui.element('div').classes("dashboard-center-panel"):
-                await render_enhanced_chart_section(fetch_api, user_storage, get_cached_instruments,broker)
+                # await render_enhanced_chart_section(fetch_api, user_storage, get_cached_instruments,broker)
                 await render_enhanced_portfolio_section(fetch_api, user_storage, broker)
 
             # Right Panel - Quick Trade, Orders, Strategies, News (25% width)
@@ -88,23 +88,6 @@ def render_enhanced_dashboard_title(broker):
                 ui.chip("LIVE", color="green").classes("text-xs status-chip")
 
             ui.label("Real-time market data and portfolio management").classes("text-gray-400 dashboard-subtitle")
-
-        # Right side - Status indicators and quick stats
-        with ui.row().classes("items-center gap-6"):
-            # Market Status
-            with ui.row().classes("status-indicator market-status"):
-                ui.icon("circle", size="0.5rem").classes("status-dot")
-                ui.label("Market Open").classes("status-text")
-
-            # Connection Status
-            with ui.row().classes("status-indicator connection-status"):
-                ui.icon("wifi", size="1rem").classes("text-cyan-400")
-                ui.label("Connected").classes("status-text")
-
-            # Current Time
-            current_time = datetime.now().strftime("%H:%M:%S IST")
-            ui.label(current_time).classes("status-text time-display")
-
 
 async def render_enhanced_watchlist_section(fetch_api, user_storage, get_cached_instruments, broker):
     """Enhanced watchlist section using existing watchlist.py functionality"""

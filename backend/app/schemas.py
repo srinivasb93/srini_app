@@ -204,23 +204,32 @@ class MarginResponse(BaseModel):
     broker: str
 
 class QuoteResponse(BaseModel):
+    trading_symbol: str
     instrument_token: str
     last_price: float
+    net_change: float
+    pct_change: float
     volume: int
     average_price: Optional[float] = None
-    ohlc: Optional[Dict[str, float]] = None  # e.g., {"open": 100, "high": 105, "low": 98, "close": 102}
+    ohlc: Optional[Dict[str, float]] = None
+    depth: Optional[dict] = None
 
 class OHLCResponse(BaseModel):
     instrument_token: str
+    trading_symbol: str
     open: float
     high: float
     low: float
     close: float
+    previous_close: Optional[float] = None
     volume: Optional[int] = None
 
 class LTPResponse(BaseModel):
     instrument_token: str
+    trading_symbol: str
     last_price: float
+    volume: Optional[int] = None
+    previous_close: Optional[float] = None
 
 class HistoricalDataPoint(BaseModel):
     timestamp: datetime

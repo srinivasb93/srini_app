@@ -304,7 +304,7 @@ def merge_symbol_config_with_fallback(symbol_config: Dict, fallback_config: Dict
         return fallback_config.copy()
 
 
-async def get_user_apis_for_gtt(user_id: str, trading_db: AsyncSession) -> Dict:
+async def get_user_apis(user_id: str, trading_db: AsyncSession, all_apis: bool=False) -> Dict:
     """
     Get user APIs for GTT order placement
     FIXED: Uses direct database queries instead of importing from main.py
@@ -407,7 +407,7 @@ async def place_gtt_order_via_existing_api(
     """
     try:
         # Get user APIs without circular import
-        user_apis_dict = await get_user_apis_for_gtt(user_id, trading_db)
+        user_apis_dict = await get_user_apis(user_id, trading_db)
 
         if not user_apis_dict:
             logger.error(f"Could not get user APIs for user {user_id}")

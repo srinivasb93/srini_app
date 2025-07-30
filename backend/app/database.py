@@ -76,7 +76,7 @@ class DatabaseManager:
         if not config:
             raise ValueError(f"Database {database_name} not configured")
 
-        logger.info(f"🔧 Initializing {database_name} database engine...")
+        logger.info(f"Initializing {database_name} database engine...")
 
         try:
             # Enhanced engine configuration
@@ -112,7 +112,7 @@ class DatabaseManager:
             self.engines[database_name] = engine
             self.session_factories[database_name] = session_factory
 
-            logger.info(f"✅ {database_name} database initialized successfully")
+            logger.info(f"{database_name} database initialized successfully")
             return engine, session_factory
 
         except Exception as e:
@@ -130,7 +130,7 @@ class DatabaseManager:
                 await session.commit()
 
                 logger.info(
-                    f"✅ Database {database_name} connected successfully\n"
+                    f"Database {database_name} connected successfully\n"
                     f"   Server time: {row[1]}\n"
                     f"   PostgreSQL version: {row[2][:50]}..."
                 )
@@ -253,7 +253,7 @@ class DatabaseManager:
 
     async def close_all_sessions(self):
         """Close all active sessions gracefully"""
-        logger.info("🔄 Closing all active database sessions...")
+        logger.info("Closing all active database sessions...")
 
         # Copy the set to avoid modification during iteration
         active_sessions = list(self._active_sessions)
@@ -285,7 +285,7 @@ class DatabaseManager:
 
         # Clear the weak set
         self._active_sessions.clear()
-        logger.info("✅ All sessions closed")
+        logger.info("All sessions closed")
 
     async def close_all(self):
         """Gracefully close all database connections and engines"""
@@ -294,7 +294,7 @@ class DatabaseManager:
             return
 
         self._is_shutting_down = True
-        logger.info("🛑 Starting database manager shutdown...")
+        logger.info("Starting database manager shutdown...")
 
         try:
             # First, close all active sessions
@@ -311,7 +311,7 @@ class DatabaseManager:
 
                             # Dispose the engine
                             await eng.dispose()
-                            logger.info(f"✅ Engine {name} disposed successfully")
+                            logger.info(f"Engine {name} disposed successfully")
                         except Exception as e:
                             logger.error(f"❌ Error disposing engine {name}: {e}")
 
@@ -329,7 +329,7 @@ class DatabaseManager:
             self.session_factories.clear()
 
             self._shutdown_event.set()
-            logger.info("✅ Database manager shutdown completed")
+            logger.info("Database manager shutdown completed")
 
         except asyncio.TimeoutError:
             logger.warning("⚠️ Database shutdown timed out, forcing cleanup")
@@ -346,7 +346,7 @@ class DatabaseManager:
         if self._is_shutting_down:
             return
 
-        logger.info("🧹 Performing synchronous database cleanup...")
+        logger.info("Performing synchronous database cleanup...")
         try:
             # Try to run async cleanup if event loop is available
             try:
@@ -368,7 +368,7 @@ class DatabaseManager:
 
     async def init_all_databases(self):
         """Initialize all configured databases"""
-        logger.info("🔧 Initializing all databases...")
+        logger.info("Initializing all databases...")
 
         initialization_results = {}
 
@@ -376,7 +376,7 @@ class DatabaseManager:
             try:
                 await self.init_engine(db_name)
                 initialization_results[db_name] = "success"
-                logger.info(f"✅ {db_name} initialized successfully")
+                logger.info(f"{db_name} initialized successfully")
             except Exception as e:
                 initialization_results[db_name] = f"failed: {str(e)}"
                 logger.error(f"❌ Failed to initialize {db_name}: {e}")
@@ -388,7 +388,7 @@ class DatabaseManager:
         if not successful_dbs:
             raise Exception("Failed to initialize any databases")
 
-        logger.info(f"✅ Database initialization completed. Success: {len(successful_dbs)}/{len(self.db_configs)}")
+        logger.info(f"Database initialization completed. Success: {len(successful_dbs)}/{len(self.db_configs)}")
         return initialization_results
 
     def get_session_factory(self, database_name: str = 'trading_db'):
@@ -427,7 +427,7 @@ async def init_databases():
     """Initialize all databases - call this in main.py startup"""
     try:
         await db_manager.init_all_databases()
-        logger.info("🎉 All databases initialized successfully")
+        logger.info("All databases initialized successfully")
     except Exception as e:
         logger.error(f"❌ Database initialization failed: {e}")
         raise
