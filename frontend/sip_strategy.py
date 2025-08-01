@@ -3124,7 +3124,12 @@ class EnhancedSIPStrategy:
         except Exception as e:
             ui.notify(f"Error loading performance: {str(e)}", type="negative")
 
+def apply_enhanced_dashboard_styles():
+    """Apply enhanced CSS styles matching dashboard.py"""
+    ui.add_css('static/styles.css')
+
 async def render_sip_strategy_page(fetch_api, user_storage):
     """Render the enhanced SIP strategy UI"""
+    apply_enhanced_dashboard_styles()
     strategy = EnhancedSIPStrategy()
     await strategy.render(fetch_api, user_storage)

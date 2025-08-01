@@ -118,6 +118,10 @@ class BacktestMetrics:
             "CalmarRatio": float(calmar_ratio)
         }
 
+def apply_enhanced_dashboard_styles():
+    """Apply enhanced CSS styles matching dashboard.py"""
+    ui.add_css('static/styles.css')
+
 def convert_timestamps_to_iso(data):
     """Recursively convert pandas Timestamps and datetime objects to ISO strings"""
     if isinstance(data, (pd.Timestamp, datetime)):
@@ -559,6 +563,7 @@ def create_performance_charts(df, metrics, theme_mode="Dark"):
 
 
 async def render_backtesting_page(fetch_api, user_storage, instruments):
+    apply_enhanced_dashboard_styles()
     """Renders the backtesting UI with a modern two-column layout."""
     broker = user_storage.get("default_broker", "Zerodha")
     strategy_options = {}

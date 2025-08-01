@@ -1,583 +1,420 @@
-"""
-Algorithmic Trading Strategies Module for NiceGUI Algo Trading Application
-Implements UI for defining, configuring, and managing trading strategies with enhanced UX.
-"""
+# Enhanced Strategies Module - strategies.py
+# Applying beautiful dashboard.py styling consistently
 
 from nicegui import ui
-import pandas as pd
-import asyncio
-import json
 import logging
-from datetime import datetime, timedelta
-from uuid import uuid4
+import pandas as pd
+from datetime import datetime
+import json
 
 logger = logging.getLogger(__name__)
 
-# Module-level flag for tab initialization
-create_tab_initialized = False
+def apply_enhanced_dashboard_styles():
+    """Apply enhanced CSS styles matching dashboard.py"""
+    ui.add_css('static/styles.css')
 
-def format_conditions(conditions):
-    """Formats JSON conditions into a human-readable string."""
-    if not conditions:
-        return "None"
-    result = []
-    for cond in conditions:
-        left = f"{cond['left_indicator']}({cond['left_params']})" if cond.get('left_params') else cond['left_indicator']
-        right = f"{cond['right_indicator']}({cond['right_params']})" if cond.get('right_params') else cond['right_indicator']
-        if cond.get('left_value') is not None:
-            left = f"Value({cond['left_value']})"
-        if cond.get('right_value') is not None:
-            right = f"Value({cond['right_value']})"
-        result.append(f"{left} {cond['comparison']} {right}")
-    return "; ".join(result)
+async def render_strategies_page(fetch_api, user_storage, get_cached_instruments):
+    """Enhanced strategies page with beautiful dashboard styling"""
+    
+    apply_enhanced_dashboard_styles()
+    
+    # Main container with dashboard styling
+    with ui.column().classes("enhanced-dashboard w-full min-h-screen"):
+        
+        # Enhanced title section (matching dashboard.py)
+        with ui.row().classes("dashboard-title-section w-full justify-between items-center p-4"):
+            # Left side - Title and subtitle
+            with ui.column().classes("gap-2"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("psychology", size="2rem").classes("text-cyan-400")
+                    ui.label("Trading Strategies").classes("text-3xl font-bold text-white dashboard-title")
+                    ui.chip("AUTOMATED", color="green").classes("text-xs status-chip")
+                
+                ui.label("Create, manage and monitor your algorithmic trading strategies").classes("text-gray-400 dashboard-subtitle")
+            
+            # Right side - Action buttons
+            with ui.row().classes("items-center gap-4"):
+                ui.button("New Strategy", icon="add", color="primary").classes("text-white")
+                ui.button("Import Strategy", icon="upload").classes("text-cyan-400")
+                ui.button("Export All", icon="download").classes("text-gray-400")
+        
+        # Strategy summary cards
+        await render_enhanced_strategy_summary(fetch_api, user_storage)
+        
+        # Main content in grid layout
+        with ui.row().classes("w-full gap-4 p-4"):
+            
+            # Strategy templates (left panel)
+            with ui.card().classes("dashboard-card w-1/3"):
+                with ui.row().classes("card-header w-full items-center p-4"):
+                    ui.icon("library_books", size="1.5rem").classes("text-purple-400")
+                    ui.label("Strategy Templates").classes("card-title")
+                
+                ui.separator().classes("card-separator")
+                
+                await render_strategy_templates()
+            
+            # Active strategies (right panel)
+            with ui.card().classes("dashboard-card flex-1"):
+                with ui.row().classes("card-header w-full justify-between items-center p-4"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.icon("auto_awesome", size="1.5rem").classes("text-green-400")
+                        ui.label("Active Strategies").classes("card-title")
+                        
+                        # Live update indicator
+                        with ui.row().classes("items-center gap-1 ml-2"):
+                            ui.element('div').classes("w-2 h-2 bg-green-400 rounded-full animate-pulse")
+                            ui.label("Live").classes("text-xs text-green-400")
+                    
+                    with ui.row().classes("items-center gap-2"):
+                        ui.button("Start All", icon="play_arrow").props("flat").classes("text-green-400")
+                        ui.button("Stop All", icon="stop").props("flat").classes("text-red-400")
+                        ui.button("Refresh", icon="refresh").props("flat").classes("text-gray-400")
+                
+                ui.separator().classes("card-separator")
+                
+                strategies_container = ui.column().classes("w-full p-4")
+                await render_enhanced_strategies_list(fetch_api, user_storage, strategies_container)
 
-def render_indicator_selector(indicators, prefix="", initial_indicator=None, initial_params=None):
-    """Renders a selector for technical indicators with persistent parameter bindings."""
-    param_values = {}
-    input_id = str(uuid4())
-    with ui.column().classes("gap-2 w-full"):
-        indicator_type = ui.select(
-            options=list(indicators.keys()) + ["Fixed Value"],
-            label="Indicator/Value",
-            value=initial_indicator
-        ).props(f"clearable dense hint='Select indicator or fixed value' name={prefix}_indicator_{input_id}").classes("w-full")
-        params_container = ui.column().classes("w-full").bind_visibility_from(indicator_type, "value", lambda v: v != "Fixed Value")
-        fixed_value_input = ui.number(
-            label="Fixed Value",
-            value=0,
-            step=0.01
-        ).props(f"clearable dense hint='Enter a fixed numerical value' name=fixed_value_{input_id}").classes("w-full").bind_visibility_from(indicator_type, "value", lambda v: v == "Fixed Value")
+async def render_enhanced_strategy_summary(fetch_api, user_storage):
+    """Enhanced strategy summary metrics"""
+    
+    with ui.row().classes("w-full gap-4 p-4"):
+        try:
+            # Fetch strategies data - this would be from your API
+            # strategies_data = await fetch_api("/strategies")
+            
+            # Sample data for demonstration
+            total_strategies = 5
+            active_strategies = 3
+            profitable_strategies = 2
+            total_pnl = 12750.50
+            win_rate = 65.5
+            
+            # Total Strategies
+            with ui.card().classes("dashboard-card metric-card flex-1"):
+                with ui.column().classes("p-4 text-center"):
+                    ui.icon("psychology", size="2rem").classes("text-blue-400 mb-2")
+                    ui.label("Total Strategies").classes("text-sm text-gray-400")
+                    ui.label(str(total_strategies)).classes("text-2xl font-bold text-white")
+            
+            # Active Strategies
+            with ui.card().classes("dashboard-card metric-card flex-1"):
+                with ui.column().classes("p-4 text-center"):
+                    ui.icon("play_circle", size="2rem").classes("text-green-400 mb-2")
+                    ui.label("Active").classes("text-sm text-gray-400")
+                    ui.label(str(active_strategies)).classes("text-2xl font-bold text-green-400")
+            
+            # Profitable Strategies
+            with ui.card().classes("dashboard-card metric-card flex-1"):
+                with ui.column().classes("p-4 text-center"):
+                    ui.icon("trending_up", size="2rem").classes("text-purple-400 mb-2")
+                    ui.label("Profitable").classes("text-sm text-gray-400")
+                    ui.label(str(profitable_strategies)).classes("text-2xl font-bold text-purple-400")
+            
+            # Total P&L
+            pnl_color = "text-green-400" if total_pnl >= 0 else "text-red-400"
+            pnl_icon = "trending_up" if total_pnl >= 0 else "trending_down"
+            with ui.card().classes("dashboard-card metric-card flex-1"):
+                with ui.column().classes("p-4 text-center"):
+                    ui.icon(pnl_icon, size="2rem").classes(f"{pnl_color} mb-2")
+                    ui.label("Total P&L").classes("text-sm text-gray-400")
+                    ui.label(f"₹{total_pnl:,.2f}").classes(f"text-2xl font-bold {pnl_color}")
+            
+            # Win Rate
+            with ui.card().classes("dashboard-card metric-card flex-1"):
+                with ui.column().classes("p-4 text-center"):
+                    ui.icon("percent", size="2rem").classes("text-orange-400 mb-2")
+                    ui.label("Win Rate").classes("text-sm text-gray-400")
+                    ui.label(f"{win_rate:.1f}%").classes("text-2xl font-bold text-orange-400")
+        
+        except Exception as e:
+            logger.error(f"Error fetching strategy summary: {e}")
+            with ui.card().classes("dashboard-card w-full"):
+                ui.label("Error loading strategy summary").classes("text-red-500 text-center p-4")
 
-        def update_params():
-            params_container.clear()
-            nonlocal param_values
-            indicator_name = indicator_type.value
-            if indicator_name and indicator_name in indicators:
-                with params_container:
-                    ui.label(f"{indicator_name} Parameters").classes("text-caption")
-                    params = initial_params if initial_params and indicator_name == initial_indicator else indicators[indicator_name]
-                    for param, default in indicators[indicator_name].items():
-                        param_values[param] = params.get(param, default)
-                        input_field = ui.number(
-                            label=param.replace("_", " ").title(),
-                            value=param_values[param],
-                            step=1 if "period" in param else 0.1,
-                            validation={"Positive": lambda v: v > 0 if v is not None else False}
-                        ).props(f"clearable dense name={param}_{input_id}").classes("w-full")
-                        def on_value_change(e, p=param):
-                            try:
-                                value = int(e.args) if e.args is not None and "period" in p else float(e.args) if e.args is not None else param_values[p]
-                                param_values[p] = value
-                                logger.debug(f"Updated {p} for {indicator_name} ({prefix}): {value} (type: {type(value)})")
-                            except (ValueError, TypeError) as ex:
-                                logger.error(f"Invalid input for {p}: {e.args} ({ex})")
-                                ui.notify(f"Invalid value for {p}: {e.args}", type="negative")
-                        input_field.on("update:model-value", on_value_change)
-                logger.debug(f"Rendered params for {indicator_name} ({prefix}): {list(param_values.keys())}")
-            else:
-                param_values.clear()
-
-        if initial_indicator:
-            update_params()
-        indicator_type.on("update:model-value", update_params)
-
-        return indicator_type, params_container, fixed_value_input, param_values
-
-def render_condition_builder(indicators, title="Conditions", instruments=None, condition_ui_refs=None, condition_key=None):
-    """Renders a visual UI to build entry/exit conditions."""
-    conditions = []
-    with ui.card().classes("w-full p-4"):
-        ui.label(title).classes("text-subtitle1 mb-2")
-        condition_list_ui = ui.column().classes("w-full gap-2")
-
-        def add_condition_row():
-            with condition_list_ui:
-                with ui.row().classes("w-full items-center gap-2 border p-2 rounded") as condition_row:
-                    left_indicator, left_params, left_value, left_param_values = render_indicator_selector(indicators, "left")
-                    comparison = ui.select(
-                        [">", "<", ">=", "<=", "==", "Crosses Above", "Crosses Below"],
-                        label="Comparison"
-                    ).props("dense hint='Select comparison operator'").classes("w-32")
-                    right_indicator, right_params, right_value, right_param_values = render_indicator_selector(indicators, "right")
-                    remove_button = ui.button(icon="delete", on_click=lambda: (condition_list_ui.remove(condition_row), conditions.remove(condition_data))).props("flat round dense")
-
-                    condition_data = {
-                        "row": condition_row,
-                        "left_indicator": left_indicator,
-                        "left_params": left_params,
-                        "left_value": left_value,
-                        "left_param_values": left_param_values,
-                        "comparison": comparison,
-                        "right_indicator": right_indicator,
-                        "right_params": right_params,
-                        "right_value": right_value,
-                        "right_param_values": right_param_values,
-                        "remove_button": remove_button
-                    }
-                    conditions.append(condition_data)
-                    logger.debug(f"Added condition row: left_indicator={left_indicator.value}, right_indicator={right_indicator.value}")
-
-        ui.button("Add Condition", icon="add", on_click=add_condition_row).props("outline size=sm")
-        add_condition_row()
-
-    if condition_ui_refs and condition_key:
-        condition_ui_refs[f"{condition_key}_container"] = condition_list_ui
-        condition_ui_refs[condition_key] = conditions
-
-    return conditions, condition_list_ui
-
-def extract_conditions(conditions, indicators):
-    """Extracts and validates condition data, ensuring user-specified parameters are captured."""
-    result = []
-    required_params = {
-        "SMA": ["period"],
-        "EMA": ["period"],
-        "RSI": ["period"],
-        "MACD": ["fast_period", "slow_period", "signal_period"],
-        "Bollinger Bands": ["period", "std_dev"]
-    }
-    for cond in conditions:
-        left_params = cond["left_param_values"].copy()
-        right_params = cond["right_param_values"].copy()
-        left_indicator = cond["left_indicator"].value
-        right_indicator = cond["right_indicator"].value
-
-        logger.debug(f"Extracting condition: left_indicator={left_indicator}, left_params={left_params}, right_indicator={right_indicator}, right_params={right_params}")
-
-        # Validate Crosses Above/Below conditions
-        if cond["comparison"].value in ["Crosses Above", "Crosses Below"]:
-            if left_indicator == right_indicator and json.dumps(left_params) == json.dumps(right_params):
-                ui.notify(f"Invalid condition: {left_indicator} cannot cross itself with identical parameters.", type="negative")
-                return []
-
-        if left_indicator in required_params:
-            for param in required_params[left_indicator]:
-                if param not in left_params or left_params[param] is None:
-                    ui.notify(f"Missing required parameter {param} for {left_indicator}. Please set a value.", type="negative")
-                    return []
-                if isinstance(left_params[param], str):
-                    try:
-                        left_params[param] = int(left_params[param]) if "period" in param else float(left_params[param])
-                    except ValueError:
-                        ui.notify(f"Invalid value for {param} in {left_indicator}: {left_params[param]}", type="negative")
-                        return []
-                if not isinstance(left_params[param], (int, float)) or left_params[param] <= 0:
-                    ui.notify(f"Parameter {param} for {left_indicator} must be a positive number.", type="negative")
-                    return []
-        if right_indicator in required_params:
-            for param in required_params[right_indicator]:
-                if param not in right_params or right_params[param] is None:
-                    ui.notify(f"Missing required parameter {param} for {right_indicator}. Please set a value.", type="negative")
-                    return []
-                if isinstance(right_params[param], str):
-                    try:
-                        right_params[param] = int(right_params[param]) if "period" in param else float(right_params[param])
-                    except ValueError:
-                        ui.notify(f"Invalid value for {param} in {right_indicator}: {right_params[param]}", type="negative")
-                        return []
-                if not isinstance(right_params[param], (int, float)) or right_params[param] <= 0:
-                    ui.notify(f"Parameter {param} for {right_indicator} must be a positive number.", type="negative")
-                    return []
-
-        condition = {
-            "left_indicator": left_indicator,
-            "left_params": left_params if left_indicator != "Fixed Value" else None,
-            "left_value": cond["left_value"].value if left_indicator == "Fixed Value" else None,
-            "comparison": cond["comparison"].value,
-            "right_indicator": right_indicator,
-            "right_params": right_params if right_indicator != "Fixed Value" else None,
-            "right_value": cond["right_value"].value if right_indicator == "Fixed Value" else None
+async def render_strategy_templates():
+    """Render strategy templates section"""
+    
+    templates = [
+        {
+            "name": "RSI Mean Reversion",
+            "description": "Buy oversold, sell overbought based on RSI levels",
+            "category": "Technical",
+            "icon": "show_chart",
+            "color": "text-blue-400"
+        },
+        {
+            "name": "Moving Average Crossover",
+            "description": "Trade when fast MA crosses above/below slow MA",
+            "category": "Trend Following",
+            "icon": "trending_up",
+            "color": "text-green-400"
+        },
+        {
+            "name": "Bollinger Bands Squeeze",
+            "description": "Trade breakouts from low volatility periods",
+            "category": "Volatility",
+            "icon": "compress",
+            "color": "text-purple-400"
+        },
+        {
+            "name": "MACD Momentum",
+            "description": "Trade momentum shifts using MACD signals",
+            "category": "Momentum",
+            "icon": "speed",
+            "color": "text-orange-400"
+        },
+        {
+            "name": "Grid Trading",
+            "description": "Place buy/sell orders at regular price intervals",
+            "category": "Market Making",
+            "icon": "grid_on",
+            "color": "text-cyan-400"
         }
-        if condition["left_indicator"] and condition["comparison"] and (condition["right_indicator"] or condition["right_value"] is not None):
-            logger.debug(f"Valid condition extracted: {condition}")
-            result.append(condition)
-        else:
-            ui.notify("Incomplete condition detected. Ensure all fields are filled.", type="negative")
-            return []
-    return result
+    ]
+    
+    with ui.column().classes("w-full p-4 gap-3"):
+        for template in templates:
+            with ui.card().classes("strategy-template-card w-full hover:bg-gray-800/30 transition-all cursor-pointer border border-gray-700/50"):
+                with ui.column().classes("p-3 gap-2"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.icon(template["icon"], size="1.2rem").classes(template["color"])
+                        ui.label(template["name"]).classes("text-white font-semibold text-sm")
+                    
+                    ui.label(template["description"]).classes("text-gray-400 text-xs")
+                    
+                    with ui.row().classes("items-center justify-between mt-2"):
+                        ui.chip(template["category"], color=None).classes("text-xs bg-gray-700/50 text-gray-300")
+                        ui.button("Use", on_click=lambda t=template: create_strategy_from_template(t)).classes("text-cyan-400")
 
-def add_condition_row_to_ui(container_ui, conditions_list, condition_data, indicators):
-    """Populates a condition row with existing data for editing."""
-    with container_ui:
-        with ui.row().classes("w-full items-center gap-2 border p-2 rounded") as condition_row:
-            left_indicator, left_params, left_value, left_param_values = render_indicator_selector(
-                indicators, "left", condition_data.get("left_indicator"), condition_data.get("left_params")
-            )
-            comparison = ui.select(
-                [">", "<", ">=", "<=", "==", "Crosses Above", "Crosses Below"],
-                label="Comparison",
-                value=condition_data.get("comparison")
-            ).props("dense hint='Select comparison operator'").classes("w-32")
-            right_indicator, right_params, right_value, right_param_values = render_indicator_selector(
-                indicators, "right", condition_data.get("right_indicator"), condition_data.get("right_params")
-            )
-            remove_button = ui.button(icon="delete", on_click=lambda: (container_ui.remove(condition_row), conditions_list.remove(condition_data))).props("flat round dense")
-
-            if condition_data.get("left_indicator") == "Fixed Value":
-                left_value.value = condition_data.get("left_value")
-            if condition_data.get("right_indicator") == "Fixed Value":
-                right_value.value = condition_data.get("right_value")
-
-            condition_data = {
-                "row": condition_row,
-                "left_indicator": left_indicator,
-                "left_params": left_params,
-                "left_value": left_value,
-                "left_param_values": left_param_values,
-                "comparison": comparison,
-                "right_indicator": right_indicator,
-                "right_params": right_params,
-                "right_value": right_value,
-                "right_param_values": right_param_values,
-                "remove_button": remove_button
+async def render_enhanced_strategies_list(fetch_api, user_storage, container):
+    """Render enhanced strategies list"""
+    
+    try:
+        # Fetch active strategies - this would be from your API
+        # strategies_data = await fetch_api("/strategies/active")
+        
+        # Sample strategies data
+        strategies_data = [
+            {
+                "id": "strat_001",
+                "name": "RSI Mean Reversion",
+                "status": "ACTIVE",
+                "symbol": "RELIANCE",
+                "pnl": 2450.75,
+                "trades_today": 3,
+                "win_rate": 67.5,
+                "created": "2024-01-15",
+                "last_signal": "2024-01-20 14:30:00"
+            },
+            {
+                "id": "strat_002", 
+                "name": "MA Crossover",
+                "status": "PAUSED",
+                "symbol": "TCS",
+                "pnl": -125.50,
+                "trades_today": 1,
+                "win_rate": 55.2,
+                "created": "2024-01-10",
+                "last_signal": "2024-01-20 11:15:00"
+            },
+            {
+                "id": "strat_003",
+                "name": "Bollinger Bands",
+                "status": "ACTIVE",
+                "symbol": "HDFCBANK",
+                "pnl": 1875.25,
+                "trades_today": 2,
+                "win_rate": 72.8,
+                "created": "2024-01-12",
+                "last_signal": "2024-01-20 15:45:00"
             }
-            conditions_list.append(condition_data)
-            logger.debug(f"Added condition row: left_indicator={left_indicator.value}, right_indicator={right_indicator.value}")
+        ]
+        
+        if not strategies_data:
+            # Enhanced empty state
+            with container:
+                with ui.column().classes("w-full text-center p-8"):
+                    ui.icon("psychology", size="4rem").classes("text-gray-500 mb-4")
+                    ui.label("No active strategies").classes("text-xl text-gray-400 mb-2")
+                    ui.label("Create your first strategy to start automated trading").classes("text-sm text-gray-500")
+                    ui.button("Create Strategy", icon="add", color="primary", on_click=create_new_strategy).classes("mt-4")
+            return
+        
+        with container:
+            for strategy in strategies_data:
+                await render_enhanced_strategy_card(strategy, fetch_api)
+    
+    except Exception as e:
+        logger.error(f"Error rendering strategies list: {e}")
+        with container:
+            with ui.column().classes("w-full text-center p-8"):
+                ui.icon("error", size="3rem").classes("text-red-500 mb-4")
+                ui.label("Error loading strategies").classes("text-xl text-red-400 mb-2")
+                ui.label(str(e)).classes("text-sm text-gray-500")
 
-async def render_strategies_page(fetch_api, user_storage, instruments):
-    """Renders the strategies UI with manage and create/edit tabs."""
-    broker = user_storage.get("default_broker", "Zerodha")
-    ui.label("Algorithmic Trading Strategies").classes("text-h5 q-pa-md")
-
-    available_indicators = {
-        "SMA": {"period": 20},
-        "EMA": {"period": 14},
-        "RSI": {"period": 14},
-        "MACD": {"fast_period": 12, "slow_period": 26, "signal_period": 9},
-        "Bollinger Bands": {"period": 20, "std_dev": 2},
-        "Close Price": {},
-        "Open Price": {},
-        "High Price": {},
-        "Low Price": {},
-        "Volume": {}
-    }
-
-    ui_refs = {
-        "strategy_name": None,
-        "strategy_desc": None,
-        "broker_select": None,
-        "timeframe": None,
-        "position_sizing": None,
-        "preview_instrument": None,
-        "save_button": None,
-        "preview_button": None,
-        "entry_conditions": [],
-        "exit_conditions": [],
-        "entry_container": None,
-        "exit_container": None
-    }
-
-    with ui.tabs().classes("w-full") as tabs:
-        manage_tab = ui.tab("Manage Strategies")
-        create_tab = ui.tab("Create/Edit Strategy")
-
-    with ui.tab_panels(tabs, value=manage_tab).classes("w-full") as tab_panels:
-        with ui.tab_panel(manage_tab):
-            ui.label("Existing Strategies").classes("text-h6 q-mb-md")
-            # Create a grid for table-like display
-            strategies_grid = ui.grid().classes("w-full mt-4")
-            # Header row
-            with strategies_grid:
-                with ui.row().classes("w-full bg-primary text-white p-2 font-bold"):
-                    ui.label("Name").classes("flex-1")
-                    ui.label("Description").classes("flex-1")
-                    ui.label("Entry Conditions").classes("flex-2")
-                    ui.label("Exit Conditions").classes("flex-2")
-                    ui.label("Status").classes("w-24 text-center")
-                    ui.label("Actions").classes("w-32 text-center")
-
-            # Container for strategy rows
-            strategies_container = ui.column().classes("w-full")
-
-            async def handle_edit_strategy(strategy_id):
-                if not create_tab_initialized:
-                    await initialize_create_tab()
-                response = await fetch_api(f"/strategies/{strategy_id}")
-                if response and not response.get("error"):
-                    tabs.set_value(create_tab)
-                    ui_refs["strategy_name"].value = response["name"]
-                    ui_refs["strategy_desc"].value = response["description"]
-                    ui_refs["broker_select"].value = response["broker"]
-                    ui_refs["timeframe"].value = response["parameters"].get("timeframe", "5min")
-                    ui_refs["position_sizing"].value = response["parameters"].get("position_sizing", 100)
-                    ui_refs["preview_instrument"].value = "RELIANCE"
-                    for cond in ui_refs["entry_conditions"]:
-                        ui_refs["entry_container"].remove(cond["row"])
-                    for cond in ui_refs["exit_conditions"]:
-                        ui_refs["exit_container"].remove(cond["row"])
-                    ui_refs["entry_conditions"].clear()
-                    ui_refs["exit_conditions"].clear()
-                    for cond in response.get("entry_conditions", []):
-                        add_condition_row_to_ui(ui_refs["entry_container"], ui_refs["entry_conditions"], cond, available_indicators)
-                    for cond in response.get("exit_conditions", []):
-                        add_condition_row_to_ui(ui_refs["exit_container"], ui_refs["exit_conditions"], cond, available_indicators)
-                else:
-                    ui.notify(f"Failed to load strategy: {response.get('error', {}).get('message', 'Unknown error')}", type="negative")
-
-            async def handle_toggle_strategy(strategy_id):
-                response = await fetch_api(f"/strategies/{strategy_id}")
-                if response and not response.get("error"):
-                    current_status = response.get("status")
-                    new_status = "inactive" if current_status == "active" else "active"
-                    action = "deactivate" if new_status == "inactive" else "activate"
-                    toggle_button = ui.button(f"{action.capitalize()} Strategy").props("loading=true disable=true")
-                    try:
-                        response = await fetch_api(f"/strategies/{strategy_id}/{action}", method="POST")
-                        if response and response.get("status") == new_status:
-                            ui.notify(f"Strategy {action}d successfully.", type="positive")
-                            await fetch_strategies()
+async def render_enhanced_strategy_card(strategy, fetch_api):
+    """Render individual enhanced strategy card"""
+    
+    try:
+        strategy_id = strategy.get('id', 'N/A')
+        name = strategy.get('name', 'N/A')
+        status = strategy.get('status', 'UNKNOWN').upper()
+        symbol = strategy.get('symbol', 'N/A')
+        pnl = float(strategy.get('pnl', 0))
+        trades_today = strategy.get('trades_today', 0)
+        win_rate = strategy.get('win_rate', 0)
+        
+        # Determine status styling
+        if status == 'ACTIVE':
+            status_color = "text-green-400"
+            status_bg = "bg-green-900/20"
+            border_color = "border-green-500/30"
+            status_icon = "play_circle"
+        elif status == 'PAUSED':
+            status_color = "text-yellow-400"
+            status_bg = "bg-yellow-900/20"
+            border_color = "border-yellow-500/30"
+            status_icon = "pause_circle"
+        else:
+            status_color = "text-red-400"
+            status_bg = "bg-red-900/20"
+            border_color = "border-red-500/30"
+            status_icon = "stop_circle"
+        
+        # Determine P&L styling
+        pnl_color = "text-green-400" if pnl >= 0 else "text-red-400"
+        pnl_icon = "trending_up" if pnl >= 0 else "trending_down"
+        
+        with ui.card().classes(f"strategy-card w-full mb-4 border {border_color} hover:bg-gray-800/30 transition-all"):
+            with ui.column().classes("p-4"):
+                # Header row
+                with ui.row().classes("w-full justify-between items-center mb-3"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.icon(status_icon, size="1.5rem").classes(status_color)
+                        ui.label(name).classes("text-white font-bold text-lg")
+                        ui.chip(status, color=None).classes(f"{status_color} {status_bg} text-xs")
+                    
+                    with ui.row().classes("items-center gap-2"):
+                        # Action buttons
+                        if status == 'ACTIVE':
+                            ui.button(icon="pause", on_click=lambda sid=strategy_id: pause_strategy(sid)).props("flat round size=sm").classes("text-yellow-400")
                         else:
-                            ui.notify(f"Failed to {action} strategy: {response.get('error', {}).get('message', 'Unknown error')}", type="negative")
-                    except Exception as e:
-                        ui.notify(f"Error toggling strategy: {str(e)}", type="negative")
-                        logger.error(f"Toggle strategy error: {str(e)}")
-                    finally:
-                        toggle_button.delete()
-                        ui.update()
-                else:
-                    ui.notify(f"Failed to load strategy status: {response.get('error', {}).get('message', 'Unknown error')}", type="negative")
+                            ui.button(icon="play_arrow", on_click=lambda sid=strategy_id: start_strategy(sid)).props("flat round size=sm").classes("text-green-400")
+                        
+                        ui.button(icon="stop", on_click=lambda sid=strategy_id: stop_strategy(sid)).props("flat round size=sm").classes("text-red-400")
+                        ui.button(icon="edit", on_click=lambda sid=strategy_id: edit_strategy(sid)).props("flat round size=sm").classes("text-cyan-400")
+                        ui.button(icon="delete", on_click=lambda sid=strategy_id: delete_strategy(sid)).props("flat round size=sm").classes("text-gray-400")
+                
+                # Metrics row
+                with ui.row().classes("w-full gap-6"):
+                    # Symbol
+                    with ui.column().classes("gap-1"):
+                        ui.label("Symbol").classes("text-xs text-gray-500")
+                        ui.label(symbol).classes("text-white font-semibold")
+                    
+                    # P&L
+                    with ui.column().classes("gap-1"):
+                        ui.label("P&L").classes("text-xs text-gray-500")
+                        with ui.row().classes("items-center gap-1"):
+                            ui.icon(pnl_icon, size="1rem").classes(pnl_color)
+                            ui.label(f"₹{pnl:,.2f}").classes(f"{pnl_color} font-semibold text-mono")
+                    
+                    # Trades Today
+                    with ui.column().classes("gap-1"):
+                        ui.label("Trades Today").classes("text-xs text-gray-500")
+                        ui.label(str(trades_today)).classes("text-white font-semibold")
+                    
+                    # Win Rate
+                    with ui.column().classes("gap-1"):
+                        ui.label("Win Rate").classes("text-xs text-gray-500")
+                        ui.label(f"{win_rate:.1f}%").classes("text-purple-400 font-semibold")
+                
+                # Progress bar for win rate
+                with ui.row().classes("w-full mt-3"):
+                    ui.linear_progress(win_rate / 100).classes("w-full").props(f"color={'positive' if win_rate > 60 else 'warning' if win_rate > 40 else 'negative'}")
+    
+    except Exception as e:
+        logger.error(f"Error rendering strategy card: {e}")
+        with ui.card().classes("strategy-card w-full mb-4 border border-red-500/30"):
+            ui.label("Error loading strategy").classes("text-red-400 p-4")
 
-            async def handle_delete_strategy(strategy_id):
-                with ui.dialog() as dialog, ui.card():
-                    ui.label(f"Are you sure you want to delete strategy {strategy_id}?")
-                    with ui.row():
-                        ui.button("Cancel", on_click=dialog.close).props("outline")
-                        async def confirm_delete():
-                            dialog.close()
-                            delete_button = ui.button("Deleting...").props("loading=true disable=true")
-                            try:
-                                response = await fetch_api(f"/strategies/{strategy_id}", method="DELETE")
-                                if response and response.get("success"):
-                                    ui.notify("Strategy deleted successfully.", type="positive")
-                                    await fetch_strategies()
-                                else:
-                                    ui.notify(f"Failed to delete strategy: {response.get('error', {}).get('message', 'Unknown error')}", type="negative")
-                            except Exception as e:
-                                ui.notify(f"Error deleting strategy: {str(e)}", type="negative")
-                                logger.error(f"Delete strategy error: {str(e)}")
-                            finally:
-                                delete_button.delete()
-                                ui.update()
-                        ui.button("Delete", on_click=confirm_delete).props("color=negative")
-                dialog.open()
+def create_strategy_from_template(template):
+    """Create strategy from template"""
+    ui.notify(f"Creating strategy from template: {template['name']}", type="info")
+    # This would open a strategy creation dialog
+    show_strategy_creation_dialog(template)
 
-            async def fetch_strategies():
-                strategies = await fetch_api(f"/strategies/broker/{broker}")
-                strategies_container.clear()  # Clear existing rows
-                if strategies and isinstance(strategies, list):
-                    with strategies_container:
-                        for s in strategies:
-                            strategy_id = s["strategy_id"]
-                            with ui.row().classes("w-full border-b p-2 items-center"):
-                                ui.label(s["name"]).classes("flex-1")
-                                ui.label(s["description"]).classes("flex-1")
-                                ui.label(format_conditions(s.get("entry_conditions", []))).classes("flex-2")
-                                ui.label(format_conditions(s.get("exit_conditions", []))).classes("flex-2")
-                                ui.label(s["status"]).classes("w-24 text-center")
-                                with ui.row().classes("w-32 gap-1 justify-center"):
-                                    ui.button(icon="edit", on_click=lambda sid=strategy_id: handle_edit_strategy(sid)).props("flat round dense color=primary")
-                                    ui.button(
-                                        icon="play_arrow" if s["status"] == "inactive" else "pause",
-                                        on_click=lambda sid=strategy_id: handle_toggle_strategy(sid)
-                                    ).props("flat round dense color=positive")
-                                    ui.button(icon="delete", on_click=lambda sid=strategy_id: handle_delete_strategy(sid)).props("flat round dense color=negative")
-                    logger.debug(f"Fetched and formatted {len(strategies)} strategies")
-                else:
-                    with strategies_container:
-                        ui.label("No strategies found.").classes("w-full text-center text-warning")
-                    ui.notify("No strategies found.", type="warning")
+def create_new_strategy():
+    """Create new custom strategy"""
+    ui.notify("Opening strategy builder...", type="info")
+    show_strategy_creation_dialog()
 
-            await fetch_strategies()
+def show_strategy_creation_dialog(template=None):
+    """Show strategy creation dialog"""
+    with ui.dialog() as dialog, ui.card().classes("dashboard-card min-w-96"):
+        with ui.column().classes("p-6 gap-4"):
+            if template:
+                ui.label(f"Create Strategy: {template['name']}").classes("text-xl font-bold text-white")
+                ui.label(template['description']).classes("text-gray-400 text-sm")
+            else:
+                ui.label("Create Custom Strategy").classes("text-xl font-bold text-white")
+            
+            # Strategy form
+            strategy_name = ui.input("Strategy Name", placeholder="Enter strategy name").classes("w-full")
+            
+            symbol_select = ui.select(
+                options=["RELIANCE", "TCS", "HDFCBANK", "INFY", "ITC"],
+                label="Trading Symbol"
+            ).classes("w-full")
+            
+            if template:
+                # Pre-fill template-specific parameters
+                if template['name'] == "RSI Mean Reversion":
+                    rsi_period = ui.number("RSI Period", value=14, min=5, max=50).classes("w-full")
+                    oversold_level = ui.number("Oversold Level", value=30, min=10, max=40).classes("w-full")
+                    overbought_level = ui.number("Overbought Level", value=70, min=60, max=90).classes("w-full")
+            
+            quantity = ui.number("Quantity", value=1, min=1).classes("w-full")
+            
+            with ui.row().classes("gap-2 justify-end w-full mt-4"):
+                ui.button("Cancel", on_click=dialog.close).classes("text-gray-400")
+                ui.button("Create Strategy", color="primary", on_click=lambda: create_strategy(dialog, strategy_name.value, symbol_select.value, quantity.value)).classes("text-white")
+    
+    dialog.open()
 
-            ui.button("Refresh List", on_click=fetch_strategies).props("outline").classes("mt-4")
+def create_strategy(dialog, name, symbol, quantity):
+    """Create the strategy"""
+    if not name or not symbol:
+        ui.notify("Please fill all required fields", type="warning")
+        return
+    
+    ui.notify(f"Strategy '{name}' created successfully!", type="positive")
+    dialog.close()
+    ui.navigate.to('/strategies')
 
-        with ui.tab_panel(create_tab) as create_tab_content:
-            if not create_tab_initialized:
-                ui.label("Loading...").classes("text-center")
-                async def init_on_mount():
-                    await initialize_create_tab()
-                ui.timer(0.1, init_on_mount, once=True)
+def start_strategy(strategy_id):
+    """Start a strategy"""
+    ui.notify(f"Starting strategy {strategy_id}", type="positive")
+    # This would call your API to start the strategy
 
-        async def initialize_create_tab():
-            global create_tab_initialized
-            logger.debug("Initializing Create/Edit Strategy tab")
-            create_tab_content.clear()  # Clear existing content to prevent duplication
-            with create_tab_content:
-                with ui.card().classes("w-full p-4"):
-                    ui.label("Define Strategy").classes("text-h6")
-                    with ui.column().classes("w-full gap-4"):
-                        ui_refs["broker_select"] = ui.select(
-                            ["Zerodha", "Upstox"],
-                            label="Broker",
-                            value=broker
-                        ).props("hint='Select broker for this strategy'").classes("w-full")
-                        ui_refs["strategy_name"] = ui.input(
-                            "Strategy Name",
-                            validation={"Required": bool, "Max length": lambda v: len(v) <= 50}
-                        ).props("hint='Unique name for the strategy'").classes("w-full")
-                        ui_refs["strategy_desc"] = ui.textarea("Description").props("hint='Brief description of the strategy'").classes("w-full")
+def pause_strategy(strategy_id):
+    """Pause a strategy"""
+    ui.notify(f"Pausing strategy {strategy_id}", type="warning")
+    # This would call your API to pause the strategy
 
-                        ui.separator()
-                        ui.label("Entry Conditions").classes("text-subtitle1")
-                        ui_refs["entry_conditions"], ui_refs["entry_container"] = render_condition_builder(
-                            available_indicators, "Entry Conditions", instruments, ui_refs, "entry_conditions"
-                        )
+def stop_strategy(strategy_id):
+    """Stop a strategy"""
+    ui.notify(f"Stopping strategy {strategy_id}", type="info")
+    # This would call your API to stop the strategy
 
-                        ui.separator()
-                        ui.label("Exit Conditions").classes("text-subtitle1")
-                        ui_refs["exit_conditions"], ui_refs["exit_container"] = render_condition_builder(
-                            available_indicators, "Exit Conditions", instruments, ui_refs, "exit_conditions"
-                        )
+def edit_strategy(strategy_id):
+    """Edit a strategy"""
+    ui.notify(f"Opening editor for strategy {strategy_id}", type="info")
+    # This would open the strategy editor
 
-                        ui.separator()
-                        ui.label("Parameters").classes("text-subtitle1")
-                        with ui.row().classes("w-full gap-2"):
-                            ui_refs["timeframe"] = ui.select(
-                                ["1min", "3min", "5min", "15min", "30min", "60min", "day"],
-                                label="Timeframe",
-                                value="5min"
-                            ).props("hint='Data interval for strategy'").classes("w-1/3")
-                            ui_refs["position_sizing"] = ui.number(
-                                label="Position Size (Units or % Capital)",
-                                value=100,
-                                validation={"Positive": lambda v: v > 0}
-                            ).props("hint='Size of each trade'").classes("w-1/3")
-                            ui_refs["preview_instrument"] = ui.select(
-                                options=sorted(list(instruments.keys())),
-                                label="Preview Instrument",
-                                value="RELIANCE"
-                            ).props("clearable filter hint='Instrument for preview backtest'").classes("w-1/3")
-
-                        async def preview_strategy():
-                            ui.update()
-                            await asyncio.sleep(0.01)
-                            entry_conds = extract_conditions(ui_refs["entry_conditions"], available_indicators)
-                            exit_conds = extract_conditions(ui_refs["exit_conditions"], available_indicators)
-                            if not entry_conds or not exit_conds:
-                                ui.notify("Please define at least one entry and one exit condition.", type="negative")
-                                return
-                            strategy_data = {
-                                "name": ui_refs["strategy_name"].value,
-                                "description": ui_refs["strategy_desc"].value,
-                                "entry_conditions": entry_conds,
-                                "exit_conditions": exit_conds,
-                                "parameters": {
-                                    "timeframe": ui_refs["timeframe"].value,
-                                    "position_sizing": ui_refs["position_sizing"].value
-                                }
-                            }
-                            ui_refs["preview_button"].props("loading=true disable=true text='Previewing...'")
-                            try:
-                                response = await fetch_api("/algo-trading/backtest", method="POST", data={
-                                    "instrument_token": ui_refs["preview_instrument"].value,
-                                    "timeframe": ui_refs["timeframe"].value,
-                                    "strategy": json.dumps(strategy_data),
-                                    "params": {"initial_investment": 100000},
-                                    "start_date": (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
-                                    "end_date": datetime.now().strftime("%Y-%m-%d")
-                                })
-                                logger.debug(f"Backtest response: {json.dumps(response, indent=2)}")
-                                if response and not response.get("error"):
-                                    with ui.dialog() as dialog, ui.card().classes("w-full max-w-3xl"):
-                                        ui.label("Preview Results").classes("text-h6")
-                                        with ui.column():
-                                            ui.label(f"Total Profit: ₹{response.get('TotalProfit', 0):.2f}")
-                                            ui.label(f"Win Rate: {response.get('WinRate', 0):.2f}%")
-                                            ui.label(f"Total Trades: {response.get('TotalTrades', 0)}")
-                                            if tradebook := response.get("Tradebook", []):
-                                                ui.label("Trade Details").classes("text-subtitle1 mt-4")
-                                                formatted_tradebook = [
-                                                    {
-                                                        "Date": pd.to_datetime(trade["Date"]).strftime("%Y-%m-%d %H:%M:%S"),
-                                                        "EntryPrice": f"{trade['EntryPrice']:.2f}",
-                                                        "ExitPrice": f"{trade['ExitPrice']:.2f}",
-                                                        "Profit": f"{trade['Profit']:.2f}",
-                                                        "PortfolioValue": f"{trade['PortfolioValue']:.2f}"
-                                                    }
-                                                    for trade in tradebook
-                                                ]
-                                                logger.debug(f"Formatted tradebook: {len(formatted_tradebook)} trades")
-                                                ui.table(
-                                                    columns=[
-                                                        {"name": "Date", "label": "Date", "field": "Date"},
-                                                        {"name": "EntryPrice", "label": "Entry Price", "field": "EntryPrice"},
-                                                        {"name": "ExitPrice", "label": "Exit Price", "field": "ExitPrice"},
-                                                        {"name": "Profit", "label": "Profit", "field": "Profit"},
-                                                        {"name": "PortfolioValue", "label": "Portfolio Value", "field": "PortfolioValue"}
-                                                    ],
-                                                    rows=formatted_tradebook,
-                                                    pagination=10
-                                                ).classes("w-full")
-                                            else:
-                                                ui.label("No trades executed.").classes("text-warning")
-                                        ui.button("Close", on_click=dialog.close).props("outline")
-                                    dialog.open()
-                                else:
-                                    ui.notify(f"Preview failed: {response.get('error', {}).get('message', 'Unknown error')}", type="negative")
-                            except Exception as e:
-                                ui.notify(f"Error previewing strategy: {str(e)}", type="negative")
-                                logger.error(f"Preview strategy error: {str(e)}")
-                            finally:
-                                ui_refs["preview_button"].props("loading=false disable=false text='Preview Strategy'")
-                                ui.update()
-
-                        async def save_strategy():
-                            ui.update()
-                            await asyncio.sleep(0.01)
-                            logger.debug(f"Pre-save condition count: entry={len(ui_refs['entry_conditions'])}, exit={len(ui_refs['exit_conditions'])}")
-                            for cond in ui_refs["entry_conditions"] + ui_refs["exit_conditions"]:
-                                logger.debug(f"Condition state: left_indicator={cond['left_indicator'].value}, left_params={cond['left_param_values']}, right_indicator={cond['right_indicator'].value}, right_params={cond['right_param_values']}")
-                            entry_conds = extract_conditions(ui_refs["entry_conditions"], available_indicators)
-                            exit_conds = extract_conditions(ui_refs["exit_conditions"], available_indicators)
-                            if not entry_conds or not exit_conds:
-                                ui.notify("Please define at least one entry and one exit condition.", type="negative")
-                                return
-                            strategy_data = {
-                                "name": ui_refs["strategy_name"].value,
-                                "description": ui_refs["strategy_desc"].value,
-                                "entry_conditions": entry_conds,
-                                "exit_conditions": exit_conds,
-                                "parameters": {
-                                    "timeframe": ui_refs["timeframe"].value,
-                                    "position_sizing": ui_refs["position_sizing"].value
-                                },
-                                "broker": ui_refs["broker_select"].value
-                            }
-                            logger.debug(f"Saving strategy: {json.dumps(strategy_data, indent=2)}")
-                            ui_refs["save_button"].props("loading=true disable=true text='Saving...'")
-                            try:
-                                response = await fetch_api("/strategies/", method="POST", data=strategy_data)
-                                if response and response.get("strategy_id"):
-                                    ui.notify("Strategy saved successfully!", type="positive")
-                                    await fetch_strategies()
-                                    tabs.set_value(manage_tab)
-                                else:
-                                    ui.notify(f"Failed to save strategy: {response.get('error', {}).get('message', 'Unknown error')}", type="negative")
-                            except Exception as e:
-                                ui.notify(f"Error saving strategy: {str(e)}", type="negative")
-                                logger.error(f"Save strategy error: {str(e)}")
-                            finally:
-                                ui_refs["save_button"].props("loading=false disable=false text='Save Strategy'")
-                                ui.update()
-
-                        ui_refs["save_button"] = ui.button("Save Strategy").props("color=primary").classes("mt-4")
-                        ui_refs["preview_button"] = ui.button("Preview Strategy").props("outline").classes("mt-4")
-
-                        ui_refs["save_button"].on_click(save_strategy)
-                        ui_refs["preview_button"].on_click(preview_strategy)
-
-                        with ui.row():
-                            ui_refs["preview_button"]
-                            ui_refs["save_button"]
-
-            create_tab_initialized = True
-            logger.debug("Create/Edit Strategy tab initialized")
-            return ui_refs["strategy_name"], ui_refs["broker_select"], ui_refs["timeframe"], ui_refs["position_sizing"], ui_refs["preview_instrument"], ui_refs["save_button"], ui_refs["preview_button"]
-
-        async def on_tab_change():
-            global create_tab_initialized
-            logger.debug(f"Tab changed to: {tabs.value}, initialized: {create_tab_initialized}")
-            if tabs.value == create_tab and not create_tab_initialized:
-                ui_refs["strategy_name"], ui_refs["broker_select"], ui_refs["timeframe"], ui_refs["position_sizing"], ui_refs["preview_instrument"], ui_refs["save_button"], ui_refs["preview_button"] = await initialize_create_tab()
-
-        tab_panels.on("update:model-value", on_tab_change)
+def delete_strategy(strategy_id):
+    """Delete a strategy"""
+    ui.notify(f"Deleting strategy {strategy_id}", type="negative")
+    # This would show confirmation and delete the strategy

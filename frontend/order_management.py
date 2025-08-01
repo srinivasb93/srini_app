@@ -1,7 +1,6 @@
-"""
-Order Management Module for NiceGUI Algo Trading Application
-Implements regular, scheduled, and GTT orders functionality
-"""
+# Enhanced Order Management Module - order_management.py
+# Complete implementation with beautiful dashboard styling
+# Preserves all existing functionality: Regular, Scheduled, GTT, and Auto Orders
 
 from nicegui import ui
 import pandas as pd
@@ -12,12 +11,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Order Management Page
+def apply_enhanced_dashboard_styles():
+    """Apply enhanced CSS styles matching dashboard.py"""
+    ui.add_css('static/styles.css')
+
 async def render_order_management(fetch_api, user_storage, instruments):
-    """Render the complete order management page with all order types"""
-    
-    broker = user_storage.get('broker', 'Zerodha')
-    
+    """Render the complete enhanced order management page with all order types"""
+
+    apply_enhanced_dashboard_styles()
+
+    broker = user_storage.get('default_broker', 'Zerodha')
+
     # Fetch instruments if not already available
     if not instruments:
         instruments_data = await fetch_api(f"/instruments/{broker}/?exchange=NSE")
@@ -25,1071 +29,912 @@ async def render_order_management(fetch_api, user_storage, instruments):
             # Filter for equity instruments
             equity_instruments = [i for i in instruments_data if i.get('segment') == 'NSE' and i.get('instrument_type') == 'EQ']
             instruments.update({i['trading_symbol']: i['instrument_token'] for i in equity_instruments})
-    
-    # Create tabs for different order types
-    with ui.tabs().classes('w-full') as tabs:
-        regular_tab = ui.tab('Regular Orders')
-        scheduled_tab = ui.tab('Scheduled Orders')
-        gtt_tab = ui.tab('GTT Orders')
-        auto_tab = ui.tab('Auto Orders')
-    
-    with ui.tab_panels(tabs).classes('w-full'):
-        with ui.tab_panel(regular_tab):
-            await render_regular_orders(fetch_api, user_storage, instruments)
-        
-        with ui.tab_panel(scheduled_tab):
-            await render_scheduled_orders(fetch_api, user_storage, instruments)
-        
-        with ui.tab_panel(gtt_tab):
-            await render_gtt_orders(fetch_api, user_storage, instruments)
-        
-        with ui.tab_panel(auto_tab):
-            await render_auto_orders(fetch_api, user_storage, instruments)
 
+    # Main container with dashboard styling
+    with ui.column().classes("enhanced-dashboard w-full min-h-screen"):
+
+        # Enhanced title section (matching dashboard.py)
+        with ui.row().classes("dashboard-title-section w-full justify-between items-center p-4"):
+            # Left side - Title and subtitle
+            with ui.column().classes("gap-2"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("shopping_cart", size="2rem").classes("text-cyan-400")
+                    ui.label(f"Order Management - {broker}").classes("text-3xl font-bold text-white dashboard-title")
+                    ui.chip("LIVE", color="green").classes("text-xs status-chip")
+
+                ui.label("Place, schedule and manage all your trading orders").classes("text-gray-400 dashboard-subtitle")
+
+            # Right side - Action buttons
+            with ui.row().classes("items-center gap-4"):
+                ui.button("Quick Buy", icon="trending_up", color="green").classes("text-white")
+                ui.button("Quick Sell", icon="trending_down", color="red").classes("text-white")
+                ui.button("Basket Orders", icon="shopping_basket").classes("text-cyan-400")
+
+        # Enhanced tabs for different order types
+        with ui.card().classes("dashboard-card w-full m-4"):
+            with ui.tabs().props("dense indicator-color=cyan").classes('w-full') as tabs:
+                regular_tab = ui.tab('regular', label='Regular Orders', icon='flash_on')
+                scheduled_tab = ui.tab('scheduled', label='Scheduled Orders', icon='schedule')
+                gtt_tab = ui.tab('gtt', label='GTT Orders', icon='notification_important')
+                auto_tab = ui.tab('auto', label='Auto Orders', icon='auto_awesome')
+
+            with ui.tab_panels(tabs, value='regular').classes('w-full'):
+                with ui.tab_panel('regular'):
+                    await render_enhanced_regular_orders(fetch_api, user_storage, instruments)
+
+                with ui.tab_panel('scheduled'):
+                    await render_enhanced_scheduled_orders(fetch_api, user_storage, instruments)
+
+                with ui.tab_panel('gtt'):
+                    await render_enhanced_gtt_orders(fetch_api, user_storage, instruments)
+
+                with ui.tab_panel('auto'):
+                    await render_enhanced_auto_orders(fetch_api, user_storage, instruments)
+
+async def render_enhanced_regular_orders(fetch_api, user_storage, instruments):
+    """Enhanced regular order placement form"""
+    broker = user_storage.get('default_broker', 'Zerodha')
+
+    with ui.row().classes("w-full gap-4 p-4"):
+
+        # Order placement form (left side)
+        with ui.card().classes("dashboard-card w-1/2"):
+            with ui.row().classes("card-header w-full items-center p-4"):
+                ui.icon("add_shopping_cart", size="1.5rem").classes("text-green-400")
+                ui.label("Place Regular Order").classes("card-title")
+
+            ui.separator().classes("card-separator")
+
+            # Track validation state for required fields
+            validation_state = {'symbol': False, 'quantity': False, 'price': True, 'trigger_price': True}
+
+            with ui.column().classes('w-full p-4 gap-4'):
+                # Symbol selection
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Symbol").classes("text-sm text-gray-400 w-1/4")
+                    symbol_options = sorted(list(instruments.keys())[:100]) if instruments else []
+                    symbol_select = ui.select(
+                        options=symbol_options,
+                        label="Select Symbol",
+                        with_input=True,
+                        new_value_mode="add-unique"
+                    ).classes('w-3/4').props("use-input input-debounce=300")
+                    symbol_select.on_value_change(lambda e: validation_state.update({'symbol': bool(e.value)}))
+
+                # Transaction type (Buy/Sell buttons)
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Action").classes("text-sm text-gray-400 w-1/4")
+                    with ui.row().classes('w-3/4 gap-2'):
+                        transaction_type = ui.toggle(['BUY', 'SELL'], value='BUY').classes('w-full')
+                        transaction_type.props('toggle-color=green toggle-text-color=white')
+
+                # Quantity
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Quantity").classes("text-sm text-gray-400 w-1/4")
+                    quantity = ui.number(
+                        label="Quantity",
+                        value=1,
+                        min=1,
+                        format='%d'
+                    ).classes('w-3/4')
+                    quantity.on_value_change(lambda e: validation_state.update({'quantity': e.value > 0}))
+
+                # Order type
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Order Type").classes("text-sm text-gray-400 w-1/4")
+                    order_type = ui.select(
+                        options=['MARKET', 'LIMIT', 'SL', 'SL-M'],
+                        value='MARKET',
+                        label="Order Type"
+                    ).classes('w-3/4')
+
+                # Price field (conditional)
+                with ui.row().classes('w-full items-center gap-4') as price_row:
+                    ui.label("Price").classes("text-sm text-gray-400 w-1/4")
+                    price_field = ui.number(
+                        label="Price",
+                        value=0,
+                        min=0,
+                        step=0.05,
+                        format='%.2f'
+                    ).classes('w-3/4')
+                    price_field.on_value_change(lambda e: validation_state.update(
+                        {'price': e.value > 0 if order_type.value in ['LIMIT', 'SL'] else True}))
+
+                # Trigger price field (conditional)
+                with ui.row().classes('w-full items-center gap-4') as trigger_row:
+                    ui.label("Trigger Price").classes("text-sm text-gray-400 w-1/4")
+                    trigger_price_field = ui.number(
+                        label="Trigger Price",
+                        value=0,
+                        min=0,
+                        step=0.05,
+                        format='%.2f'
+                    ).classes('w-3/4')
+                    trigger_price_field.on_value_change(lambda e: validation_state.update(
+                        {'trigger_price': e.value > 0 if order_type.value in ['SL', 'SL-M'] else True}))
+
+                # Product type
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Product").classes("text-sm text-gray-400 w-1/4")
+                    product_type = ui.select(
+                        options=['CNC', 'MIS', 'NRML'],
+                        value='CNC',
+                        label="Product Type"
+                    ).classes('w-3/4')
+
+                def update_price_fields():
+                    """Update visibility of price fields based on order type"""
+                    price_row.set_visibility(order_type.value in ['LIMIT', 'SL'])
+                    trigger_row.set_visibility(order_type.value in ['SL', 'SL-M'])
+
+                order_type.on_value_change(lambda: update_price_fields())
+                update_price_fields()
+
+                # Order summary card
+                with ui.card().classes("w-full bg-gray-800/50 border border-cyan-500/30 mt-4"):
+                    with ui.column().classes("p-3"):
+                        ui.label("Order Summary").classes("text-sm text-gray-400 mb-2")
+                        summary_label = ui.label("Select symbol and quantity").classes("text-white text-sm")
+
+                # Place order button
+                loading_container = ui.element('div')
+
+                async def place_regular_order():
+                    """Place regular order"""
+                    if not all(validation_state.values()):
+                        ui.notify("Please fill all required fields", type="warning")
+                        return
+
+                    order_data = {
+                        "trading_symbol": symbol_select.value,
+                        "transaction_type": transaction_type.value,
+                        "quantity": int(quantity.value),
+                        "order_type": order_type.value,
+                        "product_type": product_type.value,
+                        "broker": broker
+                    }
+
+                    if order_type.value in ['LIMIT', 'SL']:
+                        order_data["price"] = float(price_field.value)
+                    if order_type.value in ['SL', 'SL-M']:
+                        order_data["trigger_price"] = float(trigger_price_field.value)
+
+                    with loading_container:
+                        loading_container.clear()
+                        with ui.row().classes("items-center gap-2"):
+                            ui.spinner(size="sm")
+                            ui.label("Placing order...").classes("text-sm text-gray-400")
+
+                    try:
+                        response = await fetch_api(f"/orders/{broker}/place", method="POST", data=order_data)
+                        if response and response.get('order_id'):
+                            ui.notify(f"Order placed successfully: {response['order_id']}", type='positive')
+                            # Reset form
+                            quantity.value = 1
+                            price_field.value = 0
+                            trigger_price_field.value = 0
+                        else:
+                            ui.notify("Failed to place order", type='negative')
+                    except Exception as e:
+                        ui.notify(f"Error: {str(e)}", type='negative')
+                    finally:
+                        loading_container.clear()
+
+                ui.button('Place Order',
+                         on_click=lambda: asyncio.create_task(place_regular_order()),
+                         icon="send",
+                         color="primary").props('size=lg').classes('w-full mt-4')
+
+        # Recent orders display (right side)
+        with ui.card().classes("dashboard-card flex-1"):
+            with ui.row().classes("card-header w-full justify-between items-center p-4"):
+                with ui.row().classes("items-center gap-2"):
+                    ui.icon("receipt_long", size="1.5rem").classes("text-orange-400")
+                    ui.label("Recent Orders").classes("card-title")
+
+                ui.button("View All", icon="open_in_new", on_click=lambda: ui.navigate.to('/order-book')).props("flat").classes("text-cyan-400")
+
+            ui.separator().classes("card-separator")
+
+            # Recent orders table
+            recent_orders_container = ui.column().classes("w-full p-4")
+            await render_recent_orders_table(fetch_api, broker, recent_orders_container)
+
+async def render_enhanced_scheduled_orders(fetch_api, user_storage, instruments):
+    """Enhanced scheduled order placement form"""
+    broker = user_storage.get('default_broker', 'Zerodha')
+
+    with ui.row().classes("w-full gap-4 p-4"):
+
+        # Scheduled order form (left side)
+        with ui.card().classes("dashboard-card w-1/2"):
+            with ui.row().classes("card-header w-full items-center p-4"):
+                ui.icon("schedule", size="1.5rem").classes("text-yellow-400")
+                ui.label("Schedule Order").classes("card-title")
+
+            ui.separator().classes("card-separator")
+
+            validation_state = {'symbol': False, 'quantity': False, 'schedule_date': True, 'schedule_time': True}
+
+            with ui.column().classes('w-full p-4 gap-4'):
+                # Symbol selection
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Symbol").classes("text-sm text-gray-400 w-1/4")
+                    symbol_options = sorted(list(instruments.keys())[:100]) if instruments else []
+                    symbol_select = ui.select(
+                        options=symbol_options,
+                        label="Select Symbol",
+                        with_input=True
+                    ).classes('w-3/4')
+                    symbol_select.on_value_change(lambda e: validation_state.update({'symbol': bool(e.value)}))
+
+                # Transaction type
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Action").classes("text-sm text-gray-400 w-1/4")
+                    transaction_type = ui.toggle(['BUY', 'SELL'], value='BUY').classes('w-3/4')
+
+                # Quantity
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Quantity").classes("text-sm text-gray-400 w-1/4")
+                    quantity = ui.number("Quantity", value=1, min=1, format='%d').classes('w-3/4')
+                    quantity.on_value_change(lambda e: validation_state.update({'quantity': e.value > 0}))
+
+                # Order type
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Order Type").classes("text-sm text-gray-400 w-1/4")
+                    order_type = ui.select(['MARKET', 'LIMIT', 'SL', 'SL-M'], value='MARKET').classes('w-3/4')
+
+                # Price fields (conditional based on order type)
+                with ui.row().classes('w-full items-center gap-4') as price_row:
+                    ui.label("Price").classes("text-sm text-gray-400 w-1/4")
+                    price_field = ui.number("Price", value=0, min=0, step=0.05, format='%.2f').classes('w-3/4')
+
+                with ui.row().classes('w-full items-center gap-4') as trigger_row:
+                    ui.label("Trigger Price").classes("text-sm text-gray-400 w-1/4")
+                    trigger_price_field = ui.number("Trigger Price", value=0, min=0, step=0.05, format='%.2f').classes('w-3/4')
+
+                def update_price_fields():
+                    price_row.set_visibility(order_type.value in ['LIMIT', 'SL'])
+                    trigger_row.set_visibility(order_type.value in ['SL', 'SL-M'])
+
+                order_type.on_value_change(lambda: update_price_fields())
+                update_price_fields()
+
+                # Schedule settings
+                ui.label('Schedule Settings').classes('text-white font-semibold mt-4')
+
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Schedule Date").classes("text-sm text-gray-400 w-1/4")
+                    schedule_date = ui.date(
+                        value=(datetime.now().date() + timedelta(days=1)).strftime('%Y-%m-%d')
+                    ).classes('w-3/4')
+
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Schedule Time").classes("text-sm text-gray-400 w-1/4")
+                    schedule_time = ui.time(value='09:30').classes('w-3/4')
+
+                # Product type
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Product").classes("text-sm text-gray-400 w-1/4")
+                    product_type = ui.select(['CNC', 'MIS', 'NRML'], value='CNC').classes('w-3/4')
+
+                loading_container = ui.element('div')
+
+                async def schedule_order():
+                    """Schedule the order"""
+                    if not all(validation_state.values()):
+                        ui.notify("Please fill all required fields", type="warning")
+                        return
+
+                    # Combine date and time
+                    schedule_datetime = f"{schedule_date.value} {schedule_time.value}:00"
+
+                    order_data = {
+                        "trading_symbol": symbol_select.value,
+                        "transaction_type": transaction_type.value,
+                        "quantity": int(quantity.value),
+                        "order_type": order_type.value,
+                        "product_type": product_type.value,
+                        "schedule_datetime": schedule_datetime,
+                        "broker": broker
+                    }
+
+                    if order_type.value in ['LIMIT', 'SL']:
+                        order_data["price"] = float(price_field.value)
+                    if order_type.value in ['SL', 'SL-M']:
+                        order_data["trigger_price"] = float(trigger_price_field.value)
+
+                    with loading_container:
+                        loading_container.clear()
+                        with ui.row().classes("items-center gap-2"):
+                            ui.spinner(size="sm")
+                            ui.label("Scheduling order...").classes("text-sm text-gray-400")
+
+                    try:
+                        response = await fetch_api("/scheduled-orders/", method="POST", data=order_data)
+                        if response and response.get('order_id'):
+                            ui.notify(f"Order scheduled successfully: {response['order_id']}", type='positive')
+                        else:
+                            ui.notify("Failed to schedule order", type='negative')
+                    except Exception as e:
+                        ui.notify(f"Error: {str(e)}", type='negative')
+                    finally:
+                        loading_container.clear()
+
+                ui.button('Schedule Order',
+                         on_click=lambda: asyncio.create_task(schedule_order()),
+                         icon="schedule_send",
+                         color="warning").props('size=lg').classes('w-full mt-4')
+
+        # Scheduled orders list (right side)
+        with ui.card().classes("dashboard-card flex-1"):
+            with ui.row().classes("card-header w-full justify-between items-center p-4"):
+                ui.icon("schedule", size="1.5rem").classes("text-yellow-400")
+                ui.label("Scheduled Orders").classes("card-title")
+
+            ui.separator().classes("card-separator")
+
+            scheduled_orders_container = ui.column().classes("w-full p-4")
+            await render_scheduled_orders_table(fetch_api, broker, scheduled_orders_container)
+
+async def render_enhanced_gtt_orders(fetch_api, user_storage, instruments):
+    """Enhanced GTT (Good Till Triggered) order placement form"""
+    broker = user_storage.get('default_broker', 'Zerodha')
+
+    with ui.row().classes("w-full gap-4 p-4"):
+
+        # GTT order form (left side)
+        with ui.card().classes("dashboard-card w-1/2"):
+            with ui.row().classes("card-header w-full items-center p-4"):
+                ui.icon("notification_important", size="1.5rem").classes("text-red-400")
+                ui.label("Create GTT Order").classes("card-title")
+
+            ui.separator().classes("card-separator")
+
+            validation_state = {'symbol': False, 'quantity': False, 'trigger_price': False, 'limit_price': False}
+
+            with ui.column().classes('w-full p-4 gap-4'):
+                # Symbol selection
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Symbol").classes("text-sm text-gray-400 w-1/4")
+                    symbol_options = sorted(list(instruments.keys())[:100]) if instruments else []
+                    symbol_select = ui.select(
+                        options=symbol_options,
+                        label="Select Symbol",
+                        with_input=True
+                    ).classes('w-3/4')
+                    symbol_select.on_value_change(lambda e: validation_state.update({'symbol': bool(e.value)}))
+
+                # Transaction type
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Action").classes("text-sm text-gray-400 w-1/4")
+                    transaction_type = ui.toggle(['BUY', 'SELL'], value='BUY').classes('w-3/4')
+
+                # Quantity
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Quantity").classes("text-sm text-gray-400 w-1/4")
+                    quantity = ui.number("Quantity", value=1, min=1, format='%d').classes('w-3/4')
+                    quantity.on_value_change(lambda e: validation_state.update({'quantity': e.value > 0}))
+
+                # Trigger type
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Trigger Type").classes("text-sm text-gray-400 w-1/4")
+                    trigger_type = ui.select(['single', 'two_leg'], value='single', label="Trigger Type").classes('w-3/4')
+
+                # Trigger price
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Trigger Price").classes("text-sm text-gray-400 w-1/4")
+                    trigger_price = ui.number("Trigger Price", value=0, min=0, step=0.05, format='%.2f').classes('w-3/4')
+                    trigger_price.on_value_change(lambda e: validation_state.update({'trigger_price': e.value > 0}))
+
+                # Limit price
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Limit Price").classes("text-sm text-gray-400 w-1/4")
+                    limit_price = ui.number("Limit Price", value=0, min=0, step=0.05, format='%.2f').classes('w-3/4')
+                    limit_price.on_value_change(lambda e: validation_state.update({'limit_price': e.value > 0}))
+
+                # Two-leg GTT fields (conditional)
+                with ui.column().classes('w-full gap-4') as two_leg_container:
+                    ui.label('Second Leg Settings').classes('text-white font-semibold')
+
+                    with ui.row().classes('w-full items-center gap-4'):
+                        ui.label("Second Trigger").classes("text-sm text-gray-400 w-1/4")
+                        second_trigger_price = ui.number("Second Trigger Price", value=0, min=0, step=0.05, format='%.2f').classes('w-3/4')
+
+                    with ui.row().classes('w-full items-center gap-4'):
+                        ui.label("Second Limit").classes("text-sm text-gray-400 w-1/4")
+                        second_limit_price = ui.number("Second Limit Price", value=0, min=0, step=0.05, format='%.2f').classes('w-3/4')
+
+                def update_two_leg_visibility():
+                    two_leg_container.set_visibility(trigger_type.value == 'two_leg')
+
+                trigger_type.on_value_change(lambda: update_two_leg_visibility())
+                update_two_leg_visibility()
+
+                # Product type
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Product").classes("text-sm text-gray-400 w-1/4")
+                    product_type = ui.select(['CNC', 'MIS', 'NRML'], value='CNC').classes('w-3/4')
+
+                loading_container = ui.element('div')
+
+                async def create_gtt_order():
+                    """Create GTT order"""
+                    if not all(validation_state.values()):
+                        ui.notify("Please fill all required fields", type="warning")
+                        return
+
+                    order_data = {
+                        "trading_symbol": symbol_select.value,
+                        "transaction_type": transaction_type.value,
+                        "quantity": int(quantity.value),
+                        "trigger_type": trigger_type.value,
+                        "trigger_price": float(trigger_price.value),
+                        "limit_price": float(limit_price.value),
+                        "product_type": product_type.value,
+                        "broker": broker
+                    }
+
+                    if trigger_type.value == 'two_leg':
+                        order_data.update({
+                            "second_trigger_price": float(second_trigger_price.value),
+                            "second_limit_price": float(second_limit_price.value)
+                        })
+
+                    with loading_container:
+                        loading_container.clear()
+                        with ui.row().classes("items-center gap-2"):
+                            ui.spinner(size="sm")
+                            ui.label("Creating GTT order...").classes("text-sm text-gray-400")
+
+                    try:
+                        response = await fetch_api("/gtt-orders/", method="POST", data=order_data)
+                        if response and response.get('gtt_id'):
+                            ui.notify(f"GTT order created: {response['gtt_id']}", type='positive')
+                        else:
+                            ui.notify("Failed to create GTT order", type='negative')
+                    except Exception as e:
+                        ui.notify(f"Error: {str(e)}", type='negative')
+                    finally:
+                        loading_container.clear()
+
+                ui.button('Create GTT Order',
+                         on_click=lambda: asyncio.create_task(create_gtt_order()),
+                         icon="notification_add",
+                         color="negative").props('size=lg').classes('w-full mt-4')
+
+        # GTT orders list (right side)
+        with ui.card().classes("dashboard-card flex-1"):
+            with ui.row().classes("card-header w-full justify-between items-center p-4"):
+                ui.icon("notification_important", size="1.5rem").classes("text-red-400")
+                ui.label("Active GTT Orders").classes("card-title")
+
+            ui.separator().classes("card-separator")
+
+            gtt_orders_container = ui.column().classes("w-full p-4")
+            await render_gtt_orders_table(fetch_api, broker, gtt_orders_container)
+
+async def render_enhanced_auto_orders(fetch_api, user_storage, instruments):
+    """Enhanced auto order creation form"""
+    broker = user_storage.get('default_broker', 'Zerodha')
+
+    with ui.row().classes("w-full gap-4 p-4"):
+
+        # Auto order form (left side)
+        with ui.card().classes("dashboard-card w-1/2"):
+            with ui.row().classes("card-header w-full items-center p-4"):
+                ui.icon("auto_awesome", size="1.5rem").classes("text-purple-400")
+                ui.label("Create Auto Order").classes("card-title")
+
+            ui.separator().classes("card-separator")
+
+            with ui.column().classes('w-full p-4 gap-4'):
+                # Symbol selection
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Symbol").classes("text-sm text-gray-400 w-1/4")
+                    symbol_options = sorted(list(instruments.keys())[:100]) if instruments else []
+                    symbol_select = ui.select(options=symbol_options, label="Select Symbol", with_input=True).classes('w-3/4')
+
+                # Transaction type
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Action").classes("text-sm text-gray-400 w-1/4")
+                    transaction_type = ui.toggle(['BUY', 'SELL'], value='BUY').classes('w-3/4')
+
+                # Risk management
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Risk Per Trade (%)").classes("text-sm text-gray-400 w-1/4")
+                    risk_per_trade = ui.number("Risk %", value=2.0, min=0.1, max=10.0, step=0.1, format='%.1f').classes('w-3/4')
+
+                # Stop loss settings
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Stop Loss Type").classes("text-sm text-gray-400 w-1/4")
+                    stop_loss_type = ui.select(['percentage', 'atr', 'fixed'], value='percentage').classes('w-3/4')
+
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Stop Loss Value").classes("text-sm text-gray-400 w-1/4")
+                    stop_loss_value = ui.number("SL Value", value=2.0, min=0.1, step=0.1, format='%.1f').classes('w-3/4')
+
+                # Target settings
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Target Type").classes("text-sm text-gray-400 w-1/4")
+                    target_type = ui.select(['percentage', 'atr', 'fixed'], value='percentage').classes('w-3/4')
+
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Target Value").classes("text-sm text-gray-400 w-1/4")
+                    target_value = ui.number("Target Value", value=4.0, min=0.1, step=0.1, format='%.1f').classes('w-3/4')
+
+                # Product type
+                with ui.row().classes('w-full items-center gap-4'):
+                    ui.label("Product").classes("text-sm text-gray-400 w-1/4")
+                    product_type = ui.select(['CNC', 'MIS', 'NRML'], value='MIS').classes('w-3/4')
+
+                loading_container = ui.element('div')
+
+                async def create_auto_order():
+                    """Create auto order"""
+                    if not symbol_select.value:
+                        ui.notify("Please select a symbol", type="warning")
+                        return
+
+                    order_data = {
+                        "trading_symbol": symbol_select.value,
+                        "transaction_type": transaction_type.value,
+                        "risk_per_trade": float(risk_per_trade.value),
+                        "stop_loss_type": stop_loss_type.value,
+                        "stop_loss_value": float(stop_loss_value.value),
+                        "target_type": target_type.value,
+                        "target_value": float(target_value.value),
+                        "product_type": product_type.value,
+                        "broker": broker
+                    }
+
+                    with loading_container:
+                        loading_container.clear()
+                        with ui.row().classes("items-center gap-2"):
+                            ui.spinner(size="sm")
+                            ui.label("Creating auto order...").classes("text-sm text-gray-400")
+
+                    try:
+                        response = await fetch_api("/auto-orders/", method="POST", data=order_data)
+                        if response and response.get('auto_order_id'):
+                            ui.notify(f"Auto order created: {response['auto_order_id']}", type='positive')
+                        else:
+                            ui.notify("Failed to create auto order", type='negative')
+                    except Exception as e:
+                        ui.notify(f"Error: {str(e)}", type='negative')
+                    finally:
+                        loading_container.clear()
+
+                ui.button('Create Auto Order',
+                         on_click=lambda: asyncio.create_task(create_auto_order()),
+                         icon="auto_awesome",
+                         color="purple").props('size=lg').classes('w-full mt-4')
+
+        # Auto orders list (right side)
+        with ui.card().classes("dashboard-card flex-1"):
+            with ui.row().classes("card-header w-full justify-between items-center p-4"):
+                ui.icon("auto_awesome", size="1.5rem").classes("text-purple-400")
+                ui.label("Active Auto Orders").classes("card-title")
+
+            ui.separator().classes("card-separator")
+
+            auto_orders_container = ui.column().classes("w-full p-4")
+            await render_auto_orders_table(fetch_api, broker, auto_orders_container)
+
+# Helper functions for rendering order tables
+
+async def render_recent_orders_table(fetch_api, broker, container):
+    """Render recent orders table"""
+    try:
+        orders_data = await fetch_api(f"/orderbook/{broker}")
+
+        if not orders_data:
+            with container:
+                with ui.column().classes("w-full text-center p-8"):
+                    ui.icon("inbox", size="3rem").classes("text-gray-500 mb-4")
+                    ui.label("No recent orders").classes("text-lg text-gray-400 mb-2")
+                    ui.label("Your orders will appear here").classes("text-sm text-gray-500")
+            return
+
+        # Take only the 5 most recent orders
+        recent_orders = orders_data[:5] if len(orders_data) > 5 else orders_data
+
+        with container:
+            # Table header
+            with ui.row().classes("orders-header w-full p-2 text-xs font-semibold text-gray-400 border-b border-gray-700 mb-2"):
+                ui.label("Symbol").classes("w-24")
+                ui.label("Side").classes("w-16")
+                ui.label("Qty").classes("w-16 text-right")
+                ui.label("Price").classes("w-20 text-right")
+                ui.label("Status").classes("w-20")
+                ui.label("Time").classes("flex-1")
+
+            # Order rows
+            for order in recent_orders:
+                await render_order_row(order, fetch_api, broker)
+
+    except Exception as e:
+        logger.error(f"Error rendering recent orders: {e}")
+        with container:
+            ui.label("Error loading orders").classes("text-red-500 text-center p-4")
+
+async def render_order_row(order, fetch_api, broker):
+    """Render individual order row"""
+    try:
+        symbol = order.get('trading_symbol', 'N/A')
+        transaction_type = order.get('transaction_type', 'N/A')
+        quantity = order.get('quantity', 0)
+        price = order.get('price', 0)
+        status = order.get('status', 'UNKNOWN').upper()
+        order_time = order.get('order_timestamp', 'N/A')
+
+        # Format time
+        if order_time != 'N/A':
+            try:
+                if isinstance(order_time, str):
+                    dt = datetime.fromisoformat(order_time.replace('Z', '+00:00'))
+                    formatted_time = dt.strftime('%H:%M:%S')
+                else:
+                    formatted_time = str(order_time)
+            except:
+                formatted_time = 'N/A'
+        else:
+            formatted_time = 'N/A'
+
+        # Status styling
+        if status in ['COMPLETE', 'EXECUTED']:
+            status_color = "text-green-400"
+            border_color = "border-green-500/20"
+        elif status in ['OPEN', 'PENDING']:
+            status_color = "text-yellow-400"
+            border_color = "border-yellow-500/20"
+        else:
+            status_color = "text-red-400"
+            border_color = "border-red-500/20"
+
+        # Side styling
+        side_color = "text-green-400" if transaction_type.upper() == "BUY" else "text-red-400"
+
+        with ui.row().classes(f"order-row w-full p-2 hover:bg-gray-800/50 transition-all border-l-2 {border_color} mb-1 rounded-r-lg"):
+            ui.label(symbol).classes("w-24 text-white text-xs font-semibold")
+            ui.label(transaction_type).classes(f"w-16 {side_color} text-xs font-semibold")
+            ui.label(f"{quantity:,}").classes("w-16 text-right text-white text-xs")
+            ui.label(f"₹{price:,.2f}").classes("w-20 text-right text-white text-xs text-mono")
+            ui.label(status).classes(f"w-20 {status_color} text-xs")
+            ui.label(formatted_time).classes("flex-1 text-gray-400 text-xs")
+
+    except Exception as e:
+        logger.error(f"Error rendering order row: {e}")
+
+async def render_scheduled_orders_table(fetch_api, broker, container):
+    """Render scheduled orders table"""
+    try:
+        orders_data = await fetch_api(f"/scheduled-orders/{broker}")
+
+        if not orders_data:
+            with container:
+                with ui.column().classes("w-full text-center p-8"):
+                    ui.icon("schedule", size="3rem").classes("text-gray-500 mb-4")
+                    ui.label("No scheduled orders").classes("text-lg text-gray-400 mb-2")
+                    ui.label("Create scheduled orders to automate your trading").classes("text-sm text-gray-500")
+            return
+
+        with container:
+            # Enhanced table with action buttons
+            for order in orders_data:
+                await render_scheduled_order_card(order, fetch_api, broker)
+
+    except Exception as e:
+        logger.error(f"Error rendering scheduled orders: {e}")
+        with container:
+            ui.label("Error loading scheduled orders").classes("text-red-500 text-center p-4")
+
+async def render_scheduled_order_card(order, fetch_api, broker):
+    """Render individual scheduled order card"""
+    try:
+        order_id = order.get('scheduled_order_id', 'N/A')
+        symbol = order.get('trading_symbol', 'N/A')
+        transaction_type = order.get('transaction_type', 'N/A')
+        quantity = order.get('quantity', 0)
+        price = order.get('price', 0)
+        status = order.get('status', 'UNKNOWN').upper()
+        schedule_datetime = order.get('schedule_datetime', 'N/A')
+
+        # Status styling
+        status_color = "text-yellow-400" if status == "PENDING" else "text-green-400" if status == "EXECUTED" else "text-red-400"
+
+        with ui.card().classes(f"w-full mb-2 bg-gray-800/50 border border-gray-700/50 hover:bg-gray-800/70 transition-all"):
+            with ui.row().classes("p-3 items-center justify-between"):
+                # Order info
+                with ui.column().classes("gap-1"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label(f"{transaction_type} {symbol}").classes("text-white font-semibold")
+                        ui.chip(status, color=None).classes(f"{status_color} bg-gray-700 text-xs")
+                    ui.label(f"Qty: {quantity:,} | Price: ₹{price:,.2f} | Time: {schedule_datetime}").classes("text-gray-400 text-sm")
+
+                # Action buttons
+                with ui.row().classes("gap-1"):
+                    if status == "PENDING":
+                        ui.button(icon="edit", on_click=lambda oid=order_id: modify_scheduled_order(oid, fetch_api, broker)).props("flat round size=sm").classes("text-cyan-400")
+                        ui.button(icon="cancel", on_click=lambda oid=order_id: cancel_scheduled_order(oid, fetch_api, broker)).props("flat round size=sm").classes("text-red-400")
+
+    except Exception as e:
+        logger.error(f"Error rendering scheduled order card: {e}")
+
+async def render_gtt_orders_table(fetch_api, broker, container):
+    """Render GTT orders table"""
+    try:
+        orders_data = await fetch_api(f"/gtt-orders/{broker}")
+
+        if not orders_data:
+            with container:
+                with ui.column().classes("w-full text-center p-8"):
+                    ui.icon("notification_important", size="3rem").classes("text-gray-500 mb-4")
+                    ui.label("No GTT orders").classes("text-lg text-gray-400 mb-2")
+                    ui.label("Create GTT orders for automated trigger-based trading").classes("text-sm text-gray-500")
+            return
+
+        with container:
+            for order in orders_data:
+                await render_gtt_order_card(order, fetch_api, broker)
+
+    except Exception as e:
+        logger.error(f"Error rendering GTT orders: {e}")
+        with container:
+            ui.label("Error loading GTT orders").classes("text-red-500 text-center p-4")
+
+async def render_gtt_order_card(order, fetch_api, broker):
+    """Render individual GTT order card"""
+    try:
+        gtt_id = order.get('gtt_order_id', 'N/A')
+        symbol = order.get('trading_symbol', 'N/A')
+        transaction_type = order.get('transaction_type', 'N/A')
+        quantity = order.get('quantity', 0)
+        trigger_price = order.get('trigger_price', 0)
+        limit_price = order.get('limit_price', 0)
+        status = order.get('status', 'UNKNOWN').upper()
+
+        status_color = "text-yellow-400" if status == "PENDING" else "text-green-400" if status == "TRIGGERED" else "text-red-400"
+
+        with ui.card().classes(f"w-full mb-2 bg-gray-800/50 border border-gray-700/50 hover:bg-gray-800/70 transition-all"):
+            with ui.row().classes("p-3 items-center justify-between"):
+                with ui.column().classes("gap-1"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label(f"{transaction_type} {symbol}").classes("text-white font-semibold")
+                        ui.chip(status, color=None).classes(f"{status_color} bg-gray-700 text-xs")
+                    ui.label(f"Qty: {quantity:,} | Trigger: ₹{trigger_price:,.2f} | Limit: ₹{limit_price:,.2f}").classes("text-gray-400 text-sm")
+
+                with ui.row().classes("gap-1"):
+                    if status == "PENDING":
+                        ui.button(icon="edit", on_click=lambda gid=gtt_id: modify_gtt_order(gid, fetch_api, broker)).props("flat round size=sm").classes("text-cyan-400")
+                        ui.button(icon="cancel", on_click=lambda gid=gtt_id: cancel_gtt_order(gid, fetch_api, broker)).props("flat round size=sm").classes("text-red-400")
+
+    except Exception as e:
+        logger.error(f"Error rendering GTT order card: {e}")
+
+async def render_auto_orders_table(fetch_api, broker, container):
+    """Render auto orders table"""
+    try:
+        orders_data = await fetch_api(f"/auto-orders/{broker}")
+
+        if not orders_data:
+            with container:
+                with ui.column().classes("w-full text-center p-8"):
+                    ui.icon("auto_awesome", size="3rem").classes("text-gray-500 mb-4")
+                    ui.label("No auto orders").classes("text-lg text-gray-400 mb-2")
+                    ui.label("Create auto orders for intelligent risk-managed trading").classes("text-sm text-gray-500")
+            return
+
+        with container:
+            for order in orders_data:
+                await render_auto_order_card(order, fetch_api, broker)
+
+    except Exception as e:
+        logger.error(f"Error rendering auto orders: {e}")
+        with container:
+            ui.label("Error loading auto orders").classes("text-red-500 text-center p-4")
+
+async def render_auto_order_card(order, fetch_api, broker):
+    """Render individual auto order card"""
+    try:
+        auto_id = order.get('auto_order_id', 'N/A')
+        symbol = order.get('trading_symbol', 'N/A')
+        transaction_type = order.get('transaction_type', 'N/A')
+        risk_per_trade = order.get('risk_per_trade', 0)
+        stop_loss_value = order.get('stop_loss_value', 0)
+        target_value = order.get('target_value', 0)
+        status = order.get('status', 'UNKNOWN').upper()
+
+        status_color = "text-green-400" if status == "ACTIVE" else "text-yellow-400" if status == "PAUSED" else "text-red-400"
+
+        with ui.card().classes(f"w-full mb-2 bg-gray-800/50 border border-gray-700/50 hover:bg-gray-800/70 transition-all"):
+            with ui.row().classes("p-3 items-center justify-between"):
+                with ui.column().classes("gap-1"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label(f"{transaction_type} {symbol}").classes("text-white font-semibold")
+                        ui.chip(status, color=None).classes(f"{status_color} bg-gray-700 text-xs")
+                    ui.label(f"Risk: {risk_per_trade}% | SL: {stop_loss_value}% | Target: {target_value}%").classes("text-gray-400 text-sm")
+
+                with ui.row().classes("gap-1"):
+                    if status == "ACTIVE":
+                        ui.button(icon="pause", on_click=lambda aid=auto_id: pause_auto_order(aid, fetch_api, broker)).props("flat round size=sm").classes("text-yellow-400")
+                    elif status == "PAUSED":
+                        ui.button(icon="play_arrow", on_click=lambda aid=auto_id: resume_auto_order(aid, fetch_api, broker)).props("flat round size=sm").classes("text-green-400")
+
+                    ui.button(icon="delete", on_click=lambda aid=auto_id: delete_auto_order(aid, fetch_api, broker)).props("flat round size=sm").classes("text-red-400")
+
+    except Exception as e:
+        logger.error(f"Error rendering auto order card: {e}")
+
+# Action functions for order management
+
+async def modify_scheduled_order(order_id, fetch_api, broker):
+    """Modify scheduled order"""
+    ui.notify(f"Opening modification for scheduled order {order_id}", type="info")
+    # This would open a modification dialog
+
+async def cancel_scheduled_order(order_id, fetch_api, broker):
+    """Cancel scheduled order"""
+    try:
+        response = await fetch_api(f"/scheduled-orders/{order_id}", method="DELETE")
+        if response and response.get("status") == "success":
+            ui.notify(f"Scheduled order {order_id} cancelled", type="positive")
+        else:
+            ui.notify("Failed to cancel scheduled order", type="negative")
+    except Exception as e:
+        ui.notify(f"Error: {str(e)}", type="negative")
+
+async def modify_gtt_order(gtt_id, fetch_api, broker):
+    """Modify GTT order"""
+    ui.notify(f"Opening modification for GTT order {gtt_id}", type="info")
+    # This would open a modification dialog
+
+async def cancel_gtt_order(gtt_id, fetch_api, broker):
+    """Cancel GTT order"""
+    try:
+        response = await fetch_api(f"/gtt-orders/{gtt_id}", method="DELETE")
+        if response and response.get("status") == "success":
+            ui.notify(f"GTT order {gtt_id} cancelled", type="positive")
+        else:
+            ui.notify("Failed to cancel GTT order", type="negative")
+    except Exception as e:
+        ui.notify(f"Error: {str(e)}", type="negative")
+
+async def pause_auto_order(auto_id, fetch_api, broker):
+    """Pause auto order"""
+    try:
+        response = await fetch_api(f"/auto-orders/{auto_id}/pause", method="POST")
+        if response and response.get("status") == "success":
+            ui.notify(f"Auto order {auto_id} paused", type="warning")
+        else:
+            ui.notify("Failed to pause auto order", type="negative")
+    except Exception as e:
+        ui.notify(f"Error: {str(e)}", type="negative")
+
+async def resume_auto_order(auto_id, fetch_api, broker):
+    """Resume auto order"""
+    try:
+        response = await fetch_api(f"/auto-orders/{auto_id}/resume", method="POST")
+        if response and response.get("status") == "success":
+            ui.notify(f"Auto order {auto_id} resumed", type="positive")
+        else:
+            ui.notify("Failed to resume auto order", type="negative")
+    except Exception as e:
+        ui.notify(f"Error: {str(e)}", type="negative")
+
+async def delete_auto_order(auto_id, fetch_api, broker):
+    """Delete auto order"""
+    try:
+        response = await fetch_api(f"/auto-orders/{auto_id}", method="DELETE")
+        if response and response.get("status") == "success":
+            ui.notify(f"Auto order {auto_id} deleted", type="negative")
+        else:
+            ui.notify("Failed to delete auto order", type="negative")
+    except Exception as e:
+        ui.notify(f"Error: {str(e)}", type="negative")
+
+# Compatibility function for existing imports
 async def render_regular_orders(fetch_api, user_storage, instruments):
-    broker = user_storage.get('broker', 'Zerodha')
-    with ui.card().classes('card'):
-        ui.label('Place Regular Order').classes('text-h6')
-
-        validation_state = {'symbol': True, 'quantity': True, 'price': True, 'trigger_price': True}
-
-        with ui.column().classes('w-full space-y-4'):
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Index Filter").classes("text-subtitle1 w-1/4")
-                index_select = ui.select(
-                    options=['NIFTY 50', 'NIFTY NEXT 50', 'All Instruments'],
-                    value='NIFTY 50',
-                ).classes('input w-3/4')
-
-                # Prepare the initial options for symbol_select (first 20 symbols)
-                symbol_options = sorted(list(instruments.keys())[:20]) if instruments else []
-                # Set the initial value to the first option, or None if no options
-                initial_symbol = symbol_options[0] if symbol_options else None
-
-                ui.label("Symbol").classes("text-subtitle1 w-1/4")
-                symbol_select = ui.select(
-                    options=symbol_options,
-                    with_input=True,
-                    value=initial_symbol
-                ).classes('input w-3/4')
-                symbol_select.on_value_change(lambda e: validation_state.update({'symbol': bool(e.value)}))
-
-                async def update_symbol_options():
-                    if index_select.value == 'All Instruments':
-                        symbol_select.options = sorted(list(instruments.keys()))
-                    else:
-                        # Simplified filter for demo; in a real app, filter by index membership
-                        filtered_symbols = [s for s in instruments.keys() if len(s) < 10]
-                        symbol_select.options = sorted(filtered_symbols)
-                    # Ensure the current value is valid; reset to first option if not
-                    if symbol_select.value not in symbol_select.options:
-                        symbol_select.value = symbol_select.options[0] if symbol_select.options else None
-                    symbol_select.update()
-
-                index_select.on_value_change(lambda: asyncio.create_task(update_symbol_options()))
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Transaction Type").classes("text-subtitle1 w-1/4")
-                transaction_type = ui.select(
-                    options=['BUY', 'SELL'],
-                    value='BUY',
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Product Type").classes("text-subtitle1 w-1/4")
-                product_type = ui.select(
-                    options=['MIS', 'CNC'] if broker == 'Zerodha' else ['I', 'D'],
-                    value='CNC' if broker == 'Zerodha' else 'D',
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Quantity").classes("text-subtitle1 w-1/4")
-                quantity = ui.number(
-                    value=1,
-                    min=1,
-                    format='%d'
-                ).classes('input w-3/4')
-                quantity.on_value_change(lambda e: validation_state.update({'quantity': e.value > 0}))
-
-            with ui.expansion('Advanced Options', icon="settings").classes("w-full"):
-                with ui.column().classes('space-y-4'):
-                    with ui.row().classes('w-full items-center gap-4'):
-                        ui.label("Order Type").classes("text-subtitle1 w-1/4")
-                        order_type = ui.select(
-                            options=['MARKET', 'LIMIT', 'SL', 'SL-M'],
-                            value='MARKET',
-                        ).classes('input w-3/4')
-
-                    with ui.row().classes('w-full items-center gap-4'):
-                        ui.label("Price").classes("text-subtitle1 w-1/4")
-                        price_field = ui.number(
-                            value=0,
-                            min=0,
-                            step=0.05,
-                            format='%.2f'
-                        ).classes('input w-3/4')
-                        price_field.on_value_change(lambda e: validation_state.update(
-                            {'price': e.value > 0 if order_type.value in ['LIMIT', 'SL'] else True}))
-
-                    with ui.row().classes('w-full items-center gap-4'):
-                        ui.label("Trigger Price").classes("text-subtitle1 w-1/4")
-                        trigger_price_field = ui.number(
-                            value=0,
-                            min=0,
-                            step=0.05,
-                            format='%.2f'
-                        ).classes('input w-3/4')
-                        trigger_price_field.on_value_change(lambda e: validation_state.update(
-                            {'trigger_price': e.value > 0 if order_type.value in ['SL', 'SL-M'] else True}))
-
-                    def update_price_fields():
-                        price_field.visible = order_type.value in ['LIMIT', 'SL']
-                        trigger_price_field.visible = order_type.value in ['SL', 'SL-M']
-
-                    order_type.on_value_change(update_price_fields)
-                    update_price_fields()
-
-                    with ui.row().classes('w-full items-center gap-4'):
-                        ui.label("Validity").classes("text-subtitle1 w-1/4")
-                        validity = ui.select(
-                            options=['DAY', 'IOC'],
-                            value='DAY',
-                        ).classes('input w-3/4')
-
-                    with ui.row().classes('w-full items-center gap-4'):
-                        ui.label("Disclosed Qty").classes("text-subtitle1 w-1/4")
-                        disclosed_quantity = ui.number(
-                            value=0,
-                            min=0,
-                            format='%d'
-                        ).classes('input w-3/4')
-
-                    with ui.row().classes('w-full items-center gap-4'):
-                        ui.label("After Market Order").classes("text-subtitle1 w-1/4")
-                        is_amo = ui.checkbox(text="Enable AMO").classes('w-3/4')
-
-                    with ui.row().classes('w-full items-center gap-4'):
-                        market_price_container = ui.column().classes('w-full')
-                        async def fetch_market_price():
-                            if symbol_select.value and symbol_select.value in instruments:
-                                instrument_token = instruments[symbol_select.value]
-                                ltp_data = await fetch_api(f"/ltp/Upstox?instruments={instrument_token}")
-                                if ltp_data and isinstance(ltp_data, list) and ltp_data:
-                                    price = ltp_data[0].get('last_price', 0)
-                                    price_field.value = price
-                                    trigger_price_field.value = price
-                                    with market_price_container:
-                                        market_price_container.clear()
-                                        ui.notify(f"Market price: ₹{price:.2f}", type="info", position="top-right")
-                                else:
-                                    with market_price_container:
-                                        market_price_container.clear()
-                                        ui.notify("Failed to fetch market price.", type="warning", position="top-right")
-
-                        ui.button('Get Market Price', on_click=lambda: asyncio.create_task(fetch_market_price())).classes(
-                            'button-outline w-full')
-
-            ui.label('Risk Management').classes('text-subtitle1 mt-4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Stop Loss (₹)").classes("text-subtitle1 w-1/4")
-                stop_loss = ui.number(
-                    value=0,
-                    min=0,
-                    step=0.05,
-                    format='%.2f'
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Target (₹)").classes("text-subtitle1 w-1/4")
-                target = ui.number(
-                    value=0,
-                    min=0,
-                    step=0.05,
-                    format='%.2f'
-                ).classes('input w-3/4')
-
-            # Container for loading state
-            loading_container = ui.column().classes('w-full')
-
-            async def place_regular_order():
-                if not all(validation_state.values()):
-                    ui.notify('Please fix form errors', type='negative', position="top-right")
-                    return
-
-                if not symbol_select.value or symbol_select.value not in instruments:
-                    ui.notify('Please select a valid symbol', type='negative', position="top-right")
-                    return
-
-                order_data = {
-                    "trading_symbol": symbol_select.value,
-                    "instrument_token": instruments[symbol_select.value],
-                    "quantity": int(quantity.value),
-                    "transaction_type": transaction_type.value,
-                    "order_type": order_type.value,
-                    "product_type": product_type.value,
-                    "price": float(price_field.value) if order_type.value in ['LIMIT', 'SL'] else 0,
-                    "trigger_price": float(trigger_price_field.value) if order_type.value in ['SL', 'SL-M'] else 0,
-                    "validity": validity.value,
-                    "disclosed_quantity": int(disclosed_quantity.value) if disclosed_quantity.value > 0 else 0,
-                    "is_amo": bool(is_amo.value),
-                    "stop_loss": float(stop_loss.value) if stop_loss.value > 0 else None,
-                    "target": float(target.value) if target.value > 0 else None,
-                    "broker": broker
-                }
-
-                with ui.dialog() as dialog, ui.card().classes("card"):
-                    ui.label('Confirm Order').classes('text-h6')
-                    for key, value in order_data.items():
-                        if value and key not in ['instrument_token', 'broker']:
-                            ui.label(f"{key.replace('_', ' ').title()}: {value}").classes("text-subtitle1")
-                    with ui.row().classes("space-x-4 mt-4"):
-                        ui.button('Cancel', on_click=dialog.close).classes('button-outline')
-
-                        async def confirm_order():
-                            dialog.close()
-                            with loading_container:
-                                loading_container.clear()
-                                with ui.element().classes("relative"):
-                                    ui.spinner(size="lg")
-                                    ui.label("Placing order...").classes("text-subtitle1 text-gray-400 ml-2")
-                                response = await fetch_api("/orders/", method="POST", data=order_data)
-                                if isinstance(response, dict) and "error" in response:
-                                    ui.notify(f"Failed to place order: {response['error']}", type="negative",
-                                              position="top-right")
-                                elif response and response.get('order_id'):
-                                    ui.notify(f"Order placed successfully: {response['order_id']}", type="positive",
-                                              position="top-right")
-                                else:
-                                    ui.notify("Failed to place order", type="negative", position="top-right")
-                                loading_container.clear()
-
-                        ui.button('Confirm', on_click=lambda: asyncio.create_task(confirm_order())).classes('button-primary')
-                    dialog.open()
-
-            ui.button('Place Order', on_click=place_regular_order).classes('button-primary')
-
-async def render_scheduled_orders(fetch_api, user_storage, instruments):
-    """Render the scheduled order placement form"""
-    broker = user_storage.get('broker', 'Zerodha')
-
-    with ui.card().classes('card'):
-        ui.label('Schedule Order').classes('text-h6')
-
-        # Track validation state for required fields
-        validation_state = {'symbol': True, 'quantity': True, 'price': True, 'trigger_price': True,
-                            'schedule_datetime': True}
-
-        with ui.column().classes('w-full space-y-4'):
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Symbol").classes("text-subtitle1 w-1/4")
-                # Prepare initial options for symbol_select (first 20 symbols)
-                symbol_options = sorted(list(instruments.keys())[:20]) if instruments else []
-                initial_symbol = symbol_options[0] if symbol_options else None
-                symbol_select = ui.select(
-                    options=symbol_options,
-                    with_input=True,
-                    value=initial_symbol
-                ).classes('input w-3/4')
-                symbol_select.on_value_change(lambda e: validation_state.update({'symbol': bool(e.value)}))
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Transaction Type").classes("text-subtitle1 w-1/4")
-                transaction_type = ui.select(
-                    options=['BUY', 'SELL'],
-                    value='BUY',
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Product Type").classes("text-subtitle1 w-1/4")
-                product_type = ui.select(
-                    options=['MIS', 'CNC'] if broker == 'Zerodha' else ['I', 'D'],
-                    value='CNC' if broker == 'Zerodha' else 'D',
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Quantity").classes("text-subtitle1 w-1/4")
-                quantity = ui.number(
-                    value=1,
-                    min=1,
-                    format='%d'
-                ).classes('input w-3/4')
-                quantity.on_value_change(lambda e: validation_state.update({'quantity': e.value > 0}))
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Order Type").classes("text-subtitle1 w-1/4")
-                order_type = ui.select(
-                    options=['MARKET', 'LIMIT', 'SL', 'SL-M'],
-                    value='MARKET',
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Price").classes("text-subtitle1 w-1/4")
-                price_field = ui.number(
-                    value=0,
-                    min=0,
-                    step=0.05,
-                    format='%.2f'
-                ).classes('input w-3/4')
-                price_field.on_value_change(lambda e: validation_state.update(
-                    {'price': e.value > 0 if order_type.value in ['LIMIT', 'SL'] else True}))
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Trigger Price").classes("text-subtitle1 w-1/4")
-                trigger_price_field = ui.number(
-                    value=0,
-                    min=0,
-                    step=0.05,
-                    format='%.2f'
-                ).classes('input w-3/4')
-                trigger_price_field.on_value_change(lambda e: validation_state.update(
-                    {'trigger_price': e.value > 0 if order_type.value in ['SL', 'SL-M'] else True}))
-
-            def update_price_fields():
-                price_field.visible = order_type.value in ['LIMIT', 'SL']
-                trigger_price_field.visible = order_type.value in ['SL', 'SL-M']
-
-            order_type.on_value_change(update_price_fields)
-            update_price_fields()
-
-            ui.label('Schedule Settings').classes('text-subtitle1 mt-4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Schedule Date").classes("text-subtitle1 w-1/4")
-                schedule_date = ui.date(
-                    value=(datetime.now().date() + timedelta(days=1)).strftime('%Y-%m-%d')
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Schedule Time").classes("text-subtitle1 w-1/4")
-                schedule_time = ui.time(
-                    value='09:15'
-                ).classes('input w-3/4')
-
-            ui.label('Risk Management').classes('text-subtitle1')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Stop Loss (₹)").classes("text-subtitle1 w-1/4")
-                stop_loss = ui.number(
-                    value=0,
-                    min=0,
-                    step=0.05,
-                    format='%.2f'
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Target (₹)").classes("text-subtitle1 w-1/4")
-                target = ui.number(
-                    value=0,
-                    min=0,
-                    step=0.05,
-                    format='%.2f'
-                ).classes('input w-3/4')
-
-            # Container for market price notifications
-            market_price_container = ui.column().classes('w-full')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                async def fetch_market_price():
-                    if symbol_select.value and symbol_select.value in instruments:
-                        instrument_token = instruments[symbol_select.value]
-                        ltp_data = await fetch_api(f"/ltp/Upstox?instruments={instrument_token}")
-                        if ltp_data and isinstance(ltp_data, list) and ltp_data:
-                            price = ltp_data[0].get('last_price', 0)
-                            price_field.value = price
-                            trigger_price_field.value = price
-                            with market_price_container:
-                                market_price_container.clear()
-                                ui.notify(f"Market price: ₹{price:.2f}", type="info", position="top-right")
-                        else:
-                            with market_price_container:
-                                market_price_container.clear()
-                                ui.notify("Failed to fetch market price.", type="warning", position="top-right")
-
-                ui.button('Get Market Price', on_click=lambda: asyncio.create_task(fetch_market_price())).classes('button-outline w-full')
-
-            # Container for loading state
-            loading_container = ui.column().classes('w-full')
-
-            async def schedule_order():
-                if not all(validation_state.values()):
-                    ui.notify(f'Please fix form errors - {validation_state.values()}', type='negative', position="top-right")
-                    return
-
-                if not symbol_select.value or symbol_select.value not in instruments:
-                    ui.notify('Please select a valid symbol', type='negative', position="top-right")
-                    return
-
-                # Validate inputs
-                if quantity.value <= 0:
-                    ui.notify('Quantity must be greater than 0', type='negative', position="top-right")
-                    return
-
-                if order_type.value in ['LIMIT', 'SL'] and price_field.value <= 0:
-                    ui.notify('Price must be greater than 0 for LIMIT and SL orders', type='negative',
-                              position="top-right")
-                    return
-
-                if order_type.value in ['SL', 'SL-M'] and trigger_price_field.value <= 0:
-                    ui.notify('Trigger price must be greater than 0 for SL and SL-M orders', type='negative',
-                              position="top-right")
-                    return
-
-                # Prepare schedule datetime
-                try:
-                    schedule_datetime = datetime.combine(
-                        datetime.strptime(schedule_date.value, '%Y-%m-%d').date(),
-                        datetime.strptime(schedule_time.value, '%H:%M').time()
-                    )
-
-                    # Validate schedule time is in the future
-                    if schedule_datetime <= datetime.now():
-                        ui.notify('Schedule time must be in the future', type='negative', position="top-right")
-                        validation_state['schedule_datetime'] = False
-                        return
-                    validation_state['schedule_datetime'] = True
-                except Exception as e:
-                    ui.notify(f'Invalid schedule time: {str(e)}', type='negative', position="top-right")
-                    validation_state['schedule_datetime'] = False
-                    return
-
-                # Prepare order data
-                order_data = {
-                    "trading_symbol": symbol_select.value,
-                    "instrument_token": instruments[symbol_select.value],
-                    "quantity": int(quantity.value),
-                    "transaction_type": transaction_type.value,
-                    "order_type": order_type.value,
-                    "product_type": product_type.value,
-                    "price": float(price_field.value) if order_type.value in ['LIMIT', 'SL'] else 0,
-                    "trigger_price": float(trigger_price_field.value) if order_type.value in ['SL', 'SL-M'] else 0,
-                    "schedule_datetime": schedule_datetime.isoformat(),
-                    "stop_loss": float(stop_loss.value) if stop_loss.value > 0 else None,
-                    "target": float(target.value) if target.value > 0 else None,
-                    "broker": broker
-                }
-
-                # Show confirmation dialog
-                with ui.dialog() as dialog, ui.card().classes("card"):
-                    ui.label('Confirm Scheduled Order').classes('text-h6')
-                    ui.label(f"Symbol: {order_data['trading_symbol']}").classes("text-subtitle1")
-                    ui.label(f"Type: {order_data['transaction_type']} {order_data['order_type']}").classes(
-                        "text-subtitle1")
-                    ui.label(f"Quantity: {order_data['quantity']}").classes("text-subtitle1")
-                    ui.label(f"Schedule: {schedule_datetime.strftime('%Y-%m-%d %H:%M')}").classes("text-subtitle1")
-
-                    if order_data['price'] > 0:
-                        ui.label(f"Price: ₹{order_data['price']:.2f}").classes("text-subtitle1")
-
-                    if order_data['trigger_price'] > 0:
-                        ui.label(f"Trigger Price: ₹{order_data['trigger_price']:.2f}").classes("text-subtitle1")
-
-                    if order_data['stop_loss']:
-                        ui.label(f"Stop Loss: ₹{order_data['stop_loss']:.2f}").classes("text-subtitle1")
-
-                    if order_data['target']:
-                        ui.label(f"Target: ₹{order_data['target']:.2f}").classes("text-subtitle1")
-
-                    with ui.row().classes("space-x-4 mt-4"):
-                        ui.button('Cancel', on_click=dialog.close).classes('button-outline')
-
-                        async def confirm_scheduled_order():
-                            dialog.close()
-                            with loading_container:
-                                loading_container.clear()
-                                with ui.element().classes("relative"):
-                                    ui.spinner(size="lg")
-                                    ui.label("Scheduling order...").classes("text-subtitle1 text-gray-400 ml-2")
-                                response = await fetch_api("/scheduled-orders/", method="POST", data=order_data)
-                                if response and response.get('order_id'):
-                                    ui.notify(f"Order scheduled successfully: {response['order_id']}", type='positive',
-                                              position="top-right")
-                                else:
-                                    ui.notify("Failed to schedule order", type='negative', position="top-right")
-                                loading_container.clear()
-
-                        ui.button('Confirm', on_click=lambda: asyncio.create_task(confirm_scheduled_order())).classes(
-                            'button-primary')
-
-                dialog.open()
-
-            ui.button('Schedule Order', on_click=schedule_order).classes('button-primary')
-
-async def render_gtt_orders(fetch_api, user_storage, instruments):
-    """Render the GTT (Good Till Triggered) order placement form"""
-    broker = user_storage.get('broker', 'Zerodha')
-
-    with ui.card().classes('card'):
-        ui.label('Place GTT Order').classes('text-h6')
-
-        # Track validation state for required fields
-        validation_state = {'symbol': True, 'quantity': True, 'trigger_price': True, 'limit_price': True}
-
-        with ui.column().classes('w-full space-y-4'):
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Symbol").classes("text-subtitle1 w-1/4")
-                # Prepare initial options for symbol_select (first 20 symbols)
-                symbol_options = sorted(list(instruments.keys())[:20]) if instruments else []
-                initial_symbol = symbol_options[0] if symbol_options else None
-                symbol_select = ui.select(
-                    options=symbol_options,
-                    with_input=True,
-                    value=initial_symbol
-                ).classes('input w-3/4')
-                symbol_select.on_value_change(lambda e: validation_state.update({'symbol': bool(e.value)}))
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Transaction Type").classes("text-subtitle1 w-1/4")
-                transaction_type = ui.select(
-                    options=['BUY', 'SELL'],
-                    value='BUY',
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Quantity").classes("text-subtitle1 w-1/4")
-                quantity = ui.number(
-                    value=1,
-                    min=1,
-                    format='%d'
-                ).classes('input w-3/4')
-                quantity.on_value_change(lambda e: validation_state.update({'quantity': e.value > 0}))
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Trigger Type").classes("text-subtitle1 w-1/4")
-                trigger_type = ui.select(
-                    options=['SINGLE', 'OCO'],  # SINGLE for single trigger, OCO for Order Cancels Other
-                    value='SINGLE',
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Trigger Price").classes("text-subtitle1 w-1/4")
-                trigger_price = ui.number(
-                    value=0,
-                    min=0,
-                    step=0.05,
-                    format='%.2f'
-                ).classes('input w-3/4')
-                trigger_price.on_value_change(lambda e: validation_state.update({'trigger_price': e.value > 0}))
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Limit Price").classes("text-subtitle1 w-1/4")
-                limit_price = ui.number(
-                    value=0,
-                    min=0,
-                    step=0.05,
-                    format='%.2f'
-                ).classes('input w-3/4')
-                limit_price.on_value_change(lambda e: validation_state.update({'limit_price': e.value > 0}))
-
-            # OCO-specific fields (visible only if trigger_type is OCO)
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Second Trigger Price").classes("text-subtitle1 w-1/4")
-                second_trigger_price = ui.number(
-                    value=0,
-                    min=0,
-                    step=0.05,
-                    format='%.2f'
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Second Limit Price").classes("text-subtitle1 w-1/4")
-                second_limit_price = ui.number(
-                    value=0,
-                    min=0,
-                    step=0.05,
-                    format='%.2f'
-                ).classes('input w-3/4')
-
-            def update_trigger_fields():
-                is_oco = trigger_type.value == 'OCO'
-                second_trigger_price.visible = is_oco
-                second_limit_price.visible = is_oco
-
-            trigger_type.on_value_change(update_trigger_fields)
-            update_trigger_fields()
-
-            # Container for market price notifications
-            market_price_container = ui.column().classes('w-full')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                async def fetch_market_price():
-                    if symbol_select.value and symbol_select.value in instruments:
-                        instrument_token = instruments[symbol_select.value]
-                        ltp_data = await fetch_api(f"/ltp/Upstox?instruments={instrument_token}")
-                        if ltp_data and isinstance(ltp_data, list) and ltp_data:
-                            price = ltp_data[0].get('last_price', 0)
-                            trigger_price.value = price
-                            limit_price.value = price
-                            if trigger_type.value == 'OCO':
-                                second_trigger_price.value = price
-                                second_limit_price.value = price
-                            with market_price_container:
-                                market_price_container.clear()
-                                ui.notify(f"Market price: ₹{price:.2f}", type="info", position="top-right")
-                        else:
-                            with market_price_container:
-                                market_price_container.clear()
-                                ui.notify("Failed to fetch market price.", type="warning", position="top-right")
-
-                ui.button('Get Market Price', on_click=lambda: asyncio.create_task(fetch_market_price())).classes(
-                    'button-outline w-full')
-
-            # Container for loading state
-            loading_container = ui.column().classes('w-full')
-
-            async def place_gtt_order():
-                if not all(validation_state.values()):
-                    ui.notify('Please fix form errors', type='negative', position="top-right")
-                    return
-
-                if not symbol_select.value or symbol_select.value not in instruments:
-                    ui.notify('Please select a valid symbol', type='negative', position="top-right")
-                    return
-
-                # Validate inputs
-                if quantity.value <= 0:
-                    ui.notify('Quantity must be greater than 0', type='negative', position="top-right")
-                    return
-
-                if trigger_price.value <= 0:
-                    ui.notify('Trigger price must be greater than 0', type='negative', position="top-right")
-                    return
-
-                if limit_price.value <= 0:
-                    ui.notify('Limit price must be greater than 0', type='negative', position="top-right")
-                    return
-
-                if trigger_type.value == 'OCO':
-                    if second_trigger_price.value <= 0:
-                        ui.notify('Second trigger price must be greater than 0 for OCO orders', type='negative',
-                                  position="top-right")
-                        return
-                    if second_limit_price.value <= 0:
-                        ui.notify('Second limit price must be greater than 0 for OCO orders', type='negative',
-                                  position="top-right")
-                        return
-
-                # Prepare GTT order data (excluding last_price for now; will fetch it in confirm_gtt_order)
-                order_data = {
-                    "instrument_token": instruments[symbol_select.value],
-                    "trading_symbol": symbol_select.value,
-                    "transaction_type": transaction_type.value,
-                    "quantity": int(quantity.value),
-                    "trigger_type": "single" if trigger_type.value == "SINGLE" else "two-leg",
-                    "trigger_price": float(trigger_price.value),
-                    "limit_price": float(limit_price.value),
-                    "second_trigger_price": float(second_trigger_price.value) if trigger_type.value == 'OCO' else None,
-                    "second_limit_price": float(second_limit_price.value) if trigger_type.value == 'OCO' else None,
-                    "broker": broker
-                }
-
-                # Show confirmation dialog
-                with ui.dialog() as dialog, ui.card().classes("card"):
-                    ui.label('Confirm GTT Order').classes('text-h6')
-                    ui.label(f"Symbol: {order_data['trading_symbol']}").classes("text-subtitle1")
-                    ui.label(f"Type: {order_data['transaction_type']} {order_data['trigger_type']}").classes(
-                        "text-subtitle1")
-                    ui.label(f"Quantity: {order_data['quantity']}").classes("text-subtitle1")
-                    ui.label(f"Trigger Price: ₹{order_data['trigger_price']:.2f}").classes("text-subtitle1")
-                    ui.label(f"Limit Price: ₹{order_data['limit_price']:.2f}").classes("text-subtitle1")
-
-                    if order_data['trigger_type'] == 'OCO':
-                        ui.label(f"Second Trigger Price: ₹{order_data['second_trigger_price']:.2f}").classes(
-                            "text-subtitle1")
-                        ui.label(f"Second Limit Price: ₹{order_data['second_limit_price']:.2f}").classes(
-                            "text-subtitle1")
-
-                    with ui.row().classes("space-x-4 mt-4"):
-                        ui.button('Cancel', on_click=dialog.close).classes('button-outline')
-
-                        async def confirm_gtt_order():
-                            dialog.close()
-                            with loading_container:
-                                loading_container.clear()
-                                with ui.element().classes("relative"):
-                                    ui.spinner(size="lg")
-                                    ui.label("Placing GTT order...").classes("text-subtitle1 text-gray-400 ml-2")
-
-                                # Fetch the latest last_price before placing the order
-                                last_price = 0
-                                if symbol_select.value and symbol_select.value in instruments:
-                                    instrument_token = instruments[symbol_select.value]
-                                    ltp_data = await fetch_api(f"/ltp/Upstox?instruments={instrument_token}")
-                                    if ltp_data and isinstance(ltp_data, list) and ltp_data:
-                                        last_price = ltp_data[0].get('last_price', 0)
-                                    else:
-                                        ui.notify("Failed to fetch last price. Using default value of 0.",
-                                                  type="warning", position="top-right")
-
-                                # Update order_data with the latest last_price
-                                order_data["last_price"] = float(last_price)
-
-                                response = await fetch_api("/gtt-orders/", method="POST", data=order_data)
-                                print(response)
-                                if response and response.get('gtt_id'):
-                                    ui.notify(f"GTT order placed successfully: {response['gtt_id']}",
-                                              type='positive', position="top-right")
-                                else:
-                                    ui.notify("Failed to place GTT order", type='negative', position="top-right")
-                                loading_container.clear()
-
-                        ui.button('Confirm', on_click=lambda: asyncio.create_task(confirm_gtt_order())).classes(
-                            'button-primary')
-
-                dialog.open()
-
-            ui.button('Place GTT Order', on_click=place_gtt_order).classes('button-primary')
-
-async def render_auto_orders(fetch_api, user_storage, instruments):
-    """Render the auto order placement form for algorithmic trading"""
-    broker = user_storage.get('broker', 'Zerodha')
-
-    with ui.card().classes('card'):
-        ui.label('Auto Orders').classes('text-h6')
-        ui.label('Set up automated orders based on risk parameters').classes('text-subtitle1 text-gray-400 mb-4')
-
-        # Track validation state for required fields
-        validation_state = {'symbol': True, 'risk_per_trade': True, 'stop_loss_value': True, 'target_value': True,
-                            'limit_price': True, 'atr_period': True, 'check_interval': True}
-
-        with ui.column().classes('w-full space-y-4'):
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Symbol").classes("text-subtitle1 w-1/4")
-                # Prepare initial options for symbol_select (first 20 symbols)
-                symbol_options = sorted(list(instruments.keys())[:20]) if instruments else []
-                initial_symbol = symbol_options[0] if symbol_options else None
-                symbol_select = ui.select(
-                    options=symbol_options,
-                    with_input=True,
-                    value=initial_symbol
-                ).classes('input w-3/4')
-                symbol_select.on_value_change(lambda e: validation_state.update({'symbol': bool(e.value)}))
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Transaction Type").classes("text-subtitle1 w-1/4")
-                transaction_type = ui.select(
-                    options=['BUY', 'SELL'],
-                    value='BUY',
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Order Type").classes("text-subtitle1 w-1/4")
-                order_type = ui.select(
-                    options=['MARKET', 'LIMIT'],
-                    value='MARKET',
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Product Type").classes("text-subtitle1 w-1/4")
-                product_type = ui.select(
-                    options=['MIS', 'CNC'] if broker == 'Zerodha' else ['I', 'D'],
-                    value='CNC' if broker == 'Zerodha' else 'D',
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Limit Price").classes("text-subtitle1 w-1/4")
-                limit_price = ui.number(
-                    value=0,
-                    min=0,
-                    step=0.05,
-                    format='%.2f'
-                ).classes('input w-3/4')
-                limit_price.on_value_change(lambda e: validation_state.update(
-                    {'limit_price': e.value > 0 if order_type.value == 'LIMIT' else True}))
-
-                def update_limit_price():
-                    limit_price.visible = order_type.value == 'LIMIT'
-
-                order_type.on_value_change(update_limit_price)
-                update_limit_price()
-
-                # Container for market price notifications
-                market_price_container = ui.column().classes('w-full')
-
-                async def fetch_market_price():
-                    if symbol_select.value and symbol_select.value in instruments:
-                        instrument_token = instruments[symbol_select.value]
-                        ltp_data = await fetch_api(f"/ltp/Upstox?instruments={instrument_token}")
-                        if ltp_data and isinstance(ltp_data, list) and ltp_data:
-                            price = ltp_data[0].get('last_price', 0)
-                            limit_price.value = price
-                            with market_price_container:
-                                market_price_container.clear()
-                                ui.notify(f"Market price: ₹{price:.2f}", type="info", position="top-right")
-                            return price
-                        else:
-                            with market_price_container:
-                                market_price_container.clear()
-                                ui.notify("Failed to fetch market price.", type="warning", position="top-right")
-                            return 0
-                    return None
-
-                ui.button('Get Market Price', on_click=lambda: asyncio.create_task(fetch_market_price())).classes('button-outline w-full')
-
-            ui.label('Risk Management').classes('text-subtitle1 mt-4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Risk per Trade (%)").classes("text-subtitle1 w-1/4")
-                risk_per_trade = ui.number(
-                    value=1.0,
-                    min=0.1,
-                    max=10.0,
-                    step=0.1,
-                    format='%.1f'
-                ).classes('input w-3/4')
-                risk_per_trade.on_value_change(lambda e: validation_state.update({'risk_per_trade': e.value > 0}))
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Stop Loss Type").classes("text-subtitle1 w-1/4")
-                stop_loss_type = ui.select(
-                    options=['Fixed Amount', 'Percentage of Entry', 'ATR Based'],
-                    value='Fixed Amount',
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Stop Loss Value (₹)").classes("text-subtitle1 w-1/4")
-                stop_loss_value = ui.number(
-                    value=1.0,
-                    min=0.1,
-                    step=0.1,
-                    format='%.1f'
-                ).classes('input w-3/4')
-                stop_loss_value.on_value_change(lambda e: validation_state.update({'stop_loss_value': e.value > 0}))
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Target Value (₹)").classes("text-subtitle1 w-1/4")
-                target_value = ui.number(
-                    value=2.0,
-                    min=0.1,
-                    step=0.1,
-                    format='%.1f'
-                ).classes('input w-3/4')
-                target_value.on_value_change(lambda e: validation_state.update({'target_value': e.value > 0}))
-
-                def update_stop_loss_labels():
-                    if stop_loss_type.value == 'Fixed Amount':
-                        stop_loss_value.label = 'Stop Loss Value (₹)'
-                        target_value.label = 'Target Value (₹)'
-                    elif stop_loss_type.value == 'Percentage of Entry':
-                        stop_loss_value.label = 'Stop Loss (%)'
-                        target_value.label = 'Target (%)'
-                    else:  # ATR Based
-                        stop_loss_value.label = 'Stop Loss (ATR Multiple)'
-                        target_value.label = 'Target (ATR Multiple)'
-
-                stop_loss_type.on_value_change(update_stop_loss_labels)
-                update_stop_loss_labels()
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("ATR Period").classes("text-subtitle1 w-1/4")
-                atr_period = ui.number(
-                    value=14,
-                    min=5,
-                    max=50,
-                    format='%d'
-                ).classes('input w-3/4')
-                atr_period.on_value_change(lambda e: validation_state.update({'atr_period': e.value >= 5}))
-
-                def update_atr_field():
-                    atr_period.visible = stop_loss_type.value == 'ATR Based'
-
-                stop_loss_type.on_value_change(update_atr_field)
-                update_atr_field()
-
-            ui.label('Execution Settings').classes('text-subtitle1 mt-4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Execution Type").classes("text-subtitle1 w-1/4")
-                execution_type = ui.radio(['Manual', 'Automatic'], value='Manual').classes('w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Check Interval (minutes)").classes("text-subtitle1 w-1/4")
-                check_interval = ui.number(
-                    value=5,
-                    min=1,
-                    max=60,
-                    format='%d'
-                ).classes('input w-3/4')
-                check_interval.on_value_change(lambda e: validation_state.update({'check_interval': e.value >= 1}))
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Market Start Time").classes("text-subtitle1 w-1/4")
-                market_start_time = ui.time(
-                    value='09:15'
-                ).classes('input w-3/4')
-
-            with ui.row().classes('w-full items-center gap-4'):
-                ui.label("Market End Time").classes("text-subtitle1 w-1/4")
-                market_end_time = ui.time(
-                    value='15:30'
-                ).classes('input w-3/4')
-
-                def update_execution_fields():
-                    is_automatic = execution_type.value == 'Automatic'
-                    check_interval.visible = is_automatic
-                    market_start_time.visible = is_automatic
-                    market_end_time.visible = is_automatic
-
-                execution_type.on_value_change(update_execution_fields)
-                update_execution_fields()
-
-            # Container for loading state
-            loading_container = ui.column().classes('w-full')
-
-            async def place_auto_order():
-                if not all(validation_state.values()):
-                    ui.notify('Please fix form errors', type='negative', position="top-right")
-                    return
-
-                if not symbol_select.value or symbol_select.value not in instruments:
-                    ui.notify('Please select a valid symbol', type='negative', position="top-right")
-                    return
-
-                # Validate inputs
-                if risk_per_trade.value <= 0:
-                    ui.notify('Risk per trade must be greater than 0', type='negative', position="top-right")
-                    return
-
-                if stop_loss_value.value <= 0 or target_value.value <= 0:
-                    ui.notify('Stop loss and target values must be greater than 0', type='negative', position="top-right")
-                    return
-
-                if order_type.value == 'LIMIT' and limit_price.value <= 0:
-                    ui.notify('Limit price must be greater than 0', type='negative', position="top-right")
-                    return
-
-                if stop_loss_type.value == 'ATR Based' and atr_period.value < 5:
-                    ui.notify('ATR period must be at least 5', type='negative', position="top-right")
-                    return
-
-                if execution_type.value == 'Automatic' and check_interval.value < 1:
-                    ui.notify('Check interval must be at least 1 minute', type='negative', position="top-right")
-                    return
-
-                # Prepare order data
-                order_data = {
-                    "trading_symbol": symbol_select.value,
-                    "instrument_token": instruments[symbol_select.value],
-                    "transaction_type": transaction_type.value,
-                    "order_type": order_type.value,
-                    "product_type": product_type.value,
-                    "limit_price": float(limit_price.value) if order_type.value == 'LIMIT' else 0,
-                    "risk_per_trade": float(risk_per_trade.value),
-                    "stop_loss_type": stop_loss_type.value,
-                    "stop_loss_value": float(stop_loss_value.value),
-                    "target_value": float(target_value.value),
-                    "execution_type": execution_type.value,
-                    "broker": broker
-                }
-
-                if stop_loss_type.value == 'ATR Based':
-                    order_data["atr_period"] = int(atr_period.value)
-
-                if execution_type.value == 'Automatic':
-                    order_data["check_interval"] = int(check_interval.value)
-                    order_data["market_start_time"] = market_start_time.value
-                    order_data["market_end_time"] = market_end_time.value
-
-                # Show confirmation dialog
-                with ui.dialog() as dialog, ui.card().classes("card"):
-                    ui.label('Confirm Auto Order').classes('text-h6')
-                    ui.label(f"Symbol: {order_data['trading_symbol']}").classes("text-subtitle1")
-                    ui.label(f"Type: {order_data['transaction_type']} {order_data['order_type']}").classes("text-subtitle1")
-                    ui.label(f"Risk per Trade: {order_data['risk_per_trade']}%").classes("text-subtitle1")
-                    ui.label(f"Stop Loss Type: {order_data['stop_loss_type']}").classes("text-subtitle1")
-                    ui.label(f"Stop Loss Value: {order_data['stop_loss_value']}").classes("text-subtitle1")
-                    ui.label(f"Target Value: {order_data['target_value']}").classes("text-subtitle1")
-                    ui.label(f"Execution: {order_data['execution_type']}").classes("text-subtitle1")
-
-                    if order_data['order_type'] == 'LIMIT':
-                        ui.label(f"Limit Price: ₹{order_data['limit_price']:.2f}").classes("text-subtitle1")
-
-                    if order_data['execution_type'] == 'Automatic':
-                        ui.label(f"Check Interval: {order_data['check_interval']} minutes").classes("text-subtitle1")
-                        ui.label(f"Market Hours: {order_data['market_start_time']} - {order_data['market_end_time']}").classes("text-subtitle1")
-
-                    with ui.row().classes("space-x-4 mt-4"):
-                        ui.button('Cancel', on_click=dialog.close).classes('button-outline')
-
-                        async def confirm_auto_order():
-                            dialog.close()
-                            with loading_container:
-                                loading_container.clear()
-                                with ui.element().classes("relative"):
-                                    ui.spinner(size="lg")
-                                    ui.label("Setting up auto order...").classes("text-subtitle1 text-gray-400 ml-2")
-                                response = await fetch_api("/auto-orders/", method="POST", data=order_data)
-                                if response and response.get('auto_order_id'):
-                                    ui.notify(f"Auto order set up successfully: {response['auto_order_id']}", type='positive', position="top-right")
-                                else:
-                                    ui.notify("Failed to set up auto order", type='negative', position="top-right")
-                                loading_container.clear()
-
-                        ui.button('Confirm', on_click=lambda: asyncio.create_task(confirm_auto_order())).classes('button-primary')
-
-                dialog.open()
-
-            ui.button('Set Up Auto Order', on_click=place_auto_order).classes('button-primary mt-4')
-
-        # Display active auto orders
-        ui.separator()
-        ui.label('Active Auto Orders').classes('text-subtitle1 mt-4')
-
-        auto_orders_grid = ui.aggrid({
-            'columnDefs': [
-                {'headerName': 'Auto Order ID', 'field': 'auto_order_id'},
-                {'headerName': 'Symbol', 'field': 'trading_symbol'},
-                {'headerName': 'Type', 'field': 'transaction_type'},
-                {'headerName': 'Risk (%)', 'field': 'risk_per_trade'},
-                {'headerName': 'Stop Loss Type', 'field': 'stop_loss_type'},
-                {'headerName': 'Execution', 'field': 'execution_type'},
-                {'headerName': 'Status', 'field': 'status'}
-            ],
-            'rowData': [],
-            'rowSelection': 'single',
-            'pagination': True,
-            'paginationPageSize': 10
-        }).classes('w-full mt-4')
-
-        # Container for loading state in cancel_auto_order
-        cancel_loading_container = ui.column().classes('w-full')
-
-        async def fetch_auto_orders():
-            auto_orders = await fetch_api(f"/auto-orders/{broker}")
-            if auto_orders and isinstance(auto_orders, list):
-                auto_orders_grid.options['rowData'] = auto_orders
-                auto_orders_grid.update()
-            else:
-                auto_orders_grid.options['rowData'] = []
-                auto_orders_grid.update()
-
-        await fetch_auto_orders()
-
-        with ui.row().classes('w-full mt-4'):
-            ui.button('Refresh', on_click=lambda: asyncio.create_task(fetch_auto_orders())).classes('button-outline')
-
-            async def cancel_auto_order():
-                selected_rows = await auto_orders_grid.get_selected_rows()
-                if not selected_rows:
-                    ui.notify('Please select an auto order to cancel', type='warning', position="top-right")
-                    return
-
-                auto_order_id = selected_rows[0].get('auto_order_id')
-                if not auto_order_id:
-                    ui.notify('Invalid order selection', type='negative', position="top-right")
-                    return
-
-                with cancel_loading_container:
-                    cancel_loading_container.clear()
-                    with ui.element().classes("relative"):
-                        ui.spinner(size="lg")
-                        ui.label("Cancelling auto order...").classes("text-subtitle1 text-gray-400 ml-2")
-                    response = await fetch_api(f"/auto-orders/{auto_order_id}", method="DELETE")
-                    if response and response.get('success'):
-                        ui.notify('Auto order cancelled successfully', type='positive', position="top-right")
-                        await fetch_auto_orders()  # Refresh the list
-                    else:
-                        ui.notify('Failed to cancel auto order', type='negative', position="top-right")
-                    cancel_loading_container.clear()
-
-            ui.button('Cancel Selected', on_click=lambda: asyncio.create_task(cancel_auto_order())).classes('button-danger')
+    """Compatibility function - redirects to enhanced regular orders"""
+    await render_enhanced_regular_orders(fetch_api, user_storage, instruments)

@@ -15,6 +15,7 @@ from order_management import render_order_management
 from strategies import render_strategies_page
 from backtesting import render_backtesting_page
 from analytics import render_analytics_page
+from integration_example import integrate_with_existing_app
 from orderbook import render_order_book_page
 from portfolio import render_portfolio_page
 from positions import render_positions_page
@@ -151,24 +152,34 @@ def apply_theme_from_storage():
             if current_theme == "Dark":
                 # Enhanced dark theme
                 ui.add_head_html("""
-                    <style>
-                    body { 
-                        background: linear-gradient(135deg, #0a0f23 0%, #1a1f3a 100%);
-                        color: #ffffff;
-                    }
-                    .q-header { 
-                        background: rgba(0, 0, 0, 0.6) !important;
-                        backdrop-filter: blur(20px);
-                        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-                    }
-                    .q-btn {
-                        transition: all 0.3s ease;
-                    }
-                    .q-btn:hover {
-                        transform: translateY(-1px);
-                    }
-                    </style>
-                    """)
+                                    <style>
+                                    body { 
+                                        background: linear-gradient(135deg, #0a0f23 0%, #1a1f3a 100%) !important;
+                                        color: #ffffff !important;
+                                    }
+
+                                    /* Fix all cards globally */
+                                    .q-card {
+                                        background: rgba(255, 255, 255, 0.08) !important;
+                                        color: #ffffff !important;
+                                        backdrop-filter: blur(20px);
+                                        border: 1px solid rgba(255, 255, 255, 0.1);
+                                    }
+
+                                    /* Fix tab panels */
+                                    .q-tab-panel {
+                                        background: transparent !important;
+                                        color: #ffffff !important;
+                                    }
+
+                                    /* Enhanced dashboard specific */
+                                    .enhanced-dashboard,
+                                    .enhanced-app {
+                                        background: linear-gradient(135deg, #0a0f23 0%, #1a1f3a 100%) !important;
+                                        color: #ffffff !important;
+                                    }
+                                    </style>
+                                    """)
             else:
                 # Enhanced light theme
                 ui.add_head_html("""
@@ -445,6 +456,7 @@ async def analytics_page(client: Client):
     apply_theme_from_storage()
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
+    await integrate_with_existing_app(fetch_api, app.storage.user, get_cached_instruments, broker)
     await render_analytics_page(fetch_api, app.storage.user, await get_cached_instruments(broker), broker)
 
 
@@ -591,7 +603,7 @@ if __name__ in {"__main__", "__mp_main__"}:
     ui.add_css('static/styles.css')
 
     ui.run(title="AlgoTrade Pro - Advanced Trading Platform",
-           port=8081,
+           port=8080,
            reload=True,
            uvicorn_reload_dirs='.',
            uvicorn_reload_includes='*.py',
