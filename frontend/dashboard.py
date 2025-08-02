@@ -22,6 +22,7 @@ from positions import render_positions_page
 from strategies import render_strategies_page
 from livetrading import render_live_trading_page
 
+
 logger = logging.getLogger(__name__)
 
 # Global state variables for dashboard data
@@ -42,11 +43,8 @@ async def render_dashboard_page(fetch_api, user_storage, get_cached_instruments)
 
     broker = user_storage.get('broker', 'Zerodha')
 
-    # Apply enhanced dashboard theme
-    apply_enhanced_dashboard_styles()
-
     # Main dashboard container
-    with ui.column().classes("enhanced-dashboard w-full min-h-screen"):
+    with ui.column().classes("dashboard-container w-full min-h-screen"):
         # Enhanced Dashboard Title
         render_enhanced_dashboard_title(broker)
 
@@ -72,10 +70,6 @@ async def render_dashboard_page(fetch_api, user_storage, get_cached_instruments)
     # Initialize real-time updates
     await setup_dashboard_updates(fetch_api, user_storage, get_cached_instruments, broker)
 
-
-def apply_enhanced_dashboard_styles():
-    """Apply enhanced CSS styles for the dashboard"""
-    ui.add_css('static/styles.css')
 
 def render_enhanced_dashboard_title(broker):
     """Enhanced dashboard title with status indicators"""

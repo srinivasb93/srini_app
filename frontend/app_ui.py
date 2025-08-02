@@ -11,6 +11,7 @@ import secrets
 from collections import deque
 
 # Import module functions
+from theme_manager import theme_manager, apply_page_theme, PageTheme, ThemeMode
 from order_management import render_order_management
 from strategies import render_strategies_page
 from backtesting import render_backtesting_page
@@ -144,71 +145,84 @@ async def connect_websocket(max_retries=5, initial_backoff=2):
                 break
 
 
+# def apply_theme_from_storage():
+#     try:
+#         if hasattr(app, 'storage') and hasattr(app.storage, 'user') and app.storage.user is not None:
+#             current_theme = app.storage.user.get(STORAGE_THEME_KEY, "Dark")
+#
+#             if current_theme == "Dark":
+#                 # Enhanced dark theme
+#                 ui.add_head_html("""
+#                                     <style>
+#                                     body {
+#                                         background: linear-gradient(135deg, #0a0f23 0%, #1a1f3a 100%) !important;
+#                                         color: #ffffff !important;
+#                                     }
+#
+#                                     /* Fix all cards globally */
+#                                     .q-card {
+#                                         background: rgba(255, 255, 255, 0.08) !important;
+#                                         color: #ffffff !important;
+#                                         backdrop-filter: blur(20px);
+#                                         border: 1px solid rgba(255, 255, 255, 0.1);
+#                                     }
+#
+#                                     /* Fix tab panels */
+#                                     .q-tab-panel {
+#                                         background: transparent !important;
+#                                         color: #ffffff !important;
+#                                     }
+#
+#                                     /* Enhanced dashboard specific */
+#                                     .enhanced-dashboard,
+#                                     .enhanced-app {
+#                                         background: linear-gradient(135deg, #0a0f23 0%, #1a1f3a 100%) !important;
+#                                         color: #ffffff !important;
+#                                     }
+#                                     </style>
+#                                     """)
+#             else:
+#                 # Enhanced light theme
+#                 ui.add_head_html("""
+#                     <style>
+#                     body {
+#                         background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+#                         color: #1a202c;
+#                     }
+#                     .q-header {
+#                         background: rgba(255, 255, 255, 0.9) !important;
+#                         backdrop-filter: blur(20px);
+#                         border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+#                     }
+#                     .enhanced-dashboard {
+#                         background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+#                         color: #1a202c;
+#                     }
+#                     .dashboard-card {
+#                         background: rgba(255, 255, 255, 0.9) !important;
+#                         color: #1a202c !important;
+#                     }
+#                     </style>
+#                     """)
+#         else:
+#             logger.warning("app.storage.user not available for theme application. Defaulting to Dark.")
+#             ui.dark_mode().enable()
+#     except Exception as e:
+#         logger.error(f"Unexpected error applying theme: {e}")
+#         ui.dark_mode().enable()
+
 def apply_theme_from_storage():
-    try:
-        if hasattr(app, 'storage') and hasattr(app.storage, 'user') and app.storage.user is not None:
-            current_theme = app.storage.user.get(STORAGE_THEME_KEY, "Dark")
+    """Apply theme using the centralized theme manager"""
+    theme_mode = app.storage.user.get(STORAGE_THEME_KEY, "Dark").lower()
+    theme_manager.current_theme = ThemeMode(theme_mode)
 
-            if current_theme == "Dark":
-                # Enhanced dark theme
-                ui.add_head_html("""
-                                    <style>
-                                    body { 
-                                        background: linear-gradient(135deg, #0a0f23 0%, #1a1f3a 100%) !important;
-                                        color: #ffffff !important;
-                                    }
-
-                                    /* Fix all cards globally */
-                                    .q-card {
-                                        background: rgba(255, 255, 255, 0.08) !important;
-                                        color: #ffffff !important;
-                                        backdrop-filter: blur(20px);
-                                        border: 1px solid rgba(255, 255, 255, 0.1);
-                                    }
-
-                                    /* Fix tab panels */
-                                    .q-tab-panel {
-                                        background: transparent !important;
-                                        color: #ffffff !important;
-                                    }
-
-                                    /* Enhanced dashboard specific */
-                                    .enhanced-dashboard,
-                                    .enhanced-app {
-                                        background: linear-gradient(135deg, #0a0f23 0%, #1a1f3a 100%) !important;
-                                        color: #ffffff !important;
-                                    }
-                                    </style>
-                                    """)
-            else:
-                # Enhanced light theme
-                ui.add_head_html("""
-                    <style>
-                    body { 
-                        background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
-                        color: #1a202c;
-                    }
-                    .q-header { 
-                        background: rgba(255, 255, 255, 0.9) !important;
-                        backdrop-filter: blur(20px);
-                        border-bottom: 1px solid rgba(0, 0, 0, 0.1);
-                    }
-                    .enhanced-dashboard {
-                        background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
-                        color: #1a202c;
-                    }
-                    .dashboard-card {
-                        background: rgba(255, 255, 255, 0.9) !important;
-                        color: #1a202c !important;
-                    }
-                    </style>
-                    """)
-        else:
-            logger.warning("app.storage.user not available for theme application. Defaulting to Dark.")
-            ui.dark_mode().enable()
-    except Exception as e:
-        logger.error(f"Unexpected error applying theme: {e}")
-        ui.dark_mode().enable()
+# Replace the existing toggle_theme() function
+def toggle_theme():
+    """Toggle theme using theme manager"""
+    current = theme_manager.current_theme
+    new_theme = ThemeMode.LIGHT if current == ThemeMode.DARK else ThemeMode.DARK
+    theme_manager.switch_theme(new_theme, app.storage.user)
+    app.storage.user[STORAGE_THEME_KEY] = new_theme.value
 
 
 async def get_cached_instruments(broker, exchange_filter="NSE", force_refresh=False, cache_ttl=86400):
@@ -236,61 +250,151 @@ async def get_cached_instruments(broker, exchange_filter="NSE", force_refresh=Fa
         logger.error(f"Unexpected error in get_cached_instruments: {e}")
         return {}
 
-def toggle_theme():
-    current_theme = app.storage.user.get(STORAGE_THEME_KEY, "Dark")
-    new_theme = "Light" if current_theme == "Dark" else "Dark"
-    app.storage.user[STORAGE_THEME_KEY] = new_theme
-    apply_theme_from_storage()
+# def toggle_theme():
+#     current_theme = app.storage.user.get(STORAGE_THEME_KEY, "Dark")
+#     new_theme = "Light" if current_theme == "Dark" else "Dark"
+#     app.storage.user[STORAGE_THEME_KEY] = new_theme
+#     apply_theme_from_storage()
 
 def render_header():
-    with ui.header(elevated=True).classes('justify-between text-white items-center q-pa-sm'):
+    """Enhanced header with compact navigation and profile dropdown"""
+    with ui.header(elevated=True).classes('justify-between items-center'):
+        # Apply glassmorphism to header
+        ui.add_head_html('''
+        <style>
+            .q-header {
+                background: rgba(0, 0, 0, 0.4) !important;
+                backdrop-filter: blur(20px);
+                border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+                padding: 0.75rem 1.5rem !important;
+            }
+        </style>
+        ''')
 
         # Left side - Logo and Title
-        with ui.row().classes("items-center gap-4"):
-            ui.icon("candlestick_chart", size="2rem").classes("text-cyan-400")
-            ui.label("AlgoTrade Pro").classes("text-2xl font-bold")
-            ui.chip("LIVE", color="green").classes("text-xs")
+        with ui.row().classes("items-center gap-3"):
+            ui.icon("candlestick_chart", size="1.75rem").classes("text-cyan-400")
+            ui.label("AlgoTrade Pro").classes("text-xl font-bold text-white")
+            ui.chip("LIVE", color="green").classes("text-xs animate-pulse")
 
-        with ui.row().classes("items-center gap-2"):
-            pages = ["Dashboard", "Order Management", "Order Book", "Positions",
-                     "Portfolio", "Analytics", "Strategies", "SIP Strategy",
-                     "Backtesting", "Live Trading", "Watchlist", "Settings"]
-            for page_name in pages:
-                route = f"/{page_name.lower().replace(' ', '-')}"
-                ui.button(page_name, on_click=lambda r=route: ui.navigate.to(r)).props(
-                    'flat color=white dense').classes("text-sm hover:bg-white/10 transition-all")
+        # Center - Compact Navigation
+        with ui.row().classes("nav-tabs-container flex-1 mx-4"):
+            # Group related pages
+            nav_items = [
+                ("Dashboard", "/dashboard", "dashboard"),
+                ("Trading", [
+                    ("Orders", "/order-management", "shopping_cart"),
+                    ("Order Book", "/order-book", "menu_book"),
+                    ("Positions", "/positions", "account_balance"),
+                    ("Live Trading", "/live-trading", "speed")
+                ]),
+                ("Portfolio", [
+                    ("Holdings", "/portfolio", "pie_chart"),
+                    ("Watchlist", "/watchlist", "visibility"),
+                    ("Analytics", "/analytics", "analytics")
+                ]),
+                ("Strategies", [
+                    ("All Strategies", "/strategies", "psychology"),
+                    ("SIP Strategy", "/sip-strategy", "savings"),
+                    ("Backtesting", "/backtesting", "assessment")
+                ])
+            ]
 
-        # Right side - Controls
+            for item in nav_items:
+                if isinstance(item[1], str):  # Single item
+                    name, route, icon = item
+                    ui.button(name, icon=icon, on_click=lambda r=route: ui.navigate.to(r)).props(
+                        'flat dense no-caps').classes("nav-tab-btn text-sm")
+                else:  # Dropdown group
+                    group_name, sub_items = item[0], item[1]
+                    with ui.button(group_name, icon="arrow_drop_down").props(
+                            'flat dense no-caps').classes("nav-tab-btn text-sm"):
+                        with ui.menu().classes("bg-gray-900/95 backdrop-blur-lg border border-white/10"):
+                            for sub_name, sub_route, sub_icon in sub_items:
+                                ui.menu_item(sub_name,
+                                             on_click=lambda r=sub_route: ui.navigate.to(r)).props(
+                                    f'icon={sub_icon}').classes("text-white hover:bg-white/10")
+
+        # Right side - Status and Profile
         with ui.row().classes("items-center gap-4"):
             # Market Status
-            with ui.row().classes("status-indicator market-status"):
-                ui.icon("circle", size="0.5rem").classes("status-dot")
-                ui.label("Market Open").classes("status-text")
+            market_open = 9 <= datetime.now().hour < 16
+            status_color = "green" if market_open else "red"
+            status_text = "Market Open" if market_open else "Market Closed"
+
+            with ui.row().classes(
+                    f"status-indicator bg-{status_color}-900/20 border border-{status_color}-500/30 px-3 py-1 rounded-full"):
+                ui.icon("circle", size="0.5rem").classes(f"text-{status_color}-500")
+                ui.label(status_text).classes("text-sm text-white")
 
             # Connection Status
-            with ui.row().classes("status-indicator connection-status"):
+            with ui.row().classes("status-indicator bg-cyan-900/20 border border-cyan-500/30 px-3 py-1 rounded-full"):
                 ui.icon("wifi", size="1rem").classes("text-cyan-400")
-                ui.label("Connected").classes("status-text")
+                ui.label(f"Connected: {app.storage.user.get(STORAGE_BROKER_KEY)}").classes("text-sm text-white") if app.storage.user.get(
+                    STORAGE_BROKER_KEY) else ui.label("Not Connected").classes("text-sm text-red-400")
 
             # Current Time
-            current_time = datetime.now().strftime("%H:%M:%S IST")
-            ui.label(current_time).classes("status-text time-display")
+            time_label = ui.label().classes("text-sm text-gray-300 font-mono")
+
+            def update_time():
+                time_label.text = datetime.now().strftime("%H:%M:%S IST")
+
+            ui.timer(1, update_time)
 
             # Theme toggle
-            ui.button(icon="brightness_6", on_click=toggle_theme).props("flat color=white round dense")
+            ui.button(icon="brightness_6", on_click=toggle_theme).props(
+                "flat round dense").classes("text-white hover:bg-white/10")
 
-            # Logout
-            async def handle_logout():
-                try:
-                    if hasattr(app, 'storage') and hasattr(app.storage,
-                                                           'user') and app.storage.user is not None:
-                        app.storage.user.clear()
-                except Exception as e:
-                    logger.error(f"Error during logout: {e}")
-                ui.navigate.to('/')
-                ui.notify("Logged out successfully.", type="positive")
+            # Profile Dropdown
+            with ui.element('div').classes('profile-dropdown'):
+                with ui.button(icon="account_circle").props("flat round dense").classes(
+                        "text-white hover:bg-white/10") as profile_btn:
 
-            ui.button("Logout", on_click=handle_logout).props("flat color=white dense")
+                    # Create dropdown menu
+                    menu = ui.menu().classes(
+                        "profile-dropdown-menu bg-gray-900/95 backdrop-blur-lg border border-white/10"
+                    )
+
+                    with menu:
+                        # User info
+                        user_email = app.storage.user.get('email', 'user@example.com')
+                        broker = app.storage.user.get(STORAGE_BROKER_KEY, 'Zerodha')
+
+                        with ui.column().classes("p-3 border-b border-white/10"):
+                            ui.label(user_email).classes("text-sm font-semibold text-white")
+                            ui.label(f"Broker: {broker}").classes("text-xs text-gray-400")
+
+                        # Menu items
+                        with ui.column().classes("py-2"):
+                            # View Profile
+                            with ui.item(on_click=lambda: ui.navigate.to('/profile')).classes(
+                                    "profile-dropdown-item hover:bg-white/10"):
+                                ui.icon("person", size="1.2rem").classes("text-gray-400")
+                                ui.label("View Profile").classes("text-sm")
+
+                            # Settings
+                            with ui.item(on_click=lambda: ui.navigate.to('/settings')).classes(
+                                    "profile-dropdown-item hover:bg-white/10"):
+                                ui.icon("settings", size="1.2rem").classes("text-gray-400")
+                                ui.label("Settings").classes("text-sm")
+
+                            # Divider
+                            ui.separator().classes("my-2 bg-white/10")
+
+                            # Logout
+                            async def handle_logout():
+                                try:
+                                    if hasattr(app, 'storage') and hasattr(app.storage, 'user'):
+                                        app.storage.user.clear()
+                                except Exception as e:
+                                    logger.error(f"Error during logout: {e}")
+                                ui.navigate.to('/')
+                                ui.notify("Logged out successfully", type="positive")
+
+                            with ui.item(on_click=handle_logout).classes(
+                                    "profile-dropdown-item hover:bg-white/10"):
+                                ui.icon("logout", size="1.2rem").classes("text-red-400")
+                                ui.label("Logout").classes("text-sm text-red-400")
 
 
 @ui.page('/')
@@ -303,7 +407,7 @@ async def login_page(client: Client):
     except Exception as e:
         logger.error(f"Error accessing app.storage.user in login_page: {e}")
 
-    apply_theme_from_storage()
+    apply_page_theme(PageTheme.LOGIN, app.storage.user)
 
     async def handle_login():
         if not email.value or not password.value:
@@ -395,7 +499,7 @@ async def dashboard_page(client: Client):
         return
 
     # Apply enhanced theme and render header
-    apply_theme_from_storage()
+    apply_page_theme(PageTheme.DASHBOARD, app.storage.user)
     render_header()
 
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
@@ -441,7 +545,7 @@ async def order_management_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_theme_from_storage()
+    apply_page_theme(PageTheme.TRADING, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_order_management(fetch_api, app.storage.user, await get_cached_instruments(broker))
@@ -453,7 +557,7 @@ async def analytics_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_theme_from_storage()
+    apply_page_theme(PageTheme.ANALYTICS, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await integrate_with_existing_app(fetch_api, app.storage.user, get_cached_instruments, broker)
@@ -466,7 +570,7 @@ async def strategies_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_theme_from_storage()
+    apply_page_theme(PageTheme.DEFAULT, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_strategies_page(fetch_api, app.storage.user, await get_cached_instruments(broker))
@@ -478,7 +582,7 @@ async def sip_strategies_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_theme_from_storage()
+    apply_page_theme(PageTheme.SIP_STRATEGY, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_sip_strategy_page(fetch_api, app.storage.user)
@@ -490,7 +594,7 @@ async def backtesting_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_theme_from_storage()
+    apply_page_theme(PageTheme.BACKTESTING, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_backtesting_page(fetch_api, app.storage.user, await get_cached_instruments(broker))
@@ -502,7 +606,7 @@ async def order_book_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_theme_from_storage()
+    apply_page_theme(PageTheme.ORDERBOOK, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_order_book_page(fetch_api, app.storage.user, broker)
@@ -514,7 +618,7 @@ async def portfolio_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_theme_from_storage()
+    apply_page_theme(PageTheme.PORTFOLIO, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_portfolio_page(fetch_api, app.storage.user, broker)
@@ -526,7 +630,7 @@ async def positions_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_theme_from_storage()
+    apply_page_theme(PageTheme.POSITIONS, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_positions_page(fetch_api, app.storage.user, broker)
@@ -538,7 +642,7 @@ async def live_trading_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_theme_from_storage()
+    apply_page_theme(PageTheme.LIVE_TRADING, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_live_trading_page(fetch_api, app.storage.user, broker)
@@ -550,7 +654,7 @@ async def watchlist_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_theme_from_storage()
+    apply_page_theme(PageTheme.WATCHLIST, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_watchlist_page(fetch_api, app.storage.user, get_cached_instruments, broker)
@@ -562,7 +666,7 @@ async def settings_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_theme_from_storage()
+    apply_page_theme(PageTheme.SETTINGS, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_settings_page(fetch_api, app.storage.user, apply_theme_from_storage)
@@ -573,7 +677,7 @@ async def strategy_performance_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_theme_from_storage()
+    apply_page_theme(PageTheme.DEFAULT, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     ui.label("Strategy Performance Dashboard").classes("text-h5 q-pa-md")
@@ -600,7 +704,7 @@ async def on_client_connect(client: Client):
 if __name__ in {"__main__", "__mp_main__"}:
     storage_secret_key = "my_super_secret_key_for_testing_123_please_change_for_prod"
     # Add static files support for CSS
-    ui.add_css('static/styles.css')
+    # ui.add_css('static/styles.css')
 
     ui.run(title="AlgoTrade Pro - Advanced Trading Platform",
            port=8080,

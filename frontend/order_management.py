@@ -11,15 +11,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def apply_enhanced_dashboard_styles():
-    """Apply enhanced CSS styles matching dashboard.py"""
-    ui.add_css('static/styles.css')
 
 async def render_order_management(fetch_api, user_storage, instruments):
     """Render the complete enhanced order management page with all order types"""
-
-    apply_enhanced_dashboard_styles()
-
     broker = user_storage.get('default_broker', 'Zerodha')
 
     # Fetch instruments if not already available

@@ -9,15 +9,9 @@ import json
 
 logger = logging.getLogger(__name__)
 
-def apply_enhanced_dashboard_styles():
-    """Apply enhanced CSS styles matching dashboard.py"""
-    ui.add_css('static/styles.css')
 
 async def render_strategies_page(fetch_api, user_storage, get_cached_instruments):
     """Enhanced strategies page with beautiful dashboard styling"""
-    
-    apply_enhanced_dashboard_styles()
-    
     # Main container with dashboard styling
     with ui.column().classes("enhanced-dashboard w-full min-h-screen"):
         

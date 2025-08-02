@@ -16,91 +16,6 @@ import json
 logger = logging.getLogger(__name__)
 
 
-def apply_enhanced_dashboard_styles():
-    """Apply enhanced CSS styles with intelligent fallback"""
-    try:
-        # Try to load external CSS file
-        ui.add_css('static/styles.css')
-        logger.info("External CSS loaded successfully")
-    except Exception as e:
-        logger.warning(f"External CSS not found, using inline styles: {e}")
-        # Comprehensive inline CSS for development/production flexibility
-        ui.add_css('''
-        .enhanced-dashboard {
-            background: linear-gradient(135deg, #0c0c0c 0%, #1a1a1a 100%);
-            min-height: 100vh;
-            font-family: 'Inter', system-ui, -apple-system, sans-serif;
-        }
-
-        .dashboard-title-section {
-            background: rgba(15, 23, 42, 0.8);
-            backdrop-filter: blur(10px);
-            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
-            padding: 1.5rem;
-            margin-bottom: 1rem;
-        }
-
-        .dashboard-card {
-            background: rgba(15, 23, 42, 0.8);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(148, 163, 184, 0.1);
-            border-radius: 12px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-        }
-
-        .metric-card {
-            background: rgba(30, 41, 59, 0.6);
-            border: 1px solid rgba(148, 163, 184, 0.05);
-            border-radius: 8px;
-            transition: all 0.3s ease;
-        }
-
-        .metric-card:hover {
-            background: rgba(30, 41, 59, 0.8);
-            transform: translateY(-2px);
-        }
-
-        .holdings-header {
-            background: rgba(51, 65, 85, 0.5);
-            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
-        }
-
-        .holdings-row {
-            border-bottom: 1px solid rgba(148, 163, 184, 0.05);
-            transition: background-color 0.2s ease;
-        }
-
-        .holdings-row:hover {
-            background-color: rgba(51, 65, 85, 0.3);
-        }
-
-        .card-header {
-            background: rgba(51, 65, 85, 0.3);
-            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
-        }
-
-        .card-separator {
-            background: rgba(148, 163, 184, 0.1);
-        }
-
-        .positive-change { color: #10b981; }
-        .negative-change { color: #ef4444; }
-        .text-mono { font-family: 'JetBrains Mono', monospace; }
-
-        .empty-state {
-            text-align: center;
-            padding: 3rem;
-            color: #6b7280;
-        }
-
-        .status-chip {
-            background: rgba(34, 197, 94, 0.2);
-            color: #22c55e;
-            border: 1px solid rgba(34, 197, 94, 0.3);
-        }
-        ''')
-
-
 def transform_portfolio_data(raw_holdings: List[Dict]) -> List[Dict]:
     """Transform backend data structure to match enhanced UI expectations"""
     if not raw_holdings or not isinstance(raw_holdings, list):
@@ -203,9 +118,6 @@ def calculate_portfolio_metrics(portfolio_json: str) -> Dict:
 
 async def render_portfolio_page(fetch_api, user_storage, broker):
     """Enhanced portfolio page with complete backend integration"""
-
-    apply_enhanced_dashboard_styles()
-
     # Main container with dashboard styling
     with ui.column().classes("enhanced-dashboard w-full min-h-screen"):
         # Enhanced title section
