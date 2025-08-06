@@ -1,1022 +1,863 @@
 """
-Enhanced Analytics Module - analytics.py
-Comprehensive stock analysis with TradingView widgets and advanced metrics
+Analytics Module for NiceGUI Algo Trading Application
+Implements a feature-rich TradingView Lightweight Charts using ui.html and ui.run_javascript.
+Replicates chart capabilities from stock_analysis.py, including clean display, legends, indicators, subcharts, drawing tools, replay, and more.
+Fetches historical data from a custom API endpoint.
 """
 
-from nicegui import ui, app
-import asyncio
-from datetime import datetime, timedelta
 import json
 import logging
+import asyncio
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Any
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import yfinance as yf
-import talib
-import requests
-from dataclasses import dataclass
+from datetime import datetime, timedelta
+from nicegui import ui, app
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
-# Enhanced chart state with more comprehensive data
-chart_state = {
-    "selected_symbol": "RELIANCE",
-    "selected_timeframe": "1d",
-    "chart_type": "candlestick",
-    "indicators": {
-        "sma": {"enabled": False, "period": 20, "color": "#ff6b6b"},
-        "ema": {"enabled": False, "period": 20, "color": "#4ecdc4"},
-        "rsi": {"enabled": False, "period": 14, "overbought": 70, "oversold": 30},
-        "macd": {"enabled": False, "fast": 12, "slow": 26, "signal": 9},
-        "bollinger": {"enabled": False, "period": 20, "std_dev": 2},
-        "volume": {"enabled": True, "type": "histogram"},
-        "atr": {"enabled": False, "period": 14},
-        "stochastic": {"enabled": False, "k_period": 14, "d_period": 3},
-        "williams_r": {"enabled": False, "period": 14},
-        "cci": {"enabled": False, "period": 20}
+# Theme configuration for the chart
+THEME_CONFIG = {
+    "dark": {
+        "bg": "#161616",
+        "text": "#FFFFFF",
+        "grid": "#262616",
+        "watermark": "rgba(255, 255, 255, 0.1)",
+        "candle_up": "#6FB76F",
+        "candle_down": "#FF6F6F",
+        "volume": "rgba(38, 166, 154, 0.5)",
+        "sma": "#F59E0B",
+        "ema": "#8B5CF6",
+        "rsi": "#06B6D4",
+        "macd": "#2596be",
+        "macd_signal": "#FF0000",
+        "macd_hist": "#2596be",
+        "bb_upper": "#FF0000",
+        "bb_middle": "#00FFFF",
+        "bb_lower": "#00FF00",
+        "linreg": "#FF00FF"
     },
-    "drawing_tools": {"enabled": False, "tool": "line"},
-    "analysis_metrics": {},
-    "current_data": [],
-    "symbol_info": {},
-    "market_data": {}
+    "light": {
+        "bg": "#FFFFFF",
+        "text": "#000000",
+        "grid": "#D3D3D3",
+        "watermark": "rgba(0, 0, 0, 0.1)",
+        "candle_up": "#6FB76F",
+        "candle_down": "#FF6F6F",
+        "volume": "rgba(38, 166, 154, 0.5)",
+        "sma": "#F59E0B",
+        "ema": "#8B5CF6",
+        "rsi": "#06B6D4",
+        "macd": "#2596be",
+        "macd_signal": "#FF0000",
+        "macd_hist": "#2596be",
+        "bb_upper": "#FF0000",
+        "bb_middle": "#00FFFF",
+        "bb_lower": "#00FF00",
+        "linreg": "#FF00FF"
+    }
 }
 
+# Function to calculate SMA
+def calculate_sma(series: pd.Series, period: int) -> list:
+    sma = series.rolling(window=period).mean()
+    return sma.tolist()
 
-@dataclass
-class StockMetrics:
-    """Comprehensive stock metrics for trading decisions"""
-    symbol: str
-    current_price: float
-    change: float
-    change_percent: float
-    volume: int
-    avg_volume: int
-    market_cap: float
-    pe_ratio: float
-    pb_ratio: float
-    dividend_yield: float
-    beta: float
-    fifty_two_week_high: float
-    fifty_two_week_low: float
+# Function to calculate EMA
+def calculate_ema(series: pd.Series, period: int) -> list:
+    ema = series.ewm(span=period, adjust=False).mean()
+    return ema.tolist()
 
-    # Technical indicators
-    rsi: float
-    macd_signal: str
-    bollinger_position: str
-    sma_20: float
-    sma_50: float
-    sma_200: float
+# Function to calculate RSI
+def calculate_rsi(series: pd.Series, period: int) -> list:
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rs = rs.replace([np.inf, -np.inf], np.nan).fillna(0)  # Handle division by zero
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.tolist()
 
-    # Trading signals
-    trend_signal: str
-    momentum_signal: str
-    volume_signal: str
-    overall_signal: str
-    confidence_score: float
+# Function to calculate BBANDS
+def calculate_bbands(series: pd.Series, period: int, std: float) -> dict:
+    mean = series.rolling(window=period).mean()
+    std_dev = series.rolling(window=period).std()
+    upper = mean + (std_dev * std)
+    lower = mean - (std_dev * std)
+    return {
+        "upper": upper.tolist(),
+        "middle": mean.tolist(),
+        "lower": lower.tolist()
+    }
 
+# Function to calculate MACD
+def calculate_macd(series: pd.Series, fast: int, slow: int, signal: int) -> dict:
+    ema_fast = series.ewm(span=fast, adjust=False).mean()
+    ema_slow = series.ewm(span=slow, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    histogram = macd - signal_line
+    return {
+        "macd": macd.tolist(),
+        "signal": signal_line.tolist(),
+        "hist": histogram.tolist()
+    }
 
-async def fetch_stock_data(symbol: str, period: str = "1y") -> pd.DataFrame:
-    """Fetch comprehensive stock data using yfinance and other sources"""
-    try:
-        # Convert symbol format for yfinance (add .NS for NSE stocks)
-        yf_symbol = f"{symbol}.NS" if not symbol.endswith('.NS') else symbol
+# Function to calculate LINREG slope (optimized)
+def calculate_linreg(series: pd.Series, period: int) -> list:
+    result = [None] * (period - 1)
+    x = np.arange(period)
+    x_mean = x.mean()
+    x_squared = np.sum((x - x_mean) ** 2)
+    for i in range(period - 1, len(series)):
+        y = series[i - period + 1:i + 1].values
+        y_mean = np.mean(y)
+        slope = np.sum((x - x_mean) * (y - y_mean)) / x_squared if x_squared != 0 else 0
+        result.append(slope)
+    return result
 
-        stock = yf.Ticker(yf_symbol)
+# Merge default state with stored state
+def merge_state(stored_state, default_state):
+    merged = default_state.copy()
+    if stored_state:
+        for key, value in stored_state.items():
+            if key in merged and isinstance(value, dict) and isinstance(merged[key], dict):
+                merged[key] = merge_state(value, merged[key])
+            else:
+                merged[key] = value
+    return merged
 
-        # Fetch historical data
-        hist_data = stock.history(period=period)
+async def render_analytics_page(fetch_api, user_storage, instruments):
+    broker = user_storage.get("broker", "Zerodha")
+    ui.label("Analytics & Charting").classes("text-h4")
 
-        if hist_data.empty:
-            logger.warning(f"No data found for {symbol}")
-            return pd.DataFrame()
+    # Default state
+    default_state = {
+        "indicators": {},
+        "drawings": [],
+        "templates": {"Default": {"indicators": {}, "drawings": []}},
+        "current_template": "Default",
+        "watchlist": list(instruments.keys()),
+        "current_replay_index": -1,
+        "last_replay_date": None,
+        "is_playing": False
+    }
 
-        # Add technical indicators using talib
-        hist_data = add_technical_indicators(hist_data)
+    # Merge stored state with default state
+    stored_state = user_storage.get("chart_state", {})
+    chart_state = merge_state(stored_state, default_state)
+    user_storage["chart_state"] = chart_state
 
-        return hist_data
+    with ui.card().classes("card"):
+        with ui.row().classes("w-full items-end gap-4"):
+            with ui.column().classes("w-48"):
+                ui.label("Select Instrument").classes("text-subtitle1 mb-2")
+                instrument_select = ui.select(
+                    options=sorted(list(instruments.keys())),
+                    with_input=True,
+                    value=list(instruments.keys())[0] if instruments else None
+                ).classes("input")
+            with ui.column().classes("w-32"):
+                ui.label("Timeframe").classes("text-subtitle1 mb-2")
+                timeframe_select = ui.select(
+                    options=["1m", "5m", "15m", "1h", "1d"],
+                    value="1d"
+                ).classes("input")
+            with ui.column().classes("flex-grow"):
+                ui.label("Start Date").classes("text-subtitle1 mb-2")
+                start_date = ui.date(
+                    value=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+                ).classes("input")
+            with ui.column().classes("flex-grow"):
+                ui.label("End Date").classes("text-subtitle1 mb-2")
+                end_date = ui.date(
+                    value=datetime.now().strftime("%Y-%m-%d")
+                ).classes("input")
 
-    except Exception as e:
-        logger.error(f"Error fetching data for {symbol}: {e}")
-        return pd.DataFrame()
+        # Indicators, Drawing Tools, Watchlist, Replay, and Templates UI
+        with ui.row().classes("w-full items-center gap-4 mt-2"):
+            ui.label("Indicators").classes("text-subtitle1")
+            with ui.column().classes("space-y-2"):
+                with ui.row().classes("space-x-2"):
+                    selected_indicator = ui.select(
+                        options=["EMA", "SMA", "BBANDS", "MACD", "RSI", "LINREG"],
+                        value="EMA",
+                        label="Indicator"
+                    ).classes("w-32")
+                    params = {}
+                    if selected_indicator.value in ["EMA", "SMA", "RSI", "LINREG"]:
+                        period_input = ui.number(value=20, min=2, max=100, label="Period").props("dense").classes("w-32")
+                        params["period"] = period_input
+                    elif selected_indicator.value == "BBANDS":
+                        period_input = ui.number(value=20, min=2, max=100, label="Period").props("dense").classes("w-32")
+                        std_input = ui.number(value=2.0, min=0.1, max=5.0, step=0.1, label="Std Dev").props("dense").classes("w-32")
+                        params["period"] = period_input
+                        params["std"] = std_input
+                    elif selected_indicator.value == "MACD":
+                        fast_input = ui.number(value=12, min=2, max=100, label="Fast").props("dense").classes("w-32")
+                        slow_input = ui.number(value=26, min=2, max=100, label="Slow").props("dense").classes("w-32")
+                        signal_input = ui.number(value=9, min=2, max=100, label="Signal").props("dense").classes("w-32")
+                        params["fast"] = fast_input
+                        params["slow"] = slow_input
+                        params["signal"] = signal_input
+                    add_button = ui.button("Add", on_click=lambda: add_indicator(selected_indicator.value, params))
 
+            ui.label("Drawing Tools").classes("text-subtitle1 ml-4")
+            drawing_tool = ui.select(
+                options=["Trendline", "Horizontal Line", "Rectangle"],
+                value="Trendline",
+                label="Tool"
+            ).classes("w-32")
+            draw_button = ui.button("Draw", on_click=lambda: start_drawing(drawing_tool.value))
 
-def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Add comprehensive technical indicators to the dataframe"""
-    try:
-        # Ensure we have the required columns
-        if df.empty or len(df) < 50:
-            return df
+            ui.label("Watchlist").classes("text-subtitle1 ml-4")
+            watchlist_select = ui.select(
+                options=chart_state["watchlist"],
+                value=instrument_select.value,
+                on_change=lambda e: update_instrument(e.value)
+            ).classes("w-32")
 
-        # Moving Averages
-        df['SMA_20'] = talib.SMA(df['Close'], timeperiod=20)
-        df['SMA_50'] = talib.SMA(df['Close'], timeperiod=50)
-        df['SMA_200'] = talib.SMA(df['Close'], timeperiod=200)
-        df['EMA_20'] = talib.EMA(df['Close'], timeperiod=20)
-        df['EMA_50'] = talib.EMA(df['Close'], timeperiod=50)
+            with ui.row().classes("space-x-2"):
+                prev_button = ui.button("Previous Day", on_click=lambda: adjust_replay(-1))
+                next_button = ui.button("Next Day", on_click=lambda: adjust_replay(1))
+                play_button = ui.button("Play/Pause", on_click=lambda: toggle_play())
 
-        # RSI
-        df['RSI'] = talib.RSI(df['Close'], timeperiod=14)
+            ui.label("Templates").classes("text-subtitle1 ml-4")
+            template_select = ui.select(
+                options=list(chart_state["templates"].keys()),
+                value=chart_state["current_template"],
+                on_change=lambda e: load_template(e.value)
+            ).classes("w-32")
+            template_name = ui.input("Template Name").props("dense").classes("w-32")
+            save_template_button = ui.button("Save Template", on_click=lambda: save_template(template_name.value))
 
-        # MACD
-        df['MACD'], df['MACD_Signal'], df['MACD_Hist'] = talib.MACD(df['Close'])
+        update_button = ui.button(
+            "Update Chart",
+            on_click=lambda: update_chart()
+        ).classes("button-primary ml-4")
 
-        # Bollinger Bands
-        df['BB_Upper'], df['BB_Middle'], df['BB_Lower'] = talib.BBANDS(df['Close'])
+    chart_container = ui.column().classes("w-full mt-4").style("width: 100%; height: 60vh; visibility: visible; display: block;")
+    with chart_container:
+        chart_element = ui.html("")  # Placeholder for chart container
+        status_label = ui.label(
+            "Select parameters and update chart."
+        ).classes("text-subtitle1 mt-2 text-gray-400")
 
-        # Stochastic
-        df['Stoch_K'], df['Stoch_D'] = talib.STOCH(df['High'], df['Low'], df['Close'])
+    # Drawing state
+    drawing_mode = {"active": False, "tool": None, "start_point": None, "end_point": None}
 
-        # Williams %R
-        df['Williams_R'] = talib.WILLR(df['High'], df['Low'], df['Close'])
+    def start_drawing(tool):
+        drawing_mode["active"] = True
+        drawing_mode["tool"] = tool
+        drawing_mode["start_point"] = None
+        drawing_mode["end_point"] = None
+        ui.notify(f"Started drawing {tool}. Click on the chart to draw.")
+        # Notify JavaScript about drawing mode
+        ui.run_javascript(f"""
+        window.drawingMode = {{ active: true, tool: '{tool}', start_point: null, end_point: null }};
+        """)
 
-        # CCI
-        df['CCI'] = talib.CCI(df['High'], df['Low'], df['Close'])
+    async def add_indicator(indicator_type, params):
+        if indicator_type not in chart_state["indicators"]:
+            chart_state["indicators"][indicator_type] = []
+        param_dict = {}
+        if indicator_type in ["EMA", "SMA", "RSI", "LINREG"]:
+            param_dict["period"] = params["period"].value
+        elif indicator_type == "BBANDS":
+            param_dict["period"] = params["period"].value
+            param_dict["std"] = params["std"].value
+        elif indicator_type == "MACD":
+            param_dict["fast"] = params["fast"].value
+            param_dict["slow"] = params["slow"].value
+            param_dict["signal"] = params["signal"].value
+        chart_state["indicators"][indicator_type].append(param_dict)
+        user_storage["chart_state"] = chart_state
+        await update_chart()
+        ui.notify(f"Added {indicator_type} indicator", type="positive")
 
-        # ATR
-        df['ATR'] = talib.ATR(df['High'], df['Low'], df['Close'])
+    async def update_instrument(new_symbol):
+        instrument_select.value = new_symbol
+        chart_state["current_replay_index"] = -1  # Reset replay on instrument change
+        user_storage["chart_state"] = chart_state
+        await update_chart()
 
-        # Volume indicators
-        df['Volume_SMA'] = talib.SMA(df['Volume'], timeperiod=20)
-        df['OBV'] = talib.OBV(df['Close'], df['Volume'])
+    async def adjust_replay(step):
+        chart_state["is_playing"] = False
+        chart_state["current_replay_index"] = max(0, min(len(df) - 1, chart_state["current_replay_index"] + step))
+        user_storage["chart_state"] = chart_state
+        await ui.run_javascript(f"""
+        window.isPlaying_{instrument_select.value} = false;
+        startReplay();
+        """)
+        await update_chart()
 
-        return df
+    async def toggle_play():
+        chart_state["is_playing"] = not chart_state["is_playing"]
+        user_storage["chart_state"] = chart_state
+        ui.notify("Starting bar replay..." if chart_state["is_playing"] else "Paused bar replay")
+        await ui.run_javascript(f"""
+        window.isPlaying_{instrument_select.value} = {json.dumps(chart_state["is_playing"])};
+        startReplay();
+        """)
 
-    except Exception as e:
-        logger.error(f"Error adding technical indicators: {e}")
-        return df
-
-
-async def calculate_stock_metrics(symbol: str, df: pd.DataFrame) -> StockMetrics:
-    """Calculate comprehensive stock metrics for trading decisions"""
-    try:
-        if df.empty:
-            return None
-
-        latest = df.iloc[-1]
-        previous = df.iloc[-2] if len(df) > 1 else latest
-
-        # Basic metrics
-        current_price = latest['Close']
-        change = current_price - previous['Close']
-        change_percent = (change / previous['Close']) * 100
-
-        # Volume analysis
-        avg_volume = df['Volume'].tail(20).mean()
-        volume_ratio = latest['Volume'] / avg_volume if avg_volume > 0 else 1
-
-        # Technical signals
-        rsi = latest.get('RSI', 50)
-        sma_20 = latest.get('SMA_20', current_price)
-        sma_50 = latest.get('SMA_50', current_price)
-        sma_200 = latest.get('SMA_200', current_price)
-
-        # Generate trading signals
-        trend_signal = generate_trend_signal(current_price, sma_20, sma_50, sma_200)
-        momentum_signal = generate_momentum_signal(rsi, latest.get('MACD', 0), latest.get('MACD_Signal', 0))
-        volume_signal = generate_volume_signal(volume_ratio)
-
-        # Calculate overall signal and confidence
-        overall_signal, confidence_score = calculate_overall_signal(
-            trend_signal, momentum_signal, volume_signal, rsi
-        )
-
-        # Get additional metrics (mock data for now - integrate with real APIs)
-        stock_info = await get_stock_fundamentals(symbol)
-
-        return StockMetrics(
-            symbol=symbol,
-            current_price=current_price,
-            change=change,
-            change_percent=change_percent,
-            volume=int(latest['Volume']),
-            avg_volume=int(avg_volume),
-            market_cap=stock_info.get('market_cap', 0),
-            pe_ratio=stock_info.get('pe_ratio', 0),
-            pb_ratio=stock_info.get('pb_ratio', 0),
-            dividend_yield=stock_info.get('dividend_yield', 0),
-            beta=stock_info.get('beta', 1.0),
-            fifty_two_week_high=df['High'].max(),
-            fifty_two_week_low=df['Low'].min(),
-            rsi=rsi,
-            macd_signal=get_macd_signal(latest.get('MACD', 0), latest.get('MACD_Signal', 0)),
-            bollinger_position=get_bollinger_position(current_price, latest.get('BB_Upper', 0),
-                                                      latest.get('BB_Lower', 0)),
-            sma_20=sma_20,
-            sma_50=sma_50,
-            sma_200=sma_200,
-            trend_signal=trend_signal,
-            momentum_signal=momentum_signal,
-            volume_signal=volume_signal,
-            overall_signal=overall_signal,
-            confidence_score=confidence_score
-        )
-
-    except Exception as e:
-        logger.error(f"Error calculating stock metrics: {e}")
-        return None
-
-
-def generate_trend_signal(price, sma_20, sma_50, sma_200):
-    """Generate trend signal based on moving averages"""
-    if price > sma_20 > sma_50 > sma_200:
-        return "Strong Bullish"
-    elif price > sma_20 > sma_50:
-        return "Bullish"
-    elif price < sma_20 < sma_50 < sma_200:
-        return "Strong Bearish"
-    elif price < sma_20 < sma_50:
-        return "Bearish"
-    else:
-        return "Neutral"
-
-
-def generate_momentum_signal(rsi, macd, macd_signal):
-    """Generate momentum signal based on RSI and MACD"""
-    rsi_signal = "Overbought" if rsi > 70 else "Oversold" if rsi < 30 else "Neutral"
-    macd_signal_trend = "Bullish" if macd > macd_signal else "Bearish"
-
-    if rsi < 30 and macd_signal_trend == "Bullish":
-        return "Strong Buy"
-    elif rsi > 70 and macd_signal_trend == "Bearish":
-        return "Strong Sell"
-    elif rsi < 40 and macd_signal_trend == "Bullish":
-        return "Buy"
-    elif rsi > 60 and macd_signal_trend == "Bearish":
-        return "Sell"
-    else:
-        return "Hold"
-
-
-def generate_volume_signal(volume_ratio):
-    """Generate volume signal based on volume ratio"""
-    if volume_ratio > 2.0:
-        return "High Interest"
-    elif volume_ratio > 1.5:
-        return "Above Average"
-    elif volume_ratio < 0.5:
-        return "Low Interest"
-    else:
-        return "Normal"
-
-
-def calculate_overall_signal(trend_signal, momentum_signal, volume_signal, rsi):
-    """Calculate overall trading signal and confidence score"""
-    buy_signals = 0
-    sell_signals = 0
-
-    # Trend analysis
-    if "Bullish" in trend_signal:
-        buy_signals += 2 if "Strong" in trend_signal else 1
-    elif "Bearish" in trend_signal:
-        sell_signals += 2 if "Strong" in trend_signal else 1
-
-    # Momentum analysis
-    if "Buy" in momentum_signal:
-        buy_signals += 2 if "Strong" in momentum_signal else 1
-    elif "Sell" in momentum_signal:
-        sell_signals += 2 if "Strong" in momentum_signal else 1
-
-    # Volume confirmation
-    if volume_signal in ["High Interest", "Above Average"]:
-        if buy_signals > sell_signals:
-            buy_signals += 1
-        elif sell_signals > buy_signals:
-            sell_signals += 1
-
-    # Determine overall signal
-    if buy_signals > sell_signals + 1:
-        overall_signal = "BUY"
-        confidence_score = min(90, (buy_signals / (buy_signals + sell_signals)) * 100)
-    elif sell_signals > buy_signals + 1:
-        overall_signal = "SELL"
-        confidence_score = min(90, (sell_signals / (buy_signals + sell_signals)) * 100)
-    else:
-        overall_signal = "HOLD"
-        confidence_score = 50
-
-    return overall_signal, confidence_score
-
-
-def get_macd_signal(macd, macd_signal):
-    """Get MACD signal interpretation"""
-    if macd > macd_signal:
-        return "Bullish Crossover"
-    elif macd < macd_signal:
-        return "Bearish Crossover"
-    else:
-        return "Neutral"
-
-
-def get_bollinger_position(price, upper, lower):
-    """Get Bollinger Bands position"""
-    if upper == 0 or lower == 0:
-        return "No Data"
-
-    if price > upper:
-        return "Above Upper Band"
-    elif price < lower:
-        return "Below Lower Band"
-    else:
-        return "Within Bands"
-
-
-async def get_stock_fundamentals(symbol: str) -> Dict:
-    """Get stock fundamental data (integrate with real APIs)"""
-    try:
-        # This is mock data - integrate with actual APIs like Alpha Vantage, EOD Historical Data, etc.
-        fundamentals = {
-            'market_cap': 1500000000000,  # 1.5T
-            'pe_ratio': 25.5,
-            'pb_ratio': 3.2,
-            'dividend_yield': 2.1,
-            'beta': 1.15,
-            'eps': 85.2,
-            'book_value': 650.0,
-            'debt_to_equity': 0.45
+    async def save_template(name):
+        if not name:
+            ui.notify("Please enter a template name.", type="negative")
+            return
+        chart_state["templates"][name] = {
+            "indicators": chart_state["indicators"],
+            "drawings": chart_state["drawings"]
         }
-        return fundamentals
-    except Exception as e:
-        logger.error(f"Error fetching fundamentals for {symbol}: {e}")
-        return {}
+        chart_state["current_template"] = name
+        template_select.options = list(chart_state["templates"].keys())
+        template_select.value = name
+        user_storage["chart_state"] = chart_state
+        ui.notify(f"Template '{name}' saved successfully!", type="positive")
 
+    async def load_template(name):
+        if name in chart_state["templates"]:
+            chart_state["indicators"] = chart_state["templates"][name]["indicators"]
+            chart_state["drawings"] = chart_state["templates"][name]["drawings"]
+            chart_state["current_template"] = name
+            user_storage["chart_state"] = chart_state
+            await update_chart()
+            ui.notify(f"Template '{name}' loaded successfully!", type="positive")
 
-async def create_tradingview_widget(symbol: str, timeframe: str) -> str:
-    """Create TradingView widget HTML"""
-    widget_html = f'''
-    <div class="tradingview-widget-container">
-        <div id="tradingview_chart_{symbol.lower()}"></div>
-        <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-        <script type="text/javascript">
-            new TradingView.widget({{
-                "width": "100%",
-                "height": 600,
-                "symbol": "NSE:{symbol}",
-                "interval": "{timeframe}",
-                "timezone": "Asia/Kolkata",
-                "theme": "dark",
-                "style": "1",
-                "locale": "en",
-                "toolbar_bg": "#1e293b",
-                "enable_publishing": false,
-                "hide_top_toolbar": false,
-                "hide_legend": false,
-                "save_image": true,
-                "container_id": "tradingview_chart_{symbol.lower()}",
-                "studies": [
-                    "RSI@tv-basicstudies",
-                    "MACD@tv-basicstudies",
-                    "Volume@tv-basicstudies"
-                ],
-                "overrides": {{
-                    "paneProperties.background": "#0f172a",
-                    "paneProperties.vertGridProperties.color": "#334155",
-                    "paneProperties.horzGridProperties.color": "#334155",
-                    "symbolWatermarkProperties.transparency": 90,
-                    "scalesProperties.textColor": "#94a3b8"
-                }}
-            }});
-        </script>
-    </div>
-    '''
-    return widget_html
+    df = pd.DataFrame()  # Define df globally for access
 
+    async def update_chart():
+        nonlocal df
+        selected_symbol = instrument_select.value
+        selected_timeframe = timeframe_select.value
+        selected_start = start_date.value
+        selected_end = end_date.value
 
-async def render_analytics_page(fetch_api, user_storage, get_cached_instruments, broker):
-    """Enhanced analytics page with comprehensive stock analysis"""
-    with ui.column().classes("analytics-container w-full min-h-screen p-4"):
-        # Enhanced header
-        with ui.element('div').classes("analytics-header"):
-            with ui.row().classes("w-full justify-between items-center"):
-                with ui.column().classes("gap-2"):
-                    ui.label("Advanced Stock Analysis").classes("page-title")
-                    ui.label("Professional-grade technical analysis with TradingView integration").classes(
-                        "page-subtitle")
-
-                with ui.row().classes("gap-4"):
-                    ui.button("Screener", icon="filter_list", on_click=lambda: ui.navigate.to('/screener')).classes(
-                        "px-6 py-2")
-                    ui.button("Alerts", icon="notifications", on_click=lambda: ui.navigate.to('/alerts')).classes(
-                        "px-6 py-2")
-
-        # Main chart container with TradingView widget
-        with ui.element('div').classes("main-chart-container"):
-            # Chart controls header
-            with ui.element('div').classes("chart-controls-header"):
-                with ui.row().classes("w-full justify-between items-center"):
-                    # Symbol selector
-                    with ui.row().classes("items-center gap-4"):
-                        ui.label("Symbol:").classes("text-sm font-medium")
-                        symbol_select = ui.select(
-                            options=["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "ITC", "LT", "WIPRO",
-                                     "ONGC"],
-                            value=chart_state["selected_symbol"],
-                            on_change=lambda e: update_symbol(e.value)
-                        ).classes("symbol-selector")
-
-                    # Timeframe buttons
-                    with ui.element('div').classes("timeframe-buttons"):
-                        for tf in ["1m", "5m", "15m", "1h", "1d", "1w", "1M"]:
-                            btn_class = "timeframe-btn active" if tf == chart_state[
-                                "selected_timeframe"] else "timeframe-btn"
-                            ui.button(tf, on_click=lambda t=tf: update_timeframe(t)).classes(btn_class)
-
-            # TradingView widget container
-            chart_container = ui.element('div').classes("tradingview-widget-container")
-
-            # Drawing tools (optional)
-            with ui.element('div').classes("drawing-tools"):
-                ui.label("Drawing Tools:").classes("text-sm font-medium mr-4")
-                for tool in ["line", "horizontal_line", "trend_line", "rectangle", "circle"]:
-                    ui.button(tool.replace("_", " ").title(), on_click=lambda t=tool: toggle_drawing_tool(t)).classes(
-                        "drawing-tool-btn text-xs")
-
-        # Stock metrics grid
-        metrics_container = ui.column().classes("w-full")
-
-        # Technical indicators panel
-        with ui.element('div').classes("indicators-panel"):
-            ui.label("Technical Indicators").classes("indicator-group-title")
-
-            with ui.element('div').classes("indicator-controls"):
-                # Trend indicators
-                with ui.element('div').classes("indicator-control"):
-                    ui.label("Trend Indicators").classes("text-sm font-semibold mb-2")
-                    ui.checkbox("SMA (20, 50, 200)", value=chart_state["indicators"]["sma"]["enabled"],
-                                on_change=lambda e: toggle_indicator("sma", e.value))
-                    ui.checkbox("EMA (20, 50)", value=chart_state["indicators"]["ema"]["enabled"],
-                                on_change=lambda e: toggle_indicator("ema", e.value))
-                    ui.checkbox("Bollinger Bands", value=chart_state["indicators"]["bollinger"]["enabled"],
-                                on_change=lambda e: toggle_indicator("bollinger", e.value))
-
-                # Momentum indicators
-                with ui.element('div').classes("indicator-control"):
-                    ui.label("Momentum Indicators").classes("text-sm font-semibold mb-2")
-                    ui.checkbox("RSI (14)", value=chart_state["indicators"]["rsi"]["enabled"],
-                                on_change=lambda e: toggle_indicator("rsi", e.value))
-                    ui.checkbox("MACD (12,26,9)", value=chart_state["indicators"]["macd"]["enabled"],
-                                on_change=lambda e: toggle_indicator("macd", e.value))
-                    ui.checkbox("Stochastic", value=chart_state["indicators"]["stochastic"]["enabled"],
-                                on_change=lambda e: toggle_indicator("stochastic", e.value))
-
-                # Volume indicators
-                with ui.element('div').classes("indicator-control"):
-                    ui.label("Volume & Others").classes("text-sm font-semibold mb-2")
-                    ui.checkbox("Volume", value=chart_state["indicators"]["volume"]["enabled"],
-                                on_change=lambda e: toggle_indicator("volume", e.value))
-                    ui.checkbox("ATR", value=chart_state["indicators"]["atr"]["enabled"],
-                                on_change=lambda e: toggle_indicator("atr", e.value))
-                    ui.checkbox("CCI", value=chart_state["indicators"]["cci"]["enabled"],
-                                on_change=lambda e: toggle_indicator("cci", e.value))
-
-        # Analysis summary
-        analysis_container = ui.column().classes("w-full")
-
-    # Initialize with default symbol
-    await update_chart_and_metrics(chart_state["selected_symbol"])
-
-
-async def update_symbol(symbol: str):
-    """Update selected symbol and refresh data"""
-    chart_state["selected_symbol"] = symbol
-    await update_chart_and_metrics(symbol)
-
-
-async def update_timeframe(timeframe: str):
-    """Update selected timeframe and refresh chart"""
-    chart_state["selected_timeframe"] = timeframe
-    await update_chart_and_metrics(chart_state["selected_symbol"])
-
-
-def toggle_indicator(indicator: str, enabled: bool):
-    """Toggle technical indicator on/off"""
-    chart_state["indicators"][indicator]["enabled"] = enabled
-    # Refresh chart with updated indicators
-    asyncio.create_task(update_chart_and_metrics(chart_state["selected_symbol"]))
-
-
-def toggle_drawing_tool(tool: str):
-    """Toggle drawing tool"""
-    chart_state["drawing_tools"]["tool"] = tool
-    chart_state["drawing_tools"]["enabled"] = True
-
-
-async def update_chart_and_metrics(symbol: str):
-    """Update both chart and metrics for the selected symbol"""
-    try:
-        # Fetch stock data
-        df = await fetch_stock_data(symbol)
-        if df.empty:
-            logger.warning(f"No data available for {symbol}")
+        if not selected_symbol or selected_symbol not in instruments:
+            status_label.text = "Invalid instrument selection."
+            ui.notify("Please select a valid instrument.", type="negative")
             return
 
-        # Calculate comprehensive metrics
-        metrics = await calculate_stock_metrics(symbol, df)
-        if not metrics:
-            logger.warning(f"Could not calculate metrics for {symbol}")
+        try:
+            start_dt = datetime.strptime(selected_start, "%Y-%m-%d")
+            end_dt = datetime.strptime(selected_end, "%Y-%m-%d")
+            if start_dt >= end_dt:
+                status_label.text = "Invalid date range."
+                ui.notify("Start date must be before end date.", type="negative")
+                return
+        except ValueError:
+            status_label.text = "Invalid date format."
+            ui.notify("Invalid date format.", type="negative")
             return
 
-        # Update chart with TradingView widget
-        await update_tradingview_chart(symbol, chart_state["selected_timeframe"])
-
-        # Update metrics display
-        await update_metrics_display(metrics)
-
-        # Update analysis summary
-        await update_analysis_summary(metrics, df)
-
-    except Exception as e:
-        logger.error(f"Error updating chart and metrics: {e}")
-
-
-async def update_tradingview_chart(symbol: str, timeframe: str):
-    """Update TradingView chart widget"""
-    try:
-        widget_html = await create_tradingview_widget(symbol, timeframe)
-
-        # Update the chart container with new widget
-        # Note: In a real implementation, you'd need to properly handle DOM updates
-        chart_script = f'''
-        <script>
-            // Clear existing chart
-            const container = document.querySelector('.tradingview-widget-container');
-            if (container) {{
-                container.innerHTML = `{widget_html}`;
-            }}
-        </script>
-        '''
-
-        ui.add_head_html(chart_script)
-
-    except Exception as e:
-        logger.error(f"Error updating TradingView chart: {e}")
-
-
-async def update_metrics_display(metrics: StockMetrics):
-    """Update the stock metrics display"""
-    try:
-        # Clear existing metrics container and rebuild
-        with ui.element('div').classes("stock-metrics-grid"):
-            # Price & Change Card
-            with ui.element('div').classes("metric-card"):
-                ui.label("Price & Change").classes("metric-card-title")
-                with ui.row().classes("items-baseline gap-2"):
-                    ui.label(f"₹{metrics.current_price:.2f}").classes("metric-value")
-                    change_class = "positive" if metrics.change >= 0 else "negative"
-                    ui.label(f"{metrics.change:+.2f} ({metrics.change_percent:+.2f}%)").classes(
-                        f"metric-change {change_class}")
-
-            # Volume Analysis Card
-            with ui.element('div').classes("metric-card"):
-                ui.label("Volume Analysis").classes("metric-card-title")
-                ui.label(f"{metrics.volume:,}").classes("metric-value text-blue-400")
-                volume_ratio = metrics.volume / metrics.avg_volume if metrics.avg_volume > 0 else 1
-                ui.label(f"Avg: {metrics.avg_volume:,} ({volume_ratio:.1f}x)").classes("metric-change neutral")
-                ui.label(metrics.volume_signal).classes(
-                    f"signal-badge signal-{get_signal_class(metrics.volume_signal)}")
-
-            # Technical Indicators Card
-            with ui.element('div').classes("metric-card"):
-                ui.label("Technical Indicators").classes("metric-card-title")
-
-                with ui.column().classes("gap-2"):
-                    # RSI
-                    with ui.row().classes("justify-between items-center"):
-                        ui.label("RSI (14)")
-                        rsi_class = "negative" if metrics.rsi > 70 else "positive" if metrics.rsi < 30 else "neutral"
-                        ui.label(f"{metrics.rsi:.1f}").classes(f"font-bold {rsi_class}")
-
-                    # MACD
-                    with ui.row().classes("justify-between items-center"):
-                        ui.label("MACD Signal")
-                        ui.label(metrics.macd_signal).classes(
-                            f"signal-badge signal-{get_signal_class(metrics.macd_signal)}")
-
-                    # Bollinger Bands
-                    with ui.row().classes("justify-between items-center"):
-                        ui.label("Bollinger Position")
-                        ui.label(metrics.bollinger_position).classes("text-sm neutral")
-
-            # Fundamental Data Card
-            with ui.element('div').classes("metric-card"):
-                ui.label("Fundamentals").classes("metric-card-title")
-
-                with ui.column().classes("gap-1"):
-                    with ui.row().classes("justify-between"):
-                        ui.label("P/E Ratio")
-                        ui.label(f"{metrics.pe_ratio:.2f}").classes("font-mono")
-
-                    with ui.row().classes("justify-between"):
-                        ui.label("P/B Ratio")
-                        ui.label(f"{metrics.pb_ratio:.2f}").classes("font-mono")
-
-                    with ui.row().classes("justify-between"):
-                        ui.label("Dividend Yield")
-                        ui.label(f"{metrics.dividend_yield:.2f}%").classes("font-mono")
-
-                    with ui.row().classes("justify-between"):
-                        ui.label("Beta")
-                        ui.label(f"{metrics.beta:.2f}").classes("font-mono")
-
-            # 52-Week Range Card
-            with ui.element('div').classes("metric-card"):
-                ui.label("52-Week Range").classes("metric-card-title")
-
-                with ui.column().classes("gap-2"):
-                    ui.label(f"High: ₹{metrics.fifty_two_week_high:.2f}").classes("text-green-400")
-                    ui.label(f"Low: ₹{metrics.fifty_two_week_low:.2f}").classes("text-red-400")
-
-                    # Calculate position in range
-                    range_position = ((metrics.current_price - metrics.fifty_two_week_low) /
-                                      (metrics.fifty_two_week_high - metrics.fifty_two_week_low)) * 100
-                    ui.label(f"Position: {range_position:.1f}%").classes("text-blue-400")
-
-            # Moving Averages Card
-            with ui.element('div').classes("metric-card"):
-                ui.label("Moving Averages").classes("metric-card-title")
-
-                with ui.column().classes("gap-1"):
-                    sma_20_signal = "positive" if metrics.current_price > metrics.sma_20 else "negative"
-                    with ui.row().classes("justify-between"):
-                        ui.label("SMA 20")
-                        ui.label(f"₹{metrics.sma_20:.2f}").classes(f"font-mono {sma_20_signal}")
-
-                    sma_50_signal = "positive" if metrics.current_price > metrics.sma_50 else "negative"
-                    with ui.row().classes("justify-between"):
-                        ui.label("SMA 50")
-                        ui.label(f"₹{metrics.sma_50:.2f}").classes(f"font-mono {sma_50_signal}")
-
-                    sma_200_signal = "positive" if metrics.current_price > metrics.sma_200 else "negative"
-                    with ui.row().classes("justify-between"):
-                        ui.label("SMA 200")
-                        ui.label(f"₹{metrics.sma_200:.2f}").classes(f"font-mono {sma_200_signal}")
-
-    except Exception as e:
-        logger.error(f"Error updating metrics display: {e}")
-
-
-async def update_analysis_summary(metrics: StockMetrics, df: pd.DataFrame):
-    """Update the comprehensive analysis summary"""
-    try:
-        with ui.element('div').classes("analysis-summary"):
-            with ui.row().classes("w-full justify-between items-start"):
-                # Overall Signal
-                with ui.column().classes("gap-4"):
-                    ui.label("Trading Analysis Summary").classes("text-xl font-bold mb-4")
-
-                    with ui.row().classes("items-center gap-4"):
-                        ui.label("Overall Signal:").classes("text-lg")
-                        signal_class = get_signal_class(metrics.overall_signal)
-                        ui.label(metrics.overall_signal).classes(
-                            f"signal-badge signal-{signal_class} text-lg px-4 py-2")
-
-                    # Confidence meter
-                    ui.label(f"Confidence: {metrics.confidence_score:.1f}%").classes("text-sm text-gray-300")
-                    with ui.element('div').classes("confidence-meter"):
-                        confidence_color = "#22c55e" if metrics.confidence_score > 70 else "#f59e0b" if metrics.confidence_score > 50 else "#ef4444"
-                        ui.element('div').classes("confidence-fill").style(
-                            f"width: {metrics.confidence_score}%; background-color: {confidence_color};"
-                        )
-
-                # Signal Breakdown
-                with ui.column().classes("gap-2"):
-                    ui.label("Signal Breakdown").classes("text-lg font-semibold mb-2")
-
-                    with ui.column().classes("gap-1"):
-                        ui.label(f"Trend: {metrics.trend_signal}").classes(
-                            f"signal-badge signal-{get_signal_class(metrics.trend_signal)}")
-                        ui.label(f"Momentum: {metrics.momentum_signal}").classes(
-                            f"signal-badge signal-{get_signal_class(metrics.momentum_signal)}")
-                        ui.label(f"Volume: {metrics.volume_signal}").classes(
-                            f"signal-badge signal-{get_signal_class(metrics.volume_signal)}")
-
-            # Key Levels and Recommendations
-            with ui.element('div').classes("mt-6 p-4 bg-slate-800 rounded-lg"):
-                ui.label("Key Levels & Recommendations").classes("text-lg font-semibold mb-3")
-
-                recommendations = generate_trading_recommendations(metrics, df)
-
-                with ui.column().classes("gap-2"):
-                    for rec in recommendations:
-                        with ui.row().classes("items-center gap-2"):
-                            ui.icon(rec["icon"], size="sm").classes(f"text-{rec['color']}-400")
-                            ui.label(rec["text"]).classes("text-sm")
-
-    except Exception as e:
-        logger.error(f"Error updating analysis summary: {e}")
-
-
-def get_signal_class(signal: str) -> str:
-    """Get CSS class for signal styling"""
-    signal_lower = signal.lower()
-
-    if any(word in signal_lower for word in ["buy", "bullish", "strong", "high", "above"]):
-        return "buy"
-    elif any(word in signal_lower for word in ["sell", "bearish", "weak", "low", "below"]):
-        return "sell"
-    else:
-        return "hold"
-
-
-def generate_trading_recommendations(metrics: StockMetrics, df: pd.DataFrame) -> List[Dict]:
-    """Generate actionable trading recommendations"""
-    recommendations = []
-
-    try:
-        # Support and Resistance levels
-        recent_high = df['High'].tail(20).max()
-        recent_low = df['Low'].tail(20).min()
-
-        recommendations.append({
-            "icon": "trending_up",
-            "color": "green",
-            "text": f"Resistance Level: ₹{recent_high:.2f} - Watch for breakout above this level"
-        })
-
-        recommendations.append({
-            "icon": "trending_down",
-            "color": "red",
-            "text": f"Support Level: ₹{recent_low:.2f} - Strong buying opportunity if price holds"
-        })
-
-        # RSI based recommendations
-        if metrics.rsi > 70:
-            recommendations.append({
-                "icon": "warning",
-                "color": "yellow",
-                "text": "RSI indicates overbought conditions - Consider taking profits"
-            })
-        elif metrics.rsi < 30:
-            recommendations.append({
-                "icon": "shopping_cart",
-                "color": "green",
-                "text": "RSI indicates oversold conditions - Potential buying opportunity"
-            })
-
-        # Volume based recommendations
-        if "High" in metrics.volume_signal:
-            recommendations.append({
-                "icon": "volume_up",
-                "color": "blue",
-                "text": "High volume confirms price movement - Strong conviction in current trend"
-            })
-        elif "Low" in metrics.volume_signal:
-            recommendations.append({
-                "icon": "volume_down",
-                "color": "gray",
-                "text": "Low volume suggests weak conviction - Wait for volume confirmation"
-            })
-
-        # Trend based recommendations
-        if "Strong Bullish" in metrics.trend_signal:
-            recommendations.append({
-                "icon": "rocket_launch",
-                "color": "green",
-                "text": "Strong uptrend - Consider adding to positions on dips"
-            })
-        elif "Strong Bearish" in metrics.trend_signal:
-            recommendations.append({
-                "icon": "trending_down",
-                "color": "red",
-                "text": "Strong downtrend - Avoid catching falling knife, wait for reversal"
-            })
-
-        # Risk management
-        atr_value = df['ATR'].iloc[-1] if 'ATR' in df.columns else metrics.current_price * 0.02
-        stop_loss = metrics.current_price - (2 * atr_value)
-        target = metrics.current_price + (3 * atr_value)
-
-        recommendations.append({
-            "icon": "shield",
-            "color": "orange",
-            "text": f"Suggested Stop Loss: ₹{stop_loss:.2f} (2x ATR)"
-        })
-
-        recommendations.append({
-            "icon": "flag",
-            "color": "purple",
-            "text": f"Suggested Target: ₹{target:.2f} (3x ATR)"
-        })
-
-        return recommendations
-
-    except Exception as e:
-        logger.error(f"Error generating recommendations: {e}")
-        return []
-
-
-# Additional utility functions for enhanced features
-
-async def create_price_alerts_section():
-    """Create price alerts section"""
-    with ui.element('div').classes("metric-card"):
-        ui.label("Price Alerts").classes("metric-card-title")
-
-        with ui.column().classes("gap-3"):
-            # Create alert form
-            with ui.row().classes("gap-2 items-end"):
-                alert_price = ui.number("Alert Price", value=0, format="%.2f").classes("flex-1")
-                alert_type = ui.select(["Above", "Below"], value="Above").classes("w-24")
-                ui.button("Set Alert", icon="add_alert").classes("px-4")
-
-            # Existing alerts list (mock data)
-            ui.label("Active Alerts").classes("text-sm font-semibold mt-3")
-
-            mock_alerts = [
-                {"price": 2500.00, "type": "Above", "status": "Active"},
-                {"price": 2300.00, "type": "Below", "status": "Active"}
-            ]
-
-            for alert in mock_alerts:
-                with ui.row().classes("justify-between items-center p-2 bg-slate-700 rounded"):
-                    ui.label(f"₹{alert['price']:.2f} ({alert['type']})").classes("text-sm")
-                    with ui.row().classes("gap-1"):
-                        ui.chip(alert["status"], color="green" if alert["status"] == "Active" else "gray").classes(
-                            "text-xs")
-                        ui.button(icon="delete", on_click=lambda: None).classes("text-red-400 p-1")
-
-
-async def create_news_sentiment_section(symbol: str):
-    """Create news and sentiment analysis section"""
-    with ui.element('div').classes("metric-card"):
-        ui.label("News & Sentiment").classes("metric-card-title")
-
-        # Mock news data - integrate with real news APIs
-        news_items = [
-            {
-                "headline": f"{symbol} reports strong Q4 earnings, beats estimates",
-                "sentiment": "Positive",
-                "time": "2 hours ago",
-                "source": "Economic Times"
-            },
-            {
-                "headline": f"Analysts upgrade {symbol} target price to ₹2800",
-                "sentiment": "Positive",
-                "time": "5 hours ago",
-                "source": "Moneycontrol"
-            },
-            {
-                "headline": f"Market volatility affects {symbol} trading volumes",
-                "sentiment": "Neutral",
-                "time": "1 day ago",
-                "source": "Business Standard"
+        theme = user_storage.get("theme", "dark")
+        theme_config = THEME_CONFIG.get(theme.lower(), THEME_CONFIG["dark"])
+
+        status_label.text = f"Loading {selected_symbol} ({selected_timeframe}) data..."
+        update_button.props("loading=true disabled=true")
+
+        try:
+            # Map timeframe to unit and interval for API
+            timeframe_mapping = {
+                "1m": ("minute", "1"),
+                "5m": ("minute", "5"),
+                "15m": ("minute", "15"),
+                "1h": ("hour", "1"),
+                "1d": ("days", "1")
             }
-        ]
+            unit, interval = timeframe_mapping.get(selected_timeframe, ("days", "1"))
 
-        with ui.column().classes("gap-2"):
-            for news in news_items[:3]:  # Show top 3 news
-                with ui.element('div').classes("p-2 bg-slate-700 rounded"):
-                    ui.label(news["headline"]).classes("text-sm font-medium")
-                    with ui.row().classes("justify-between items-center mt-1"):
-                        ui.label(news["source"]).classes("text-xs text-gray-400")
-                        sentiment_color = "green" if news["sentiment"] == "Positive" else "red" if news[
-                                                                                                       "sentiment"] == "Negative" else "gray"
-                        ui.chip(news["sentiment"], color=sentiment_color).classes("text-xs")
-                    ui.label(news["time"]).classes("text-xs text-gray-500")
+            # Fetch historical data from custom API endpoint
+            historical_endpoint = f"/historical-data/Upstox"
+            historical_params = {
+                "instrument": instruments[selected_symbol],
+                "from_date": selected_start,
+                "to_date": selected_end,
+                "unit": unit,
+                "interval": interval
+            }
+            response = await fetch_api(historical_endpoint, method="GET", params=historical_params)
+            logger.info(f"Historical response: {response}")
 
+            if not response or not isinstance(response, dict) or "data" not in response:
+                status_label.text = "Invalid historical data response."
+                ui.notify("Invalid data from server.", type="warning")
+                logger.error(f"Invalid historical data response: {response}")
+                raise ValueError("Invalid historical data response")
 
-async def create_peer_comparison_section(symbol: str):
-    """Create peer comparison section"""
-    with ui.element('div').classes("metric-card"):
-        ui.label("Peer Comparison").classes("metric-card-title")
+            if not response["data"]:
+                status_label.text = "No historical data available."
+                ui.notify("No historical data for the selected parameters.", type="warning")
+                logger.warning("Empty historical data received.")
+                raise ValueError("Empty historical data received")
 
-        # Mock peer data - integrate with real financial data APIs
-        peer_data = [
-            {"symbol": "TCS", "price": 3500.00, "change": 1.2, "pe": 22.5},
-            {"symbol": "INFY", "price": 1650.00, "change": -0.8, "pe": 24.1},
-            {"symbol": "WIPRO", "price": 420.00, "change": 0.5, "pe": 18.9},
-        ]
+            # Process historical data
+            df = pd.DataFrame([{
+                "time": int(pd.to_datetime(point["timestamp"]).timestamp()),  # seconds for Lightweight Charts
+                "open": float(point.get("open", 0)),
+                "high": float(point.get("high", 0)),
+                "low": float(point.get("low", 0)),
+                "close": float(point.get("close", 0)),
+                "volume": int(point.get("volume", 0))
+            } for point in response["data"] if point.get("timestamp")])
+            if df.empty:
+                status_label.text = "No data to display."
+                ui.notify("No data available after processing.", type="warning")
+                logger.warning("DataFrame is empty after processing.")
+                raise ValueError("DataFrame is empty after processing")
+            df = df.sort_values("time")
 
-        with ui.column().classes("gap-2"):
-            for peer in peer_data:
-                with ui.row().classes("justify-between items-center p-2 bg-slate-700 rounded"):
-                    ui.label(peer["symbol"]).classes("font-medium")
-                    with ui.column().classes("items-end"):
-                        ui.label(f"₹{peer['price']:.2f}").classes("text-sm")
-                        change_color = "text-green-400" if peer["change"] >= 0 else "text-red-400"
-                        ui.label(f"{peer['change']:+.1f}%").classes(f"text-xs {change_color}")
+            # Apply replay index
+            replay_index = chart_state.get("current_replay_index", -1)
+            if replay_index == -1:
+                replay_index = len(df) - 1
+            replay_data = df.iloc[:replay_index + 1].copy()
 
+            # Calculate indicators
+            close_series = replay_data["close"]
+            indicators = {}
+            for indicator_type, instances in chart_state["indicators"].items():
+                indicators[indicator_type] = []
+                for params in instances:
+                    if indicator_type == "SMA":
+                        sma_data = calculate_sma(close_series, params["period"])
+                        sma_series = [{"time": row["time"], "value": val} for row, val in zip(replay_data.to_dict("records"), sma_data) if val is not None]
+                        indicators[indicator_type].append({
+                            "name": f"SMA ({params['period']})",
+                            "data": sma_series,
+                            "color": theme_config["sma"],
+                            "pane": 0,
+                            "type": "line",
+                            "enabled": True
+                        })
+                    elif indicator_type == "EMA":
+                        ema_data = calculate_ema(close_series, params["period"])
+                        ema_series = [{"time": row["time"], "value": val} for row, val in zip(replay_data.to_dict("records"), ema_data) if val is not None]
+                        indicators[indicator_type].append({
+                            "name": f"EMA ({params['period']})",
+                            "data": ema_series,
+                            "color": theme_config["ema"],
+                            "pane": 0,
+                            "type": "line",
+                            "enabled": True
+                        })
+                    elif indicator_type == "RSI":
+                        rsi_data = calculate_rsi(close_series, params["period"])
+                        rsi_series = [{"time": row["time"], "value": val} for row, val in zip(replay_data.to_dict("records"), rsi_data) if val is not None]
+                        indicators[indicator_type].append({
+                            "name": f"RSI ({params['period']})",
+                            "data": rsi_series,
+                            "color": theme_config["rsi"],
+                            "pane": 1,
+                            "type": "line",
+                            "enabled": True
+                        })
+                    elif indicator_type == "BBANDS":
+                        bbands = calculate_bbands(close_series, params["period"], params["std"])
+                        for band, color_key in [("upper", "bb_upper"), ("middle", "bb_middle"), ("lower", "bb_lower")]:
+                            band_series = [{"time": row["time"], "value": val} for row, val in zip(replay_data.to_dict("records"), bbands[band]) if val is not None]
+                            indicators[indicator_type].append({
+                                "name": f"BB_{band.upper()} ({params['period']},{params['std']})",
+                                "data": band_series,
+                                "color": theme_config[color_key],
+                                "pane": 0,
+                                "type": "line",
+                                "enabled": True
+                            })
+                    elif indicator_type == "MACD":
+                        macd = calculate_macd(close_series, params["fast"], params["slow"], params["signal"])
+                        for key, color_key, type_key in [("macd", "macd", "line"), ("signal", "macd_signal", "line"), ("hist", "macd_hist", "histogram")]:
+                            series_data = [{"time": row["time"], "value": val} for row, val in zip(replay_data.to_dict("records"), macd[key]) if val is not None]
+                            indicators[indicator_type].append({
+                                "name": f"MACD_{key.upper()} ({params['fast']},{params['slow']},{params['signal']})",
+                                "data": series_data,
+                                "color": theme_config[color_key],
+                                "pane": 2 if key != "hist" else 3,
+                                "type": type_key,
+                                "enabled": True
+                            })
+                    elif indicator_type == "LINREG":
+                        linreg_data = calculate_linreg(close_series, params["period"])
+                        linreg_series = [{"time": row["time"], "value": val} for row, val in zip(replay_data.to_dict("records"), linreg_data) if val is not None]
+                        indicators[indicator_type].append({
+                            "name": f"LINREG ({params['period']})",
+                            "data": linreg_series,
+                            "color": theme_config["linreg"],
+                            "pane": 0,
+                            "type": "line",
+                            "enabled": True
+                        })
 
-# Enhanced screener functionality
+            # Prepare chart data
+            ohlc_data = replay_data[["time", "open", "high", "low", "close"]].to_dict("records")
+            volume_data = [{"time": row["time"], "value": row["volume"]} for row in replay_data.to_dict("records")]
 
-async def create_stock_screener():
-    """Create advanced stock screener"""
-    with ui.element('div').classes("screener-container p-4"):
-        ui.label("Stock Screener").classes("text-2xl font-bold mb-4")
+            # Calculate total height based on subcharts
+            num_subcharts = sum(1 for ind in chart_state["indicators"] if ind in ["RSI", "MACD"])
+            total_height = 600 + (num_subcharts * 100)
+            main_chart_height = 600 - (num_subcharts * 100) if num_subcharts > 0 else 600
+            scale_margins_bottom = 0.1 + (num_subcharts * 0.1)
 
-        # Screening criteria
-        with ui.element('div').classes("screening-criteria bg-slate-800 p-4 rounded-lg mb-4"):
-            ui.label("Screening Criteria").classes("text-lg font-semibold mb-3")
+            # Render the chart container using ui.html
+            chart_container_html = f"""
+            <div id="chart_{selected_symbol}" style="width: 100%; height: {total_height}px; position: relative;">
+                <div id="chart_topbar_{selected_symbol}" style="position: absolute; top: 0px; left: 50%; transform: translateX(-50%); z-index: 1000; color: {theme_config['text']}; font-size: 20px;"></div>
+                <div id="chart_legend_{selected_symbol}" style="position: absolute; top: 30px; left: 10px; z-index: 1000;"></div>
+                <div id="chart_controls_{selected_symbol}" style="position: absolute; top: 30px; right: 10px; z-index: 1000;">
+                    <select id="indicator_select_{selected_symbol}">
+                        <option value="">Add Indicator</option>
+                        <option value="SMA">SMA</option>
+                        <option value="EMA">EMA</option>
+                        <option value="RSI">RSI</option>
+                        <option value="BBANDS">BBANDS</option>
+                        <option value="MACD">MACD</option>
+                        <option value="LINREG">LINREG</option>
+                    </select>
+                    <input id="indicator_period_{selected_symbol}" type="number" value="20" min="1" style="width: 60px; margin-left: 5px;">
+                    <button onclick="addIndicator('{selected_symbol}')">Add</button>
+                </div>
+            </div>
+            """
+            with chart_container:
+                chart_element.clear()  # Clear previous chart
+                ui.html(chart_container_html).style(f"width: 100%; height: {total_height}px;")
 
-            with ui.grid(columns=3).classes("gap-4"):
-                # Technical criteria
-                with ui.column().classes("gap-2"):
-                    ui.label("Technical").classes("font-semibold")
-                    ui.number("RSI Min", value=30, min=0, max=100)
-                    ui.number("RSI Max", value=70, min=0, max=100)
-                    ui.select(["Above SMA20", "Below SMA20", "Any"], value="Any", label="SMA20 Position")
+            # Load Lightweight Charts library and initialize the chart using ui.run_javascript
+            chart_init_js = f"""
+            // Check if Lightweight Charts is already loaded
+            if (typeof LightweightCharts === 'undefined') {{
+                console.log('Loading Lightweight Charts library...');
+                const script = document.createElement('script');
+                script.src = 'https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js';
+                script.async = false; // Ensure synchronous loading
+                script.onload = function() {{
+                    console.log('Lightweight Charts Loaded:', typeof LightweightCharts !== 'undefined');
+                    initializeChartWithRetry();
+                }};
+                script.onerror = function() {{
+                    console.error('Failed to load Lightweight Charts library');
+                }};
+                document.head.appendChild(script);
+            }} else {{
+                console.log('Lightweight Charts already loaded, initializing chart...');
+                initializeChartWithRetry();
+            }}
 
-                # Fundamental criteria  
-                with ui.column().classes("gap-2"):
-                    ui.label("Fundamental").classes("font-semibold")
-                    ui.number("P/E Max", value=25)
-                    ui.number("Market Cap Min (Cr)", value=1000)
-                    ui.number("ROE Min %", value=15)
+            let chartInstance_{selected_symbol} = null;
+            let candlestickSeries_{selected_symbol} = null;
+            let volumeSeries_{selected_symbol} = null;
+            let indicatorSeries_{selected_symbol} = {{}};
+            let replayInterval_{selected_symbol} = null;
+            let subcharts_{selected_symbol} = {{}};
+            window.isPlaying_{selected_symbol} = {json.dumps(chart_state["is_playing"])};
 
-                # Volume criteria
-                with ui.column().classes("gap-2"):
-                    ui.label("Volume & Price").classes("font-semibold")
-                    ui.number("Volume Ratio Min", value=1.5)
-                    ui.number("Price Min", value=100)
-                    ui.number("Price Max", value=5000)
+            window.drawingMode = window.drawingMode || {{ active: false, tool: null, start_point: null, end_point: null }};
 
-            with ui.row().classes("gap-2 mt-4"):
-                ui.button("Run Screener", icon="search").classes("bg-blue-600 px-6")
-                ui.button("Save Criteria", icon="save").classes("bg-gray-600 px-4")
-                ui.button("Load Preset", icon="folder_open").classes("bg-gray-600 px-4")
+            function initializeChartWithRetry(attempt = 1, maxAttempts = 5) {{
+                try {{
+                    const chartContainer = document.getElementById('chart_{selected_symbol}');
+                    if (!chartContainer) {{
+                        if (attempt < maxAttempts) {{
+                            console.warn('Chart container not found, retrying in 500ms... Attempt ' + attempt);
+                            setTimeout(() => initializeChartWithRetry(attempt + 1, maxAttempts), 500);
+                        }} else {{
+                            console.error('Chart container not found after ' + maxAttempts + ' attempts');
+                        }}
+                        return;
+                    }}
+                    if (chartContainer.offsetWidth === 0 || chartContainer.offsetHeight === 0) {{
+                        if (attempt < maxAttempts) {{
+                            console.warn('Chart container has zero dimensions, retrying in 500ms... Attempt ' + attempt);
+                            setTimeout(() => initializeChartWithRetry(attempt + 1, maxAttempts), 500);
+                        }} else {{
+                            console.error('Chart container has zero dimensions after ' + maxAttempts + ' attempts');
+                        }}
+                        return;
+                    }}
+                    if (typeof LightweightCharts.createChart !== 'function') {{
+                        console.error('LightweightCharts.createChart is not a function');
+                        return;
+                    }}
 
-        # Results table
-        with ui.element('div').classes("screener-results"):
-            ui.label("Screening Results").classes("text-lg font-semibold mb-3")
+                    console.log('Container found with dimensions:', chartContainer.offsetWidth, 'x', chartContainer.offsetHeight);
+                    chartInstance_{selected_symbol} = LightweightCharts.createChart(chartContainer, {{
+                        width: chartContainer.offsetWidth,
+                        height: {main_chart_height},
+                        layout: {{
+                            background: {{ color: '{theme_config['bg']}' }},
+                            textColor: '{theme_config['text']}',
+                            fontFamily: 'Arial, sans-serif'
+                        }},
+                        grid: {{
+                            vertLines: {{ color: '{theme_config['grid']}', style: LightweightCharts.LineStyle.Dashed }},
+                            horzLines: {{ color: '{theme_config['grid']}', style: LightweightCharts.LineStyle.Dashed }}
+                        }},
+                        crosshair: {{
+                            mode: LightweightCharts.CrosshairMode.Normal,
+                        }},
+                        rightPriceScale: {{
+                            borderColor: '{theme_config['grid']}',
+                            scaleMargins: {{ top: 0.1, bottom: {scale_margins_bottom} }}
+                        }},
+                        timeScale: {{
+                            timeVisible: true,
+                            secondsVisible: false,
+                            borderColor: '{theme_config['grid']}'
+                        }},
+                        watermark: {{
+                            text: '{selected_symbol}',
+                            color: '{theme_config['watermark']}',
+                            fontSize: 48,
+                            visible: true
+                        }}
+                    }});
 
-            # This would be populated with actual screening results
-            mock_results = [
-                {"symbol": "TATAMOTORS", "price": 650.50, "change": 2.1, "rsi": 45.2, "pe": 12.5, "volume_ratio": 2.3},
-                {"symbol": "MARUTI", "price": 9800.00, "change": -1.2, "rsi": 38.5, "pe": 18.2, "volume_ratio": 1.8},
-                {"symbol": "BAJFINANCE", "price": 7200.00, "change": 3.5, "rsi": 65.8, "pe": 22.1, "volume_ratio": 2.8},
-            ]
+                    // Set topbar symbol
+                    const topbar = document.getElementById('chart_topbar_{selected_symbol}');
+                    topbar.innerText = '{selected_symbol}';
 
-            # Create results table
-            with ui.element('div').classes("overflow-x-auto"):
-                with ui.element('table').classes("w-full text-sm"):
-                    # Header
-                    with ui.element('thead'):
-                        with ui.element('tr').classes("border-b border-gray-600"):
-                            for header in ["Symbol", "Price", "Change %", "RSI", "P/E", "Volume Ratio", "Action"]:
-                                ui.element('th').classes("p-2 text-left").add(ui.label(header))
+                    if (typeof chartInstance_{selected_symbol}.addCandlestickSeries !== 'function') {{
+                        console.error('chartInstance_{selected_symbol}.addCandlestickSeries is not a function');
+                        return;
+                    }}
+                    candlestickSeries_{selected_symbol} = chartInstance_{selected_symbol}.addCandlestickSeries({{
+                        upColor: '{theme_config['candle_up']}',
+                        downColor: '{theme_config['candle_down']}',
+                        borderUpColor: '{theme_config['candle_up']}',
+                        borderDownColor: '{theme_config['candle_down']}',
+                        wickUpColor: '{theme_config['candle_up']}',
+                        wickDownColor: '{theme_config['candle_down']}',
+                        priceFormat: {{ type: 'price', precision: 2, minMove: 0.01 }}
+                    }});
+                    candlestickSeries_{selected_symbol}.setData({json.dumps(ohlc_data)});
 
-                    # Body
-                    with ui.element('tbody'):
-                        for result in mock_results:
-                            with ui.element('tr').classes("border-b border-gray-700 hover:bg-slate-700"):
-                                ui.element('td').classes("p-2").add(ui.label(result["symbol"]).classes("font-medium"))
-                                ui.element('td').classes("p-2").add(ui.label(f"₹{result['price']:.2f}"))
-                                change_color = "text-green-400" if result["change"] >= 0 else "text-red-400"
-                                ui.element('td').classes(f"p-2 {change_color}").add(
-                                    ui.label(f"{result['change']:+.1f}%"))
-                                ui.element('td').classes("p-2").add(ui.label(f"{result['rsi']:.1f}"))
-                                ui.element('td').classes("p-2").add(ui.label(f"{result['pe']:.1f}"))
-                                ui.element('td').classes("p-2").add(ui.label(f"{result['volume_ratio']:.1f}x"))
-                                ui.element('td').classes("p-2").add(
-                                    ui.button("Analyze", icon="analytics",
-                                              on_click=lambda s=result["symbol"]: analyze_stock(s)).classes(
-                                        "bg-blue-600 px-3 py-1 text-xs")
-                                )
+                    volumeSeries_{selected_symbol} = chartInstance_{selected_symbol}.addHistogramSeries({{
+                        color: '{theme_config['volume']}',
+                        priceFormat: {{ type: 'volume' }},
+                        priceScaleId: 'volume',
+                        scaleMargins: {{ top: 0.8, bottom: 0 }}
+                    }});
+                    volumeSeries_{selected_symbol}.setData({json.dumps(volume_data)});
 
+                    // Create subcharts for RSI and MACD
+                    const indicators = {json.dumps(indicators)};
+                    let paneIndex = 0;
+                    if (indicators.RSI) {{
+                        paneIndex++;
+                        subcharts_{selected_symbol}.rsi = paneIndex;
+                    }}
+                    if (indicators.MACD) {{
+                        paneIndex++;
+                        subcharts_{selected_symbol}.macd = paneIndex;
+                        subcharts_{selected_symbol}.macd_hist = paneIndex;
+                    }}
 
-async def analyze_stock(symbol: str):
-    """Navigate to detailed analysis for a specific stock"""
-    chart_state["selected_symbol"] = symbol
-    await update_chart_and_metrics(symbol)
-    ui.navigate.to('/analytics')
+                    // Add indicators
+                    Object.keys(indicators).forEach(indType => {{
+                        indicators[indType].forEach(ind => {{
+                            if (ind.enabled) {{
+                                if (indType === 'BBANDS') {{
+                                    ['upper', 'middle', 'lower'].forEach((band, idx) => {{
+                                        const series = chartInstance_{selected_symbol}.addLineSeries({{
+                                            color: ind.color,
+                                            lineWidth: 1.25,
+                                            pane: 0,
+                                            priceLineVisible: true
+                                        }});
+                                        const bandData = ind.data.map(d => ({{ time: d.time, value: d.value }}));
+                                        series.setData(bandData);
+                                        indicatorSeries_{selected_symbol}[ind.name + '_' + band] = series;
+                                    }});
+                                }} else if (indType === 'MACD') {{
+                                    const pane = subcharts_{selected_symbol}[ind.type === 'histogram' ? 'macd_hist' : 'macd'];
+                                    if (ind.type === 'line') {{
+                                        const series = chartInstance_{selected_symbol}.addLineSeries({{
+                                            color: ind.color,
+                                            lineWidth: 1.5,
+                                            priceLineVisible: false
+                                        }});
+                                        series.setData(ind.data);
+                                        indicatorSeries_{selected_symbol}[ind.name] = series;
+                                    }} else if (ind.type === 'histogram') {{
+                                        const series = chartInstance_{selected_symbol}.addHistogramSeries({{
+                                            color: ind.color,
+                                            priceLineVisible: false
+                                        }});
+                                        series.setData(ind.data);
+                                        indicatorSeries_{selected_symbol}[ind.name] = series;
+                                    }}
+                                }} else {{
+                                    const series = chartInstance_{selected_symbol}.addLineSeries({{
+                                        color: ind.color,
+                                        lineWidth: 1.5,
+                                        pane: ind.pane,
+                                        priceLineVisible: ind.pane === 0
+                                    }});
+                                    series.setData(ind.data);
+                                    indicatorSeries_{selected_symbol}[ind.name] = series;
+                                }}
+                            }}
+                        }});
+                    }});
 
+                    // Build legend
+                    buildLegend();
 
-# Export functionality for reports
+                    // Add drawings
+                    const drawings = {json.dumps(chart_state["drawings"])};
+                    chartInstance_{selected_symbol}.subscribeClick(function(param) {{
+                        if (!window.drawingMode.active) return;
+                        const point = {{ x: param.time, y: param.point.y }};
+                        if (!window.drawingMode.start_point) {{
+                            window.drawingMode.start_point = point;
+                        }} else {{
+                            window.drawingMode.end_point = point;
+                            const newDrawing = createDrawing(window.drawingMode.tool, window.drawingMode.start_point, window.drawingMode.end_point);
+                            drawings.push(newDrawing);
+                            window.drawingMode.start_point = null;
+                            window.drawingMode.end_point = null;
+                            window.drawingMode.active = false;
+                            // Save drawings to user_storage
+                            fetch('/_nicegui/storage/user/chart_state', {{
+                                method: 'POST',
+                                body: JSON.stringify({{drawings: drawings, indicators: {json.dumps(chart_state["indicators"])}, templates: {json.dumps(chart_state["templates"])}, current_template: '{chart_state["current_template"]}', watchlist: {json.dumps(chart_state["watchlist"])}}}),
+                                headers: {{'Content-Type': 'application/json'}}
+                            }}).then(response => response.json()).then(data => {{
+                                console.log('Drawings saved:', data);
+                            }});
+                        }}
+                    }});
 
-async def export_analysis_report(symbol: str, metrics: StockMetrics, df: pd.DataFrame):
-    """Export comprehensive analysis report"""
-    try:
-        report_data = {
-            "symbol": symbol,
-            "analysis_date": datetime.now().isoformat(),
-            "current_price": metrics.current_price,
-            "overall_signal": metrics.overall_signal,
-            "confidence_score": metrics.confidence_score,
-            "technical_indicators": {
-                "rsi": metrics.rsi,
-                "macd_signal": metrics.macd_signal,
-                "bollinger_position": metrics.bollinger_position,
-                "trend_signal": metrics.trend_signal,
-                "momentum_signal": metrics.momentum_signal
-            },
-            "fundamental_data": {
-                "pe_ratio": metrics.pe_ratio,
-                "pb_ratio": metrics.pb_ratio,
-                "market_cap": metrics.market_cap,
-                "dividend_yield": metrics.dividend_yield
-            },
-            "recommendations": generate_trading_recommendations(metrics, df)
-        }
+                    chartInstance_{selected_symbol}.timeScale().fitContent();
+                    console.log('Lightweight Charts rendered successfully');
+                }} catch (e) {{
+                    console.error('Lightweight Charts rendering error:', e);
+                }}
+            }}
 
-        # Convert to JSON for export
-        report_json = json.dumps(report_data, indent=2)
+            function createDrawing(tool, startPoint, endPoint) {{
+                if (tool === 'Trendline') {{
+                    return {{
+                        type: 'trendline',
+                        start: startPoint,
+                        end: endPoint,
+                        color: '#FF0000',
+                        width: 2
+                    }};
+                }} else if (tool === 'Horizontal Line') {{
+                    return {{
+                        type: 'horizontal_line',
+                        price: startPoint.y,
+                        color: '#00FF00',
+                        width: 2
+                    }};
+                }} else if (tool === 'Rectangle') {{
+                    return {{
+                        type: 'rectangle',
+                        start: startPoint,
+                        end: endPoint,
+                        color: 'rgba(0, 0, 255, 0.2)',
+                        borderColor: '#0000FF',
+                        width: 2
+                    }};
+                }}
+                return null;
+            }}
 
-        # In a real implementation, you'd save this to a file or send via API
-        logger.info(f"Analysis report generated for {symbol}")
-        return report_json
+            function buildLegend() {{
+                const legendContainer = document.getElementById('chart_legend_{selected_symbol}');
+                legendContainer.innerHTML = '';
+                const lastCandle = {json.dumps(ohlc_data[-1] if ohlc_data else {"close": 0, "open": 0})};
+                const colorBasedOnCandle = lastCandle.close >= lastCandle.open ? '{theme_config['candle_up']}' : '{theme_config['candle_down']}'
+                const series = [
+                    {{ name: 'Candlestick', series: candlestickSeries_{selected_symbol}, color: colorBasedOnCandle, visible: true }},
+                    {{ name: 'Volume', series: volumeSeries_{selected_symbol}, color: '{theme_config['volume']}', visible: true }},
+                    ...Object.entries(indicatorSeries_{selected_symbol}).map(([name, series]) => ({{ name, series, color: series.options().color, visible: true }}))
+                ];
+                series.forEach(item => {{
+                    const div = document.createElement('div');
+                    div.style.display = 'flex';
+                    div.style.alignItems = 'center';
+                    div.style.marginRight = '10px';
+                    div.style.cursor = 'pointer';
+                    div.style.fontSize = '20px';
+                    div.innerHTML = `
+                        <span style="width: 12px; height: 12px; background-color: ${{item.color}}; margin-right: 5px;"></span>
+                        <span style="color: '{theme_config['text']}';">${{item.name}}</span>
+                    `;
+                    div.onclick = () => {{
+                        item.visible = !item.visible;
+                        item.series.applyOptions({{ visible: item.visible }});
+                        div.style.opacity = item.visible ? 1 : 0.5;
+                    }};
+                    legendContainer.appendChild(div);
+                }});
+            }}
 
-    except Exception as e:
-        logger.error(f"Error exporting analysis report: {e}")
-        return None
+            function startReplay() {{
+                if (!window.isPlaying_{selected_symbol}) {{
+                    clearInterval(replayInterval_{selected_symbol});
+                    replayInterval_{selected_symbol} = null;
+                    candlestickSeries_{selected_symbol}.setData({json.dumps(ohlc_data)});
+                    volumeSeries_{selected_symbol}.setData({json.dumps(volume_data)});
+                    Object.values(indicatorSeries_{selected_symbol}).forEach(series => {{
+                        const ind = Object.values(indicators).flat().find(i => i.name === series.name);
+                        series.setData(ind.data);
+                    }});
+                    chartInstance_{selected_symbol}.timeScale().fitContent();
+                    console.log('Replay stopped');
+                    return;
+                }}
+                const data = {json.dumps(ohlc_data)};
+                const volumeData = {json.dumps(volume_data)};
+                const indicatorData = {json.dumps(indicators)};
+                let index = {chart_state["current_replay_index"]};
+                candlestickSeries_{selected_symbol}.setData([]);
+                volumeSeries_{selected_symbol}.setData([]);
+                Object.values(indicatorSeries_{selected_symbol}).forEach(series => series.setData([]));
+                replayInterval_{selected_symbol} = setInterval(() => {{
+                    if (!window.isPlaying_{selected_symbol} || index >= data.length) {{
+                        clearInterval(replayInterval_{selected_symbol});
+                        replayInterval_{selected_symbol} = null;
+                        console.log('Replay finished');
+                        window.isPlaying_{selected_symbol} = false;
+                        fetch('/_nicegui/storage/user/chart_state', {{
+                            method: 'POST',
+                            body: JSON.stringify({{...state, is_playing: false}}),
+                            headers: {{'Content-Type': 'application/json'}}
+                        }});
+                        return;
+                    }}
+                    candlestickSeries_{selected_symbol}.update(data[index]);
+                    volumeSeries_{selected_symbol}.update(volumeData[index]);
+                    Object.values(indicatorData).flat().forEach(ind => {{
+                        if (indicatorSeries_{selected_symbol}[ind.name] && ind.data[index]) {{
+                            indicatorSeries_{selected_symbol}[ind.name].update(ind.data[index]);
+                        }}
+                    }});
+                    chartInstance_{selected_symbol}.timeScale().fitContent();
+                    index++;
+                    fetch('/_nicegui/storage/user/chart_state', {{
+                        method: 'POST',
+                        body: JSON.stringify({{...state, current_replay_index: index}}),
+                        headers: {{'Content-Type': 'application/json'}}
+                    }});
+                }}, 500);
+                console.log('Replay started');
+            }}
+            """
+            # Execute the JavaScript to initialize the chart
+            await ui.run_javascript(chart_init_js)
+
+            # Save chart state
+            user_storage["chart_state"] = chart_state
+
+            status_label.text = f"Displaying {selected_symbol} ({selected_timeframe})"
+            ui.notify("Chart updated successfully!", type="positive")
+        except Exception as e:
+            status_label.text = f"Unexpected error: {str(e)}"
+            ui.notify(f"Unexpected error: {e}", type="negative")
+            logger.exception("Error updating chart")
+        finally:
+            update_button.props("loading=false disabled=false")
+            chart_container.update()
+            ui.update()

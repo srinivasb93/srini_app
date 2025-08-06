@@ -13,7 +13,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 # Import existing modules to utilize their functionality
-from order_management import render_regular_orders
+from order_management import render_order_management
 from analytics import render_analytics_page
 from watchlist import render_watchlist_page
 from portfolio import render_portfolio_page
@@ -690,7 +690,17 @@ async def setup_dashboard_updates(fetch_api, user_storage, get_cached_instrument
     await update_dashboard_data()
 
     # Setup periodic updates (30 seconds like existing dashboard)
-    ui.timer(300.0, update_dashboard_data)
+    def is_client_valid():
+        """Check if the current client is still valid"""
+        try:
+            from nicegui import context
+            return hasattr(context, 'client') and context.client and not context.client.is_deleted
+        except Exception:
+            return False
+
+    # Use this before creating UI elements:
+    if is_client_valid():
+        ui.timer(300.0, update_dashboard_data)
 
 
 # Utility functions for dashboard functionality

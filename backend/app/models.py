@@ -54,6 +54,11 @@ class ScheduledOrder(Base):
     status = Column(String, default="PENDING")
     is_amo = Column(Boolean, default=False)  # Ensure this exists
     user_id = Column(String)  # Likely added for user-specific orders
+    # Add missing columns for execution tracking
+    executed_at = Column(DateTime, nullable=True)
+    executed_order_id = Column(String, nullable=True)
+    error_message = Column(String, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
 
 class AutoOrder(Base):
     __tablename__ = "auto_orders"

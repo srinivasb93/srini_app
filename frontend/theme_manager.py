@@ -246,7 +246,7 @@ class ThemeManager:
         }}
 
         .metric-card {{
-            padding: var(--spacing-lg) !important;
+            padding: var(--spacing-md) !important;
             text-align: center;
             min-height: auto !important;
         }}
@@ -1139,59 +1139,65 @@ class ThemeManager:
             overflow: hidden;
         }
 
+        /* Use grid for both header and data rows, matching columns */
+        .orders-header,
         .order-row {
             display: grid;
-            grid-template-columns: 100px 150px 100px 100px 120px 120px 100px auto;
-            padding: var(--spacing-md);
-            border-bottom: 1px solid var(--border-color);
+            grid-template-columns: 1.2fr 1.2fr 1.2fr 1fr 1.2fr 1.2fr 1.3fr 1fr 1.2fr;
+            width: 100%;
             align-items: center;
-            transition: background var(--transition-fast);
+            gap: 0;
+        }
+        .orders-header > *, .order-row > * {
+            min-width: 80px;
         }
 
+        .orders-header {
+            background: rgba(0, 0, 0, 0.2);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .order-row {
+            background: none;
+            border-bottom: 1px solid var(--border-color);
+            transition: background var(--transition-fast);
+            min-height: 48px;
+        }
         .order-row:hover {
             background: var(--hover-color);
         }
 
-        .order-type-badge {
-            padding: var(--spacing-xs) var(--spacing-sm);
-            border-radius: var(--radius-sm);
-            font-size: 0.75rem;
-            font-weight: 600;
-            text-transform: uppercase;
+        /* Cell alignment */
+        .orders-header > *, .order-row > * {
+            padding: 0.5rem 0.75rem;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+        .orders-header > .text-right, .order-row > .text-right {
+            text-align: right;
+        }
+        .orders-header > .text-center, .order-row > .text-center {
+            text-align: center;
         }
 
-        .order-type-buy {
-            background: rgba(34, 197, 94, 0.1);
-            color: var(--success-color);
-        }
-
-        .order-type-sell {
-            background: rgba(239, 68, 68, 0.1);
-            color: var(--error-color);
-        }
-
-        .order-status {
-            display: inline-flex;
+        /* Status chip alignment */
+        .order-row .order-status-chip {
+            display: flex;
+            justify-content: center;
             align-items: center;
-            gap: var(--spacing-xs);
         }
 
-        .order-status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-        }
-
-        .status-completed {
-            background: var(--success-color);
-        }
-
-        .status-pending {
-            background: var(--warning-color);
-        }
-
-        .status-cancelled {
-            background: var(--error-color);
+        /* Actions column alignment */
+        .order-row .order-actions {
+            display: flex;
+            justify-content: center;
+            align-items: center;
         }
         '''
 

@@ -102,7 +102,7 @@ class OrderMonitor:
             logger.info("Order queue initialized")
 
     async def run_scheduled_tasks(self, user_apis: Dict[str, Dict[str, Any]]):
-        """CORRECTED: Proper database session handling for long-running tasks"""
+        """CORRECTED: Proper database session handling for long-running tasks with dynamic user API loading"""
         logger.info("Starting OrderMonitor scheduled tasks")
         try:
             while self.running:
@@ -117,15 +117,19 @@ class OrderMonitor:
                     # Create a new session for this iteration
                     async with session_factory() as db:
                         try:
+                            # Dynamically load active users from database if user_apis is empty or limited
+                            active_user_apis = await self._get_active_user_apis(db, user_apis)
+                            
                             # Process user APIs if available
-                            if user_apis:
-                                for user_id, apis in user_apis.items():
+                            if active_user_apis:
+                                for user_id, apis in active_user_apis.items():
                                     try:
                                         upstox_api = apis.get("upstox", {}).get("order")
                                         zerodha_api = apis.get("zerodha", {}).get("kite")
 
                                         if upstox_api or zerodha_api:
-                                            await self.sync_order_statuses(upstox_api, zerodha_api, db)
+                                            logger.info(f"Sync Order status for pending orders for user {user_id}")
+                                            await self.sync_order_statuses(upstox_api, zerodha_api, db, user_id)
 
                                         if upstox_api:
                                             await self.monitor_gtt_orders(upstox_api, db)
@@ -133,7 +137,7 @@ class OrderMonitor:
                                     except Exception as user_error:
                                         logger.error(f"Error processing user {user_id}: {user_error}")
                             else:
-                                logger.debug("No user APIs to process")
+                                logger.debug("No active user APIs available for processing")
 
                             # Commit any changes
                             await db.commit()
@@ -158,24 +162,98 @@ class OrderMonitor:
             self.running = False
             await self.cancel_all_tasks()
 
+    async def _get_active_user_apis(self, db: AsyncSession, provided_user_apis: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """
+        Dynamically load active user APIs from database.
+        First tries to use provided_user_apis, then loads from database if needed.
+        """
+        active_apis = {}
+        
+        try:
+            # First, use any provided user APIs
+            if provided_user_apis:
+                active_apis.update(provided_user_apis)
+                logger.debug(f"Using {len(provided_user_apis)} provided user APIs")
+            
+            # Get users who have pending orders, scheduled orders, or active GTT orders
+            query = text("""
+                SELECT DISTINCT u.user_id, u.upstox_access_token, u.upstox_access_token_expiry,
+                       u.zerodha_access_token, u.zerodha_access_token_expiry,
+                       u.upstox_api_key, u.upstox_api_secret, u.zerodha_api_key, u.zerodha_api_secret
+                FROM users u
+                WHERE u.user_id IN (
+                    SELECT DISTINCT user_id FROM orders WHERE status IN ('open', 'pending', 'trigger pending', 'amo req received')
+                    UNION
+                    SELECT DISTINCT user_id FROM scheduled_orders WHERE status = 'PENDING'
+                    UNION
+                    SELECT DISTINCT user_id FROM gtt_orders WHERE status IN ('PENDING', 'active')
+                )
+                AND (
+                    (u.upstox_access_token IS NOT NULL AND u.upstox_access_token_expiry > NOW())
+                    OR 
+                    (u.zerodha_access_token IS NOT NULL AND u.zerodha_access_token_expiry > NOW())
+                )
+            """)
+            
+            result = await db.execute(query)
+            users_with_active_orders = result.fetchall()
+            
+            # Initialize APIs for users not already in provided_user_apis
+            for user_row in users_with_active_orders:
+                user_id = user_row.user_id
+                
+                # Skip if we already have APIs for this user
+                if user_id in active_apis:
+                    continue
+                    
+                try:
+                    # Import here to avoid circular imports
+                    from backend.app.api_manager import initialize_user_apis
+                    
+                    user_apis_dict = await initialize_user_apis(user_id, db)
+                    if user_apis_dict:
+                        active_apis[user_id] = user_apis_dict
+                        logger.info(f"Dynamically loaded APIs for user {user_id}")
+                        
+                except Exception as init_error:
+                    logger.warning(f"Failed to initialize APIs for user {user_id}: {init_error}")
+                    
+            logger.info(f"Total active user APIs: {len(active_apis)}")
+            
+        except Exception as e:
+            logger.error(f"Error loading active user APIs: {e}")
+            # Return at least the provided APIs if database query fails
+            return provided_user_apis if provided_user_apis else {}
+            
+        return active_apis
+
     async def sync_order_statuses(self, upstox_api: Optional[Any], zerodha_api: Optional[Any],
-                                  db: AsyncSession) -> bool:
-        """Sync order statuses - same as before, this part was correct"""
+                                  db: AsyncSession, user_id: Optional[str] = None) -> bool:
+        """Sync order statuses and GTT orders - ENHANCED: Now syncs both regular orders and GTT orders for users with active APIs"""
         try:
             if not (upstox_api or zerodha_api):
                 logger.debug("No APIs available for order status sync")
                 return True
 
+            # ===== SYNC REGULAR ORDERS =====
+            # Build the query with user_id filter if provided
             stmt = select(Order).where(
-                func.lower(Order.status).in_([status.lower() for status in ["open", "pending", "trigger pending"]])
+                func.lower(Order.status).in_([status.lower() for status in ["open", "pending", "trigger pending", "amo req received"]])
             )
+            
+            # CRITICAL FIX: Add user_id filter to only fetch orders for the current user
+            if user_id:
+                stmt = stmt.where(Order.user_id == user_id)
+                
             result = await db.execute(stmt)
             orders = result.scalars().all()
+            
+            if user_id:
+                logger.info(f"Found {len(orders)} open orders for user {user_id}")
+            else:
+                logger.info(f"Found {len(orders)} open orders (all users)")
 
-            if not orders:
-                logger.debug("No open orders to sync")
-                return True
-
+            # Sync regular orders
             for order in orders:
                 try:
                     if order.broker == "Upstox" and upstox_api:
@@ -186,7 +264,7 @@ class OrderMonitor:
                         logger.debug(f"Skipping order {order.order_id}: API not available for broker {order.broker}")
                         continue
 
-                    if order_status:
+                    if order_status and order_status.lower() != order.status.lower():
                         order.status = order_status.lower()
                         logger.info(f"Updated order {order.order_id} status to {order.status}")
 
@@ -201,6 +279,90 @@ class OrderMonitor:
                                 )
                 except Exception as e:
                     logger.error(f"Error syncing status for order {order.order_id}: {str(e)}")
+
+            # ===== SYNC GTT ORDERS =====
+            # Build GTT query with user_id filter if provided
+            gtt_stmt = select(GTTOrder).where(GTTOrder.status.in_(["PENDING", "active"]))
+            
+            if user_id:
+                gtt_stmt = gtt_stmt.where(GTTOrder.user_id == user_id)
+                
+            gtt_result = await db.execute(gtt_stmt)
+            gtt_orders = gtt_result.scalars().all()
+            
+            if user_id:
+                logger.info(f"Found {len(gtt_orders)} active GTT orders for user {user_id}")
+            else:
+                logger.info(f"Found {len(gtt_orders)} active GTT orders (all users)")
+
+            # Sync GTT orders
+            for gtt in gtt_orders:
+                try:
+                    gtt_status_updated = False
+                    
+                    if gtt.broker == "Zerodha" and zerodha_api:
+                        try:
+                            # Get GTT status from Zerodha API
+                            zerodha_gtt = zerodha_api.get_gtt(trigger_id=gtt.gtt_order_id)
+                            api_status = zerodha_gtt.get("status", "").lower()
+                            
+                            if api_status and api_status != gtt.status.lower():
+                                old_status = gtt.status
+                                gtt.status = api_status
+                                gtt_status_updated = True
+                                logger.info(f"Updated GTT {gtt.gtt_order_id} status from {old_status} to {api_status}")
+                                
+                        except Exception as api_error:
+                            logger.debug(f"Could not fetch GTT status from API for {gtt.gtt_order_id}: {api_error}")
+                    
+                    elif gtt.broker == "Upstox" and upstox_api:
+                        # For Upstox GTT orders, check if trigger conditions are met
+                        try:
+                            ltp_data = await get_ltp(upstox_api, None, [gtt.instrument_token], db)
+                            if ltp_data and len(ltp_data) > 0:
+                                ltp = ltp_data[0].last_price
+                                
+                                # Check trigger conditions
+                                if gtt.trigger_type == "single" and ltp >= gtt.trigger_price:
+                                    # Place the actual order
+                                    await place_order(
+                                        api=upstox_api,
+                                        instrument_token=gtt.instrument_token,
+                                        trading_symbol=gtt.trading_symbol,
+                                        transaction_type=gtt.transaction_type,
+                                        quantity=gtt.quantity,
+                                        price=gtt.limit_price,
+                                        order_type="LIMIT",
+                                        broker="Upstox",
+                                        db=db,
+                                        user_id=gtt.user_id
+                                    )
+                                    gtt.status = "TRIGGERED"
+                                    gtt_status_updated = True
+                                    logger.info(f"GTT {gtt.gtt_order_id} triggered at price {ltp}")
+                                    
+                        except Exception as trigger_error:
+                            logger.error(f"Error checking GTT trigger for {gtt.gtt_order_id}: {trigger_error}")
+                    
+                    # Send notification if status changed
+                    if gtt_status_updated and gtt.status in ["triggered", "cancelled", "completed"]:
+                        result = await db.execute(select(User).filter(User.user_id == gtt.user_id))
+                        user = result.scalars().first()
+                        if user:
+                            await notify(
+                                f"GTT Order Update: {gtt.gtt_order_id}",
+                                f"GTT order for {gtt.trading_symbol} status changed to {gtt.status}",
+                                user.email
+                            )
+                            
+                except Exception as e:
+                    logger.error(f"Error syncing GTT order {gtt.gtt_order_id}: {str(e)}")
+
+            # Log summary
+            if orders or gtt_orders:
+                logger.info(f"Sync completed for user {user_id if user_id else 'all users'}: {len(orders)} orders, {len(gtt_orders)} GTT orders")
+            else:
+                logger.debug(f"No orders or GTT orders to sync for user {user_id if user_id else 'all users'}")
 
             return True
         except Exception as e:
@@ -481,7 +643,8 @@ class OrderManager:
             self.scheduled_order_queue = []
 
     async def _process_scheduled_orders_loop(self, user_apis: Dict[str, Dict[str, Any]]):
-        """CORRECTED: Process scheduled orders with proper session management"""
+        """CORRECTED: Process scheduled orders with proper session management and dynamic user API loading"""
+        logger.info("Starting scheduled order processing loop")
         try:
             while self.running:
                 try:
@@ -497,29 +660,71 @@ class OrderManager:
                             query = """
                                 SELECT * FROM scheduled_orders 
                                 WHERE status = :status
+                                ORDER BY schedule_datetime ASC
                             """
                             scheduled_orders = await async_fetch_query(db, text(query), {"status": "PENDING"})
                             now = datetime.now()
 
+                            logger.info(f"Found {len(scheduled_orders)} pending scheduled orders at {now}")
+
                             for order in scheduled_orders:
                                 try:
-                                    # Parse schedule_datetime if it's a string
+                                    # Parse schedule_datetime with multiple format support
                                     schedule_datetime = order["schedule_datetime"]
                                     if isinstance(schedule_datetime, str):
-                                        schedule_datetime = datetime.strptime(schedule_datetime, "%Y-%m-%d %H:%M:%S")
+                                        # Try multiple datetime formats
+                                        try:
+                                            schedule_datetime = datetime.strptime(schedule_datetime, "%Y-%m-%d %H:%M:%S")
+                                        except ValueError:
+                                            try:
+                                                schedule_datetime = datetime.strptime(schedule_datetime, "%Y-%m-%dT%H:%M:%S")
+                                            except ValueError:
+                                                schedule_datetime = datetime.fromisoformat(schedule_datetime.replace('Z', '+00:00'))
 
-                                    # Check if it's time to execute
+                                    logger.info(f"Order {order['scheduled_order_id']}: scheduled for {schedule_datetime}, current time {now}")
+
+                                    # Check if it's time to execute (with some tolerance for execution delay)
                                     if schedule_datetime <= now:
                                         user_id = order["user_id"]
+                                        logger.info(f"Attempting to execute scheduled order {order['scheduled_order_id']} for user {user_id}")
+
+                                        # Dynamic API loading - check provided first, then load from DB if needed
                                         upstox_api = user_apis.get(user_id, {}).get("upstox", {}).get("order")
                                         zerodha_api = user_apis.get(user_id, {}).get("zerodha", {}).get("kite")
 
+                                        # If APIs are not available in provided user_apis, try to load them
+                                        if not (upstox_api or zerodha_api):
+                                            logger.info(f"APIs not found in provided user_apis for user {user_id}, attempting to load from database")
+                                            try:
+                                                from backend.app.api_manager import initialize_user_apis
+                                                user_apis_dict = await initialize_user_apis(user_id, db)
+                                                if user_apis_dict:
+                                                    # Update the global user_apis dict
+                                                    user_apis[user_id] = user_apis_dict
+                                                    upstox_api = user_apis_dict.get("upstox", {}).get("order")
+                                                    zerodha_api = user_apis_dict.get("zerodha", {}).get("kite")
+                                                    logger.info(f"Successfully loaded APIs for user {user_id}")
+                                                else:
+                                                    logger.error(f"Failed to initialize APIs for user {user_id}")
+                                            except Exception as init_error:
+                                                logger.error(f"Error initializing APIs for user {user_id}: {init_error}")
+
                                         api = upstox_api if order["broker"] == "Upstox" else zerodha_api
                                         if not api:
-                                            logger.warning(
-                                                f"API not initialized for user {user_id}, broker {order['broker']}")
+                                            logger.error(f"API not available for user {user_id}, broker {order['broker']}")
+                                            # Mark order as failed due to API unavailability
+                                            update_query = """
+                                                UPDATE scheduled_orders 
+                                                SET status = 'FAILED', error_message = 'API not available' 
+                                                WHERE scheduled_order_id = :order_id
+                                            """
+                                            await async_execute_query(db, text(update_query),
+                                                                      {"order_id": order["scheduled_order_id"]})
                                             continue
 
+                                        logger.info(f"Executing scheduled order {order['scheduled_order_id']} with {order['broker']} API")
+
+                                        # Execute the order
                                         response = await place_order(
                                             api=api,
                                             instrument_token=order["instrument_token"],
@@ -538,21 +743,57 @@ class OrderManager:
                                             db=db,
                                             upstox_apis=user_apis.get(user_id, {}).get("upstox", {}),
                                             kite_apis=user_apis.get(user_id, {}).get("zerodha", {}),
-                                            user_id=user_id
+                                            user_id=user_id,
+                                            order_monitor=self.order_monitor
                                         )
 
+                                        executed_order_id = response.get("order_id") if order["broker"] != 'Zerodha' else response
+
+                                        # Update order status to executed
                                         update_query = """
                                             UPDATE scheduled_orders 
-                                            SET status = 'EXECUTED' 
+                                            SET status = 'EXECUTED', executed_at = :executed_at, executed_order_id = :executed_order_id
                                             WHERE scheduled_order_id = :order_id
                                         """
-                                        await async_execute_query(db, text(update_query),
-                                                                  {"order_id": order["scheduled_order_id"]})
-                                        logger.info(f"Scheduled order {order['scheduled_order_id']} executed")
+                                        await async_execute_query(db, text(update_query), {
+                                            "order_id": order["scheduled_order_id"],
+                                            "executed_at": now,
+                                            "executed_order_id": executed_order_id
+                                        })
 
-                                except Exception as e:
-                                    logger.error(
-                                        f"Error processing scheduled order {order['scheduled_order_id']}: {str(e)}")
+                                        logger.info(f"Successfully executed scheduled order {order['scheduled_order_id']}")
+
+                                        # Send notification to user
+                                        result = await db.execute(select(User).filter(User.user_id == user_id))
+                                        user = result.scalars().first()
+                                        if user:
+                                            await notify(
+                                                "Scheduled Order Executed",
+                                                f"Scheduled order for {order['trading_symbol']} has been executed at {now}",
+                                                user.email
+                                            )
+
+                                    else:
+                                        # Log when orders are waiting to be executed
+                                        time_diff = (schedule_datetime - now).total_seconds()
+                                        if time_diff > 0:
+                                            logger.info(f"Order {order['scheduled_order_id']} waiting {time_diff:.0f} seconds for execution")
+
+                                except Exception as order_error:
+                                    logger.error(f"Error processing scheduled order {order.get('scheduled_order_id', 'unknown')}: {str(order_error)}")
+                                    # Mark order as failed
+                                    try:
+                                        update_query = """
+                                            UPDATE scheduled_orders 
+                                            SET status = 'FAILED', error_message = :error_msg 
+                                            WHERE scheduled_order_id = :order_id
+                                        """
+                                        await async_execute_query(db, text(update_query), {
+                                            "order_id": order.get("scheduled_order_id"),
+                                            "error_msg": str(order_error)[:255]  # Limit error message length
+                                        })
+                                    except Exception as update_error:
+                                        logger.error(f"Failed to update order status: {update_error}")
 
                             # Commit all changes
                             await db.commit()
@@ -564,8 +805,8 @@ class OrderManager:
                 except Exception as session_error:
                     logger.error(f"Error with database session in scheduled orders: {session_error}")
 
-                # Wait before next iteration (check every minute)
-                await asyncio.sleep(60)
+                # Wait before next iteration (check every 30 seconds for better responsiveness)
+                await asyncio.sleep(30)
 
         except asyncio.CancelledError:
             logger.info("Scheduled order processing cancelled")
@@ -574,155 +815,6 @@ class OrderManager:
         except Exception as e:
             logger.error(f"Unexpected error in _process_scheduled_orders_loop: {str(e)}")
             self.running = False
-
-    async def _process_scheduled_orders(self, db: AsyncSession, user_apis: Dict[str, Dict[str, Any]]):
-        """Process scheduled orders for a single iteration - FINAL FIX"""
-        try:
-            query = """
-                SELECT * FROM scheduled_orders 
-                WHERE status = :status
-            """
-            scheduled_orders = await async_fetch_query(db, text(query), {"status": "PENDING"})
-
-            if not scheduled_orders:
-                logger.debug("No pending scheduled orders found")
-                return
-
-            now = datetime.now()
-
-            for order in scheduled_orders:
-                try:
-                    # Parse schedule_datetime if it's a string
-                    schedule_datetime = order["schedule_datetime"]
-                    if isinstance(schedule_datetime, str):
-                        schedule_datetime = datetime.strptime(schedule_datetime, "%Y-%m-%d %H:%M:%S")
-
-                    # Check if it's time to execute
-                    if schedule_datetime <= now:
-                        user_id = order["user_id"]
-                        broker = order["broker"]
-
-                        # Get user APIs
-                        if user_id in user_apis:
-                            apis = user_apis[user_id]
-
-                            # Execute the scheduled order
-                            if broker == "Upstox" and apis.get("upstox", {}).get("order"):
-                                api = apis["upstox"]["order"]
-                            elif broker == "Zerodha" and apis.get("zerodha", {}).get("kite"):
-                                api = apis["zerodha"]["kite"]
-                            else:
-                                logger.warning(f"API not available for user {user_id}, broker {broker}")
-                                continue
-
-                            # Place the order
-                            try:
-                                # Use your existing place_order function
-                                result = await place_order(
-                                    api=api,
-                                    instrument_token=order["instrument_token"],
-                                    trading_symbol=order["trading_symbol"],
-                                    transaction_type=order["transaction_type"],
-                                    quantity=order["quantity"],
-                                    price=order.get("price", 0),
-                                    order_type=order["order_type"],
-                                    trigger_price=order.get("trigger_price", 0),
-                                    is_amo=order.get("is_amo", False),
-                                    product_type=order["product_type"],
-                                    validity=order.get("validity", "DAY"),
-                                    stop_loss=order.get("stop_loss"),
-                                    target=order.get("target"),
-                                    broker=broker,
-                                    db=db,
-                                    upstox_apis=apis.get("upstox", {}),
-                                    kite_apis=apis.get("zerodha", {}),
-                                    user_id=user_id,
-                                    order_monitor=self.order_monitor
-                                )
-
-                                # Update order status to EXECUTED
-                                update_query = """
-                                    UPDATE scheduled_orders 
-                                    SET status = 'EXECUTED', executed_at = :executed_at
-                                    WHERE scheduled_order_id = :order_id
-                                """
-                                await async_execute_query(db, text(update_query), {
-                                    "executed_at": now,
-                                    "order_id": order["scheduled_order_id"]
-                                })
-
-                                logger.info(
-                                    f"✅ Executed scheduled order {order['scheduled_order_id']} for user {user_id}")
-
-                            except Exception as execution_error:
-                                logger.error(
-                                    f"❌ Error executing scheduled order {order['scheduled_order_id']}: {execution_error}")
-
-                                # Update order status to FAILED
-                                update_query = """
-                                    UPDATE scheduled_orders 
-                                    SET status = 'FAILED', error_message = :error_message
-                                    WHERE scheduled_order_id = :order_id
-                                """
-                                await async_execute_query(db, text(update_query), {
-                                    "error_message": str(execution_error),
-                                    "order_id": order["scheduled_order_id"]
-                                })
-                        else:
-                            logger.warning(f"User {user_id} not found in user_apis")
-
-                except Exception as order_error:
-                    logger.error(f"Error processing scheduled order: {order_error}")
-
-        except Exception as e:
-            logger.error(f"Error in _process_scheduled_orders: {e}")
-
-    async def _execute_scheduled_order(self, order, db: AsyncSession, upstox_apis=None, kite_apis=None):
-        async with self.order_lock:
-            try:
-                schedule_datetime = pd.to_datetime(order.get("schedule_datetime"))
-                if schedule_datetime and datetime.now() >= schedule_datetime:
-                    api = upstox_apis["order"] if order["broker"] == "Upstox" else kite_apis["kite"]
-                    if not api:
-                        logger.warning(f"Cannot execute scheduled order {order['scheduled_order_id']}: API not initialized for broker {order['broker']}")
-                        return
-                    result = await place_order(
-                        api=api,
-                        instrument_token=order["instrument_token"],
-                        trading_symbol=order["trading_symbol"],
-                        transaction_type=order["transaction_type"],
-                        quantity=order["quantity"],
-                        price=order["price"],
-                        order_type=order["order_type"],
-                        trigger_price=order["trigger_price"],
-                        is_amo=order["is_amo"] == "True",
-                        product_type=order["product_type"],
-                        validity=order["validity"],
-                        stop_loss=order["stop_loss"],
-                        target=order["target"],
-                        broker=order["broker"],
-                        db=db,
-                        upstox_apis=upstox_apis,
-                        kite_apis=kite_apis,
-                        user_id=order.get("user_id", "default_user")
-                    )
-                    if result:
-                        order_id = result.data.order_id if order["broker"] == "Upstox" else result
-                        query = """
-                            UPDATE scheduled_orders 
-                            SET status = 'EXECUTED' 
-                            WHERE scheduled_order_id = :order_id
-                        """
-                        await async_execute_query(db, text(query), {"order_id": order["scheduled_order_id"]})
-                        query = "DELETE FROM scheduled_orders WHERE scheduled_order_id = :order_id"
-                        await async_execute_query(db, text(query), {"order_id": order["scheduled_order_id"]})
-                        logger.info(f"Scheduled order {order['scheduled_order_id']} executed with order ID {order_id}")
-                        result = await db.execute(select(User).filter(User.user_id == order.get("user_id", "default_user")))
-                        user = result.scalars().first()
-                        if user:
-                            await notify("Scheduled Order Executed", f"Order ID: {order_id}", user.email)
-            except Exception as e:
-                logger.error(f"Error executing scheduled order {order['scheduled_order_id']}: {str(e)}")
 
     async def place_gtt_order(self, api, instrument_token, trading_symbol, transaction_type, quantity,
                               trigger_type, trigger_price, limit_price, last_price,
@@ -1094,6 +1186,7 @@ async def place_order(api, instrument_token, trading_symbol, transaction_type, q
                 **order_params
             )
             primary_order_id = response
+
         order_data = pd.DataFrame([{
             "order_id": primary_order_id,
             "broker": broker,
@@ -1181,7 +1274,7 @@ async def modify_order(api, order_id: str, quantity: Optional[int] = None, order
             "order_type": modified_params["order_type"],
             "price": modified_params["price"],
             "trigger_price": modified_params["trigger_price"],
-            "validity": modified_params["validity"]
+            # "validity": modified_params["validity"]
         })
         result = await db.execute(select(User).filter(User.user_id == order.user_id))
         user = result.scalars().first()
@@ -1366,11 +1459,11 @@ async def get_quotes_from_nse(instruments: List[str], db: AsyncSession = None) -
         live_data = await fetch_fno_snapshot_live_data([inst.trading_symbol for inst in instruments_map])
         quotes = []
         for instrument in instruments_map:
-            if live_data and instrument.trading_symbol in live_data:
+            if live_data[instrument.trading_symbol]:
                 raw_data = live_data[instrument.trading_symbol]
             else:
                 logger.warning(f"No live data found for {instrument.trading_symbol}, fetching from NSE API")
-                raw_data = market_data.nse_get_quote(instrument.trading_symbol)
+                raw_data = market_data.nse_get_quote(instrument.trading_symbol, security_type="NIFTY_500")
 
             if not raw_data:
                 logger.warning(f"No data found for instrument {instrument}")
@@ -1440,11 +1533,11 @@ async def get_ohlc_from_nse(instruments: List[str], db: AsyncSession = None) -> 
         ohlc_data = []
 
         for instrument in instruments_map:
-            if live_data and instrument.trading_symbol in live_data:
+            if live_data[instrument.trading_symbol]:
                 raw_data = live_data[instrument.trading_symbol]
             else:
                 logger.warning(f"No live data found for {instrument.trading_symbol}, fetching from NSE API")
-                raw_data = market_data.nse_get_quote(instrument.trading_symbol)
+                raw_data = market_data.nse_get_quote(instrument.trading_symbol, security_type="NIFTY_500")
 
             ohlc_data.append(OHLCResponse(
                 instrument_token=instrument.instrument_token,
@@ -1529,11 +1622,11 @@ async def get_ltp_from_nse(instruments: List[str], db: AsyncSession = None) -> L
         ohlc_data = []
 
         for instrument in instruments_map:
-            if live_data and instrument.trading_symbol in live_data:
+            if live_data[instrument.trading_symbol]:
                 raw_data = live_data[instrument.trading_symbol]
             else:
                 logger.warning(f"No live data found for {instrument.trading_symbol}, fetching from NSE API")
-                raw_data = market_data.nse_get_quote(instrument.trading_symbol)
+                raw_data = market_data.nse_get_quote(instrument.trading_symbol, security_type="NIFTY_500")
 
             ohlc_data.append(LTPResponse(
                 instrument_token=instrument.instrument_token,
@@ -2890,56 +2983,3 @@ def evaluate_condition(left_value, right_value, comparison):
         return abs(left_value - right_value) < 1e-9
     return False
 
-
-if __name__ == "__main__":
-    import asyncio
-    from backend.app.database import get_db
-
-    async def main():
-        # Example parameters (replace with real values as needed)
-        instrument_token = "SBIN"
-        timeframe = "day"
-        # strategy = "RSI Oversold/Overbought"  # or a custom strategy JSON string
-        strategy = {"strategy_id": "1fe9328e-f8cd-405c-9db2-68353fdcb2c3",
-                    "user_id": "4fbba468-6a86-4516-8236-2f8abcbfd2ef",
-                    "broker": "Zerodha",
-                    "name": "RSI",
-                    "description": "",
-                    "entry_conditions": [{"left_indicator": "RSI",
-                                          "left_params": {"period": 14},
-                                          "left_value": "",
-                                          "comparison": "<=",
-                                          "right_indicator": "Fixed Value",
-                                          "right_params": "",
-                                          "right_value": 30.0}],
-                    "exit_conditions": [{"left_indicator": "RSI",
-                                         "left_params": {"period": 14},
-                                         "left_value": "",
-                                         "comparison": ">=",
-                                         "right_indicator": "Fixed Value",
-                                         "right_params": "",
-                                         "right_value": 75.0}],
-                    "parameters": {"timeframe": "day",
-                                   "position_sizing": 100},
-                    "status": "inactive",
-                    "created_at": "2025-06-21T17:59:00.011814",
-                    "updated_at": "2025-06-21T18:02:08.444443"}
-        params = {
-            "initial_investment": 100000,
-            "stop_loss_percent": 0,
-            "trailing_stop_loss_percent": 0,
-            "position_sizing_percent": 100,
-            "enable_optimization": True,
-            'partial_exits': [],
-            'optimization_iterations': 20,
-            'stop_loss_range': [1.0, 5.0]
-        }
-        start_date = "2024-01-20"
-        end_date = "2025-06-20"
-
-        result = await backtest_strategy(
-            instrument_token, timeframe, json.dumps(strategy) if not isinstance(strategy, str) else strategy, params, start_date, end_date, db=get_db()
-        )
-        print(result)
-
-    asyncio.run(main())

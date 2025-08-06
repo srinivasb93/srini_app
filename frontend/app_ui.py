@@ -12,11 +12,10 @@ from collections import deque
 
 # Import module functions
 from theme_manager import theme_manager, apply_page_theme, PageTheme, ThemeMode
+from ui_context_manager import safe_notify, create_safe_task, with_safe_ui_context
 from order_management import render_order_management
 from strategies import render_strategies_page
-from backtesting import render_backtesting_page
 from analytics import render_analytics_page
-from integration_example import integrate_with_existing_app
 from orderbook import render_order_book_page
 from portfolio import render_portfolio_page
 from positions import render_positions_page
@@ -25,6 +24,7 @@ from sip_strategy import render_sip_strategy_page
 from watchlist import render_watchlist_page
 from settings import render_settings_page
 from dashboard import render_dashboard_page
+from backtesting import render_backtesting_page
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -68,8 +68,12 @@ async def fetch_api(endpoint, method="GET", data=None, params=None, retries=3, b
                     if response.status == 401:
                         if hasattr(app, 'storage') and hasattr(app.storage, 'user'):
                             app.storage.user.clear()
-                        ui.navigate.to('/')
-                        ui.notify("Session expired. Please log in again.", type="negative")
+                        # Use safe UI operations to avoid context errors
+                        try:
+                            ui.navigate.to('/')
+                            safe_notify("Session expired. Please log in again.", "negative")
+                        except Exception as e:
+                            logger.warning(f"Could not show session expired notification: {e}")
                         return {"error": {"code": "UNAUTHORIZED", "message": "Session expired"}, "status": 401}
                     if response.status == 404 and endpoint.startswith("/profile/"):
                         return {"error": {"code": "NOT_FOUND", "message": "Profile not found"}, "status": 404}
@@ -107,6 +111,21 @@ async def connect_websocket(max_retries=5, initial_backoff=2):
 
     ws_url = f"{BASE_URL.replace('http', 'ws')}/ws/orders/{user_id}"
     retry_count = 0
+    websocket = None
+
+    async def cleanup_websocket():
+        """Cleanup websocket connection"""
+        nonlocal websocket
+        if websocket and not websocket.closed:
+            await websocket.close()
+
+    # Register cleanup with client if available
+    try:
+        from nicegui import context
+        if hasattr(context, 'client') and context.client:
+            context.client.on_disconnect(cleanup_websocket)
+    except Exception:
+        pass  # Context not available, continue without cleanup registration
 
     while retry_count < max_retries:
         try:
@@ -144,72 +163,6 @@ async def connect_websocket(max_retries=5, initial_backoff=2):
                 ui.notify("WebSocket connection failed permanently.", type="negative")
                 break
 
-
-# def apply_theme_from_storage():
-#     try:
-#         if hasattr(app, 'storage') and hasattr(app.storage, 'user') and app.storage.user is not None:
-#             current_theme = app.storage.user.get(STORAGE_THEME_KEY, "Dark")
-#
-#             if current_theme == "Dark":
-#                 # Enhanced dark theme
-#                 ui.add_head_html("""
-#                                     <style>
-#                                     body {
-#                                         background: linear-gradient(135deg, #0a0f23 0%, #1a1f3a 100%) !important;
-#                                         color: #ffffff !important;
-#                                     }
-#
-#                                     /* Fix all cards globally */
-#                                     .q-card {
-#                                         background: rgba(255, 255, 255, 0.08) !important;
-#                                         color: #ffffff !important;
-#                                         backdrop-filter: blur(20px);
-#                                         border: 1px solid rgba(255, 255, 255, 0.1);
-#                                     }
-#
-#                                     /* Fix tab panels */
-#                                     .q-tab-panel {
-#                                         background: transparent !important;
-#                                         color: #ffffff !important;
-#                                     }
-#
-#                                     /* Enhanced dashboard specific */
-#                                     .enhanced-dashboard,
-#                                     .enhanced-app {
-#                                         background: linear-gradient(135deg, #0a0f23 0%, #1a1f3a 100%) !important;
-#                                         color: #ffffff !important;
-#                                     }
-#                                     </style>
-#                                     """)
-#             else:
-#                 # Enhanced light theme
-#                 ui.add_head_html("""
-#                     <style>
-#                     body {
-#                         background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
-#                         color: #1a202c;
-#                     }
-#                     .q-header {
-#                         background: rgba(255, 255, 255, 0.9) !important;
-#                         backdrop-filter: blur(20px);
-#                         border-bottom: 1px solid rgba(0, 0, 0, 0.1);
-#                     }
-#                     .enhanced-dashboard {
-#                         background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
-#                         color: #1a202c;
-#                     }
-#                     .dashboard-card {
-#                         background: rgba(255, 255, 255, 0.9) !important;
-#                         color: #1a202c !important;
-#                     }
-#                     </style>
-#                     """)
-#         else:
-#             logger.warning("app.storage.user not available for theme application. Defaulting to Dark.")
-#             ui.dark_mode().enable()
-#     except Exception as e:
-#         logger.error(f"Unexpected error applying theme: {e}")
-#         ui.dark_mode().enable()
 
 def apply_theme_from_storage():
     """Apply theme using the centralized theme manager"""
@@ -250,11 +203,6 @@ async def get_cached_instruments(broker, exchange_filter="NSE", force_refresh=Fa
         logger.error(f"Unexpected error in get_cached_instruments: {e}")
         return {}
 
-# def toggle_theme():
-#     current_theme = app.storage.user.get(STORAGE_THEME_KEY, "Dark")
-#     new_theme = "Light" if current_theme == "Dark" else "Dark"
-#     app.storage.user[STORAGE_THEME_KEY] = new_theme
-#     apply_theme_from_storage()
 
 def render_header():
     """Enhanced header with compact navigation and profile dropdown"""
@@ -435,7 +383,7 @@ async def login_page(client: Client):
                     ui.notify(f"{primary_broker} connected: {profile_response.get('name', '')}", type="info")
 
                 ui.navigate.to("/dashboard")
-                asyncio.create_task(connect_websocket())
+                create_safe_task(connect_websocket())
             except Exception as e:
                 logger.error(f"Unexpected error during login: {e}")
                 ui.notify("An unexpected error occurred after login.", type="negative")
@@ -498,6 +446,20 @@ async def dashboard_page(client: Client):
         ui.navigate.to('/')
         return
 
+    # Add cleanup handler for client disconnect
+    cleanup_tasks = []
+
+    async def page_cleanup():
+        """Cleanup function for page resources"""
+        for task in cleanup_tasks:
+            try:
+                if not task.done():
+                    task.cancel()
+            except Exception as e:
+                logger.error(f"Error canceling task: {e}")
+
+    client.on_disconnect(page_cleanup)
+
     # Apply enhanced theme and render header
     apply_page_theme(PageTheme.DASHBOARD, app.storage.user)
     render_header()
@@ -507,6 +469,7 @@ async def dashboard_page(client: Client):
     # Display WebSocket messages
     with ui.column().classes("w-full p-4"):
         try:
+            # if not client.is_deleted:
             for message in list(websocket_messages):
                 ui.notify(message, type="info" if "connected" in message.lower() else "warning")
                 websocket_messages.remove(message)
@@ -560,8 +523,7 @@ async def analytics_page(client: Client):
     apply_page_theme(PageTheme.ANALYTICS, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
-    await integrate_with_existing_app(fetch_api, app.storage.user, get_cached_instruments, broker)
-    await render_analytics_page(fetch_api, app.storage.user, await get_cached_instruments(broker), broker)
+    await render_analytics_page(fetch_api, app.storage.user, await get_cached_instruments(broker))
 
 
 @ui.page('/strategies')
@@ -707,7 +669,7 @@ if __name__ in {"__main__", "__mp_main__"}:
     # ui.add_css('static/styles.css')
 
     ui.run(title="AlgoTrade Pro - Advanced Trading Platform",
-           port=8080,
+           port=8083,
            reload=True,
            uvicorn_reload_dirs='.',
            uvicorn_reload_includes='*.py',

@@ -13,7 +13,7 @@ if project_root not in sys.path:
 
 # Configure logging BEFORE any other imports
 logging.basicConfig(
-    level=logging.INFO,  # Changed from DEBUG to reduce noise
+    level=logging.DEBUG,  # Changed from DEBUG to reduce noise
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
@@ -756,8 +756,88 @@ async def create_scheduled_order(order: ScheduledOrderRequest, user_id: str = De
     db.add(scheduled_order)
     await db.commit()
     await db.refresh(scheduled_order)
-    await order_manager._load_scheduled_orders(db)
+
+    # Ensure user APIs are available in the global user_apis
+    try:
+        user_apis_dict = await initialize_user_apis(user_id, db)
+        if user_apis_dict and hasattr(app.state, 'user_apis'):
+            app.state.user_apis[user_id] = user_apis_dict
+            logger.info(f"Updated user APIs for user {user_id} in scheduled order creation")
+    except Exception as e:
+        logger.warning(f"Could not initialize user APIs for scheduled order: {e}")
+
+    # Reload scheduled orders in OrderManager
+    if hasattr(app.state, 'order_manager') and app.state.order_manager:
+        try:
+            await app.state.order_manager._load_scheduled_orders(db)
+            logger.info("Reloaded scheduled orders in OrderManager")
+        except Exception as e:
+            logger.error(f"Error reloading scheduled orders: {e}")
+
     return ScheduledOrder.from_orm(scheduled_order)
+
+@app.get("/scheduled-orders/{broker}",  response_model=List[ScheduledOrder], tags=["orders"])
+async def get_scheduled_orders(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    if broker not in ["Upstox", "Zerodha"]:
+        raise HTTPException(status_code=400, detail="Invalid broker")
+    try:
+        query = select(ScheduledOrderModel).filter(ScheduledOrderModel.user_id == user_id, ScheduledOrderModel.broker == broker)
+        result = await db.execute(query)
+        orders = result.scalars().all()
+        return [ScheduledOrder.from_orm(order) for order in orders]
+    except Exception as e:
+        logger.error(f"Error fetching scheduled orders for {broker}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/scheduled-orders/{scheduled_order_id}", tags=["orders"])
+async def delete_scheduled_order(scheduled_order_id: str, broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    if broker not in ["Upstox", "Zerodha"]:
+        raise HTTPException(status_code=400, detail="Invalid broker")
+    try:
+        query = select(ScheduledOrderModel).filter(ScheduledOrderModel.scheduled_order_id == scheduled_order_id, ScheduledOrderModel.user_id == user_id, ScheduledOrderModel.broker == broker)
+        result = await db.execute(query)
+        scheduled_order = result.scalars().first()
+        if not scheduled_order:
+            raise HTTPException(status_code=404, detail="Scheduled order not found")
+        await db.delete(scheduled_order)
+        await db.commit()
+        return {"status": "success", "message": f"Scheduled order {scheduled_order_id} deleted"}
+    except Exception as e:
+        logger.error(f"Error deleting scheduled order {scheduled_order_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/scheduled-orders/{scheduled_order_id}", tags=["orders"])
+async def modify_scheduled_order(scheduled_order_id: str, order: ScheduledOrderRequest, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    if order.broker not in ["Upstox", "Zerodha"]:
+        raise HTTPException(status_code=400, detail="Invalid broker")
+    try:
+        query = select(ScheduledOrderModel).filter(ScheduledOrderModel.scheduled_order_id == scheduled_order_id, ScheduledOrderModel.user_id == user_id, ScheduledOrderModel.broker == order.broker)
+        result = await db.execute(query)
+        scheduled_order = result.scalars().first()
+        if not scheduled_order:
+            raise HTTPException(status_code=404, detail="Scheduled order not found")
+
+        # Update fields
+        scheduled_order.instrument_token = order.instrument_token
+        scheduled_order.trading_symbol = order.trading_symbol
+        scheduled_order.transaction_type = order.transaction_type
+        scheduled_order.quantity = order.quantity
+        scheduled_order.order_type = order.order_type
+        scheduled_order.price = order.price
+        scheduled_order.trigger_price = order.trigger_price
+        scheduled_order.product_type = order.product_type
+        scheduled_order.schedule_datetime = order.schedule_datetime
+        scheduled_order.stop_loss = order.stop_loss
+        scheduled_order.target = order.target
+        scheduled_order.is_amo = order.is_amo
+
+        await db.commit()
+        await db.refresh(scheduled_order)
+
+        return ScheduledOrder.from_orm(scheduled_order)
+    except Exception as e:
+        logger.error(f"Error modifying scheduled order {scheduled_order_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/auto-orders/", response_model=AutoOrder, tags=["orders"])
 async def create_auto_order(order: AutoOrderRequest, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -781,6 +861,19 @@ async def create_auto_order(order: AutoOrderRequest, user_id: str = Depends(get_
     await db.commit()
     await db.refresh(auto_order)
     return AutoOrder.from_orm(auto_order)
+
+@app.get("/auto-orders/{broker}", response_model=List[AutoOrder],tags=["orders"])
+async def get_auto_orders(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    if broker not in ["Upstox", "Zerodha"]:
+        raise HTTPException(status_code=400, detail="Invalid broker")
+    try:
+        query = select(AutoOrderModel).filter(AutoOrderModel.user_id == user_id, AutoOrderModel.broker == broker)
+        result = await db.execute(query)
+        orders = result.scalars().all()
+        return [AutoOrder.from_orm(order) for order in orders]
+    except Exception as e:
+        logger.error(f"Error fetching auto orders for {broker}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/gtt-orders/", tags=["gtt-orders"])
 async def create_gtt_order(order: GTTOrderRequest, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -1343,32 +1436,6 @@ async def websocket_backtest(websocket: WebSocket, user_id: str):
         except Exception as e:
             logger.error(f"Error closing WebSocket for user {user_id}: {str(e)}")
 
-@app.get("/scheduled-orders/{broker}",  response_model=List[ScheduledOrder], tags=["orders"])
-async def get_scheduled_orders(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    if broker not in ["Upstox", "Zerodha"]:
-        raise HTTPException(status_code=400, detail="Invalid broker")
-    try:
-        query = select(ScheduledOrderModel).filter(ScheduledOrderModel.user_id == user_id, ScheduledOrderModel.broker == broker)
-        result = await db.execute(query)
-        orders = result.scalars().all()
-        return [ScheduledOrder.from_orm(order) for order in orders]
-    except Exception as e:
-        logger.error(f"Error fetching scheduled orders for {broker}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/auto-orders/{broker}", response_model=List[AutoOrder],tags=["orders"])
-async def get_auto_orders(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    if broker not in ["Upstox", "Zerodha"]:
-        raise HTTPException(status_code=400, detail="Invalid broker")
-    try:
-        query = select(AutoOrderModel).filter(AutoOrderModel.user_id == user_id, AutoOrderModel.broker == broker)
-        result = await db.execute(query)
-        orders = result.scalars().all()
-        return [AutoOrder.from_orm(order) for order in orders]
-    except Exception as e:
-        logger.error(f"Error fetching auto orders for {broker}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/strategies/{broker}/performance", tags=["algo-trading"])
 async def get_strategy_performance(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     query = """
@@ -1540,7 +1607,7 @@ if __name__ == "__main__":
         # await get_quote(symbol='RELIANCE', source='nsepython', fallback_sources=['nsetools', 'openchart'],
         #                         user_id="4fbba468-6a86-4516-8236-2f8abcbfd2ef", db=db)
         # await get_historical_data(upstox_api=None, upstox_access_token='None', instrument='RELIANCE', from_date='2023-01-01', to_date='2023-10-01', unit='days', interval='1', db=nsedata_db)
-        print(await get_ohlc_data(broker='Zerodha', instruments='NSE_EQ|INE002A01018,NSE_EQ|INE669E01016', user_id="4fbba468-6a86-4516-8236-2f8abcbfd2ef", db=db))
+        print(await get_ohlc_data(broker='Zerodha', instruments='NSE_EQ|INE002A01018,NSE_EQ|INE669E01016,NSE_EQ|INE176A01028', user_id="4fbba468-6a86-4516-8236-2f8abcbfd2ef", db=db))
         # print(await get_ltp_openchart(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
         # print(await get_ltp_from_nse(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
         # print(await get_ohlc_openchart(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))

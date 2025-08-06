@@ -96,19 +96,26 @@ class MarketData:
             return "Success" if "success" in msg else "Failure"
 
     @staticmethod
-    def nse_get_quote(symbol):
-        payload = fetch_nse_data('https://www.nseindia.com/api/equity-stockIndices?index=SECURITIES%20IN%20F%26O')
-        for m in range(len(payload['data'])):
-            if payload['data'][m]['symbol'] == symbol.upper():
-                return payload['data'][m]
-        return {}
+    def nse_get_quote(symbol, security_type='FNO'):
+        payload = {}
+        if security_type.upper() == 'FNO':
+            payload = fetch_nse_data('https://www.nseindia.com/api/equity-stockIndices?index=SECURITIES%20IN%20F%26O')
+        elif security_type.upper() == 'NIFTY_500':
+            payload = fetch_nse_data('https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500')
+
+        if payload and 'data' in payload:
+            for m in range(len(payload['data'])):
+                if payload['data'][m]['symbol'] == symbol.upper():
+                    return payload['data'][m]
+        return payload
 
     @staticmethod
     def nse_symbol_quote(symbol):
         payload = {}
         try:
             payload = fetch_nse_data('https://www.nseindia.com/api/quote-equity?symbol=' + symbol)
-            payload = payload['priceInfo']
+            price_data = payload['priceInfo']
+            trade_info = fetch_nse_data('https://www.nseindia.com/api/quote-equity?symbol=' + symbol + '&section=trade_info')
         except KeyError:
             print("Getting Error While Fetching.")
         return payload
@@ -410,9 +417,9 @@ if __name__ == "__main__":
     # print(md.fetch_and_load_etf_data())
     # print(md.get_corporate_actions_data())
     # print(md.nse_events())
-    print(md.nse_get_fno_snapshot_live())
-    # print(md.nse_fno_quote('SBIN'))
-    # print(md.equity_history('SBIN', 'EQ', '01-01-2023', '01-02-2023'))
+    # print(md.nse_get_fno_snapshot_live())
+    # print(md.nse_symbol_quote('SBIN'))
+    print(md.equity_history_virgin('BATAINDIA', 'EQ', '01-01-2023', '01-02-2023'))
     # print(md.security_wise_archive('01-01-2023', '01-01-2024', 'SBIN', series='EQ'))
     # print(md.nse_get_advances_declines())
     # data = md.fetch_index_pe_pb_div_data(start_date="1-1-2020",

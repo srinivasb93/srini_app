@@ -43,6 +43,7 @@ class ScheduledOrder(BaseModel):
     scheduled_order_id: str
     broker: Optional[str] = None
     instrument_token: Optional[str] = None
+    trading_symbol: Optional[str] = None
     transaction_type: Optional[str] = None
     quantity: Optional[int] = None
     order_type: Optional[str] = None
@@ -55,6 +56,11 @@ class ScheduledOrder(BaseModel):
     status: Optional[str] = None
     is_amo: Optional[bool] = None
     user_id: str
+    created_at: Optional[datetime] = None
+    executed_at: Optional[datetime] = None
+    executed_order_id: Optional[str] = None
+    error_message: Optional[str] = None
+
 
     class Config:
         from_attributes = True
@@ -72,7 +78,7 @@ class ScheduledOrderRequest(BaseModel):
     schedule_datetime: datetime
     stop_loss: Optional[float] = None
     target: Optional[float] = None
-    is_amo: bool = False
+    is_amo: Optional[bool] = False
 
     class Config:
         from_attributes = True
