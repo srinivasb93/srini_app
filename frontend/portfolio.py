@@ -23,38 +23,37 @@ async def render_portfolio_page(fetch_api, user_storage, broker):
         {'name': 'DayChangePct', 'label': 'Day Change %', 'field': 'DayChangePct', 'align': 'right'},
     ]
 
-    portfolio_table = ui.table(columns=columns, rows=[], row_key='Symbol').classes('w-full bordered dense-table')
-    portfolio_table.add_slot('body-cell-PnL', '''
-        <q-td :props="props">
-            <span :class="props.row.pnl_classes">{{ props.row.PnL }}</span>
-        </q-td>
-    ''')
-    portfolio_table.add_slot('body-cell-pnl_percentage', '''
-        <q-td :props="props">
-            <span :class="props.row.pnl_percentage_classes">{{ props.row.pnl_percentage }}</span>
-        </q-td>
-    ''')
-    portfolio_table.add_slot('body-cell-DayChange', '''
-        <q-td :props="props">
-            <span :class="props.row.day_change_classes">{{ props.row.DayChange }}</span>
-        </q-td>
-    ''')
-    portfolio_table.add_slot('body-cell-DayChangePct', '''
-        <q-td :props="props">
-            <span :class="props.row.day_change_percentage_classes">{{ props.row.DayChangePct }}</span>
-        </q-td>
-    ''')
+    with portfolio_container:
+        summary_container = ui.row().classes("w-full justify-around gap-4 mb-4")
 
-    summary_container = ui.row().classes("w-full justify-around gap-4 mb-4")
+        portfolio_table = ui.table(columns=columns, rows=[], row_key='Symbol').classes('w-full bordered dense-table')
+        portfolio_table.add_slot('body-cell-PnL', '''
+            <q-td :props="props">
+                <span :class="props.row.pnl_classes">{{ props.row.PnL }}</span>
+            </q-td>
+        ''')
+        portfolio_table.add_slot('body-cell-pnl_percentage', '''
+            <q-td :props="props">
+                <span :class="props.row.pnl_percentage_classes">{{ props.row.pnl_percentage }}</span>
+            </q-td>
+        ''')
+        portfolio_table.add_slot('body-cell-DayChange', '''
+            <q-td :props="props">
+                <span :class="props.row.day_change_classes">{{ props.row.DayChange }}</span>
+            </q-td>
+        ''')
+        portfolio_table.add_slot('body-cell-DayChangePct', '''
+            <q-td :props="props">
+                <span :class="props.row.day_change_percentage_classes">{{ props.row.DayChangePct }}</span>
+            </q-td>
+        ''')
 
     async def refresh_portfolio():
-        portfolio_container.clear()
         status_label.text = "Loading portfolio..."
 
-        with portfolio_container:
-            with summary_container:
-                pass  # Populated after data fetch
-            portfolio_table.rows.clear()
+        # Clear existing table data
+        portfolio_table.rows.clear()
+        portfolio_table.update()
 
         try:
             response = await fetch_api(f"/portfolio/{broker}")
@@ -123,9 +122,11 @@ async def render_portfolio_page(fetch_api, user_storage, broker):
                     logger.error(f"Error processing holding {h.get('Symbol', 'unknown')}: {e}")
                     continue
 
+            # Update table with new data
             portfolio_table.rows = rows_prepared
             portfolio_table.update()
 
+            # Update summary cards
             summary_container.clear()
             with summary_container:
                 with ui.card().classes("p-4 items-center text-center shadow-md rounded-lg flex-grow"):
@@ -153,10 +154,8 @@ async def render_portfolio_page(fetch_api, user_storage, broker):
             status_label.text = f"An unexpected error occurred: {e}"
             logger.exception("Unexpected error fetching portfolio")
             ui.notify(f"An unexpected error occurred: {e}", type="negative", position="top-right")
-        finally:
-            portfolio_table.update()
 
     ui.button("Refresh Portfolio", on_click=refresh_portfolio, icon="refresh").classes("button-primary mt-4 self-start")
 
     await refresh_portfolio()
-    ui.timer(user_storage.get("portfolio_refresh_interval", 60), refresh_portfolio, active=True)
+    ui.timer(user_storage.get("portfolio_refresh_interval", 600), refresh_portfolio, active=True)

@@ -248,7 +248,8 @@ async def refresh_gtt_orders(table, message_container, fetch_api, broker):
                 table.update()
             else:
                 with message_container:
-                    ui.label("Failed to load GTT orders.").classes("text-red-500 text-subtitle1")
+                    if not orders_data:
+                        ui.label("No data available for GTT orders.").classes("text-blue-500 text-subtitle1")
                 safe_notify("Error fetching GTT orders.", "negative")
                 logger.error(f"Invalid GTT orders response: {orders_data}")
                 table.rows = []
@@ -318,7 +319,8 @@ async def refresh_auto_orders(table, message_container, fetch_api, broker):
                 table.update()
             else:
                 with message_container:
-                    ui.label("Failed to load auto orders.").classes("text-red-500 text-subtitle1")
+                    if not orders_data:
+                        ui.label("No data available for auto orders.").classes("text-blue-500 text-subtitle1")
                 safe_notify("Error fetching auto orders.", "negative")
                 logger.error(f"Invalid auto orders response: {orders_data}")
                 table.rows = []

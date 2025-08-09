@@ -92,14 +92,8 @@ class OrderMonitor:
     def __init__(self):
         self.running: bool = True
         self.polling_interval: int = 60
-        self.order_queue: Optional[asyncio.Queue] = None
         self.monitor_tasks: List[asyncio.Task] = []
         logger.info("OrderMonitor initialized")
-
-    async def initialize_queue(self):
-        if self.order_queue is None:
-            self.order_queue = asyncio.Queue()
-            logger.info("Order queue initialized")
 
     async def run_scheduled_tasks(self, user_apis: Dict[str, Dict[str, Any]]):
         """CORRECTED: Proper database session handling for long-running tasks with dynamic user API loading"""
@@ -136,6 +130,17 @@ class OrderMonitor:
 
                                     except Exception as user_error:
                                         logger.error(f"Error processing user {user_id}: {user_error}")
+
+                                # Monitor trailing stop loss orders every 5 minutes (300 seconds)
+                                current_time = datetime.now()
+                                if not hasattr(self, '_last_trailing_check'):
+                                    self._last_trailing_check = current_time - timedelta(minutes=4)
+
+                                time_since_last_check = (current_time - self._last_trailing_check).total_seconds()
+                                if time_since_last_check >= 300:  # 5 minutes
+                                    logger.info("Running trailing stop loss monitoring check")
+                                    await self.monitor_trailing_stop_loss_orders(active_user_apis, db)
+                                    self._last_trailing_check = current_time
                             else:
                                 logger.debug("No active user APIs available for processing")
 
@@ -165,7 +170,7 @@ class OrderMonitor:
     async def _get_active_user_apis(self, db: AsyncSession, provided_user_apis: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         """
         Dynamically load active user APIs from database.
-        First tries to use provided_user_apis, then loads from database if needed.
+        First tries to use provided user APIs, then loads from database if needed.
         """
         active_apis = {}
         
@@ -227,6 +232,280 @@ class OrderMonitor:
             
         return active_apis
 
+    async def monitor_trailing_stop_loss_orders(self, active_user_apis: Dict[str, Dict[str, Any]], db: AsyncSession):
+        """Monitor and update trailing stop loss orders every 5 minutes"""
+        try:
+            user_ids = tuple(active_user_apis.keys()) if active_user_apis else ()
+            if not user_ids:
+                logger.debug("No active user APIs for trailing stop loss monitoring")
+                return
+
+            # Enhanced query with exit_order_id filtering for better tracking
+            query = text("""
+                SELECT * FROM orders 
+                WHERE (
+                    (is_trailing_stop_loss = true AND status IN ('complete', 'COMPLETE') 
+                     AND exit_order_id IS NULL
+                     AND remarks NOT LIKE '%triggered%')
+                    OR
+                    (status IN ('complete', 'COMPLETE') 
+                     AND (stop_loss > 0 OR target > 0)
+                     AND exit_order_id IS NULL
+                     AND remarks NOT LIKE '%Stop Loss triggered%'
+                     AND remarks NOT LIKE '%Target reached%'
+                     AND remarks NOT LIKE '%Exit order%')
+                )
+                AND user_id = ANY(:user_ids)
+            """)
+
+            result = await db.execute(query, {"user_ids": list(user_ids)})
+            orders_to_monitor = result.fetchall()
+
+            logger.info(f"Found {len(orders_to_monitor)} orders to monitor (trailing stop loss and regular stop loss/target)")
+
+            for order_row in orders_to_monitor:
+                try:
+                    user_id = order_row.user_id
+                    order_id = order_row.order_id
+                    trading_symbol = order_row.trading_symbol
+                    instrument_token = order_row.instrument_token
+                    transaction_type = order_row.transaction_type
+                    quantity = order_row.quantity
+                    entry_price = float(order_row.price) if order_row.price else 0.0
+
+                    # Get order parameters
+                    is_trailing_stop_loss = bool(order_row.is_trailing_stop_loss)
+                    stop_loss = float(order_row.stop_loss or 0)
+                    target = float(order_row.target or 0)
+
+                    # Trailing stop loss parameters
+                    trailing_stop_loss_percent = float(order_row.trailing_stop_loss_percent or 0)
+                    trail_start_target_percent = float(order_row.trail_start_target_percent or 0)
+                    trailing_activated = bool(order_row.trailing_activated)
+                    highest_price = float(order_row.highest_price_achieved or entry_price)
+
+                    # Skip if no monitoring parameters are set
+                    if not is_trailing_stop_loss and stop_loss <= 0 and target <= 0:
+                        continue
+
+                    # Validate trailing stop loss parameters
+                    if is_trailing_stop_loss and (trailing_stop_loss_percent <= 0 or trail_start_target_percent <= 0):
+                        logger.warning(f"Invalid trailing parameters for order {order_id}")
+                        continue
+
+                    # Get user APIs
+                    user_apis = active_user_apis.get(user_id, {})
+                    upstox_api = user_apis.get("upstox", {}).get("market_data")
+                    zerodha_api = user_apis.get("zerodha", {}).get("kite")
+
+                    if not (upstox_api or zerodha_api):
+                        logger.warning(f"No market data API available for user {user_id}")
+                        continue
+
+                    # Get current market price
+                    try:
+                        ltp_data = await get_ltp(upstox_api, zerodha_api, [instrument_token], db)
+                        if not ltp_data:
+                            logger.warning(f"No LTP data for {trading_symbol}")
+                            continue
+
+                        current_price = ltp_data[0].last_price
+                        logger.debug(f"Current price for {trading_symbol}: {current_price}, Entry: {entry_price}")
+
+                    except Exception as price_error:
+                        logger.error(f"Error fetching current price for {trading_symbol}: {price_error}")
+                        continue
+
+                    # Check exit conditions in priority order
+                    exit_triggered = False
+                    exit_reason = None
+                    exit_price = current_price
+
+                    # Priority 1: Regular Stop Loss (highest priority for BUY orders when price goes down)
+                    if stop_loss > 0:
+                        if transaction_type == "BUY" and current_price <= stop_loss:
+                            exit_triggered = True
+                            exit_reason = "Stop Loss triggered"
+                            exit_price = stop_loss
+                        elif transaction_type == "SELL" and current_price >= stop_loss:
+                            exit_triggered = True
+                            exit_reason = "Stop Loss triggered"
+                            exit_price = stop_loss
+
+                    # Priority 2: Regular Target (high priority for profit taking)
+                    if not exit_triggered and target > 0:
+                        if transaction_type == "BUY" and current_price >= target:
+                            exit_triggered = True
+                            exit_reason = "Target reached"
+                            exit_price = target
+                        elif transaction_type == "SELL" and current_price <= target:
+                            exit_triggered = True
+                            exit_reason = "Target reached"
+                            exit_price = target
+
+                    # Priority 3: Trailing Stop Loss (only if no regular stop loss/target triggered)
+                    if not exit_triggered and is_trailing_stop_loss:
+                        # Update highest price if current price is higher (for BUY orders)
+                        if transaction_type == "BUY" and current_price > highest_price:
+                            highest_price = current_price
+
+                            # Update highest price in database
+                            update_query = text("""
+                                UPDATE orders 
+                                SET highest_price_achieved = :highest_price 
+                                WHERE order_id = :order_id
+                            """)
+                            await db.execute(update_query, {
+                                "highest_price": highest_price,
+                                "order_id": order_id
+                            })
+
+                            logger.info(f"Updated highest price for {trading_symbol} to {highest_price}")
+
+                        # Check if trailing should be activated
+                        if transaction_type == "BUY":
+                            price_gain_percent = ((current_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+                        else:
+                            price_gain_percent = ((entry_price - current_price) / entry_price) * 100 if entry_price > 0 else 0
+
+                        if not trailing_activated and price_gain_percent >= trail_start_target_percent:
+                            # Activate trailing stop loss
+                            trailing_activated = True
+
+                            update_query = text("""
+                                UPDATE orders 
+                                SET trailing_activated = true 
+                                WHERE order_id = :order_id
+                            """)
+                            await db.execute(update_query, {"order_id": order_id})
+
+                            logger.info(
+                                f"Activated trailing stop loss for {trading_symbol} at {current_price} ({price_gain_percent:.2f}% gain)")
+
+                            # Send notification
+                            result = await db.execute(select(User).filter(User.user_id == user_id))
+                            user = result.scalars().first()
+                            if user:
+                                await notify(
+                                    f"Trailing Stop Activated: {trading_symbol}",
+                                    f"Trailing stop loss activated at {current_price} with {price_gain_percent:.2f}% gain",
+                                    user.email
+                                )
+
+                        # Check trailing stop loss condition if activated
+                        if trailing_activated:
+                            # Calculate trailing stop price (percentage below highest price for BUY orders)
+                            if transaction_type == "BUY":
+                                trailing_stop_price = highest_price * (1 - trailing_stop_loss_percent / 100)
+                                if current_price <= trailing_stop_price:
+                                    exit_triggered = True
+                                    exit_reason = "Trailing stop loss triggered"
+                                    exit_price = trailing_stop_price
+                            else:  # SELL orders
+                                # For SELL orders, trailing stop moves up as price goes down
+                                lowest_price = float(order_row.lowest_price_achieved or entry_price)
+                                if current_price < lowest_price:
+                                    lowest_price = current_price
+                                    # Update lowest price in database
+                                    update_query = text("""
+                                        UPDATE orders 
+                                        SET lowest_price_achieved = :lowest_price 
+                                        WHERE order_id = :order_id
+                                    """)
+                                    await db.execute(update_query, {
+                                        "lowest_price": lowest_price,
+                                        "order_id": order_id
+                                    })
+
+                                trailing_stop_price = lowest_price * (1 + trailing_stop_loss_percent / 100)
+                                if current_price >= trailing_stop_price:
+                                    exit_triggered = True
+                                    exit_reason = "Trailing stop loss triggered"
+                                    exit_price = trailing_stop_price
+
+                            logger.debug(
+                                f"Trailing check for {trading_symbol}: Current={current_price}, TrailingStop={trailing_stop_price}, Highest={highest_price}")
+
+                    # Execute exit order if any condition is triggered
+                    if exit_triggered:
+                        logger.info(f"{exit_reason} for {trading_symbol} at {current_price}")
+
+                        try:
+                            # Get appropriate API for placing order
+                            order_api = user_apis.get("upstox", {}).get(
+                                "order") if order_row.broker == "Upstox" else user_apis.get("zerodha", {}).get(
+                                "kite")
+
+                            if order_api:
+                                # Place opposite transaction (exit order)
+                                exit_transaction_type = "SELL" if transaction_type == "BUY" else "BUY"
+
+                                exit_response = await place_order(
+                                    api=order_api,
+                                    instrument_token=instrument_token,
+                                    trading_symbol=trading_symbol,
+                                    transaction_type=exit_transaction_type,
+                                    quantity=quantity,
+                                    price=0,  # Market order
+                                    order_type="MARKET",
+                                    broker=order_row.broker,
+                                    db=db,
+                                    user_id=user_id
+                                )
+
+                                exit_order_id = exit_response.data.order_id if order_row.broker == "Upstox" else exit_response
+
+                                # Update original order with exit details and exit_order_id
+                                update_fields = {
+                                    "remarks": f"{exit_reason} at {current_price}. Exit order: {exit_order_id}",
+                                    "exit_order_id": exit_order_id,  # Track the exit order ID
+                                    "order_id": order_id
+                                }
+
+                                if "trailing" in exit_reason.lower():
+                                    update_fields["trailing_stop_price"] = current_price
+
+                                update_query = text("""
+                                    UPDATE orders 
+                                    SET remarks = :remarks, exit_order_id = :exit_order_id""" +
+                                    (", trailing_stop_price = :trailing_stop_price" if "trailing_stop_price" in update_fields else "") + """
+                                    WHERE order_id = :order_id
+                                """)
+
+                                await db.execute(update_query, update_fields)
+
+                                logger.info(f"Placed exit order {exit_order_id} for {trading_symbol} - {exit_reason}")
+
+                                # Send notification
+                                result = await db.execute(select(User).filter(User.user_id == user_id))
+                                user = result.scalars().first()
+                                if user:
+                                    if transaction_type == "BUY":
+                                        profit_loss = (current_price - entry_price) * quantity
+                                    else:
+                                        profit_loss = (entry_price - current_price) * quantity
+
+                                    await notify(
+                                        f"{exit_reason}: {trading_symbol}",
+                                        f"Exit order placed at {current_price}. Estimated P&L: ₹{profit_loss:.2f}",
+                                        user.email
+                                    )
+                            else:
+                                logger.error(f"No order API available for user {user_id} to place exit order")
+
+                        except Exception as exit_error:
+                            logger.error(f"Error placing exit order for {trading_symbol}: {exit_error}")
+
+                except Exception as order_error:
+                    logger.error(f"Error processing order monitoring for order {order_row.order_id}: {order_error}")
+
+            # Commit all database changes
+            await db.commit()
+
+        except Exception as e:
+            logger.error(f"Error in monitor_trailing_stop_loss_orders: {e}")
+            await db.rollback()
+
     async def sync_order_statuses(self, upstox_api: Optional[Any], zerodha_api: Optional[Any],
                                   db: AsyncSession, user_id: Optional[str] = None) -> bool:
         """Sync order statuses and GTT orders - ENHANCED: Now syncs both regular orders and GTT orders for users with active APIs"""
@@ -236,22 +515,22 @@ class OrderMonitor:
                 return True
 
             # ===== SYNC REGULAR ORDERS =====
-            # Build the query with user_id filter if provided
+            # Build the query with user_id filter if provided - Include PENDING status from place_order
             stmt = select(Order).where(
-                func.lower(Order.status).in_([status.lower() for status in ["open", "pending", "trigger pending", "amo req received"]])
+                func.lower(Order.status).in_([status.lower() for status in ["open", "pending", "PENDING", "trigger pending", "amo req received"]])
             )
-            
+
             # CRITICAL FIX: Add user_id filter to only fetch orders for the current user
             if user_id:
                 stmt = stmt.where(Order.user_id == user_id)
-                
+
             result = await db.execute(stmt)
             orders = result.scalars().all()
-            
+
             if user_id:
-                logger.info(f"Found {len(orders)} open orders for user {user_id}")
+                logger.info(f"Found {len(orders)} open/pending orders for user {user_id}")
             else:
-                logger.info(f"Found {len(orders)} open orders (all users)")
+                logger.info(f"Found {len(orders)} open/pending orders (all users)")
 
             # Sync regular orders
             for order in orders:
@@ -265,8 +544,9 @@ class OrderMonitor:
                         continue
 
                     if order_status and order_status.lower() != order.status.lower():
+                        old_status = order.status
                         order.status = order_status.lower()
-                        logger.info(f"Updated order {order.order_id} status to {order.status}")
+                        logger.info(f"Updated order {order.order_id} status from {old_status} to {order.status}")
 
                         if order.status in ["complete", "rejected", "cancelled"]:
                             result = await db.execute(select(User).filter(User.user_id == order.user_id))
@@ -283,13 +563,13 @@ class OrderMonitor:
             # ===== SYNC GTT ORDERS =====
             # Build GTT query with user_id filter if provided
             gtt_stmt = select(GTTOrder).where(GTTOrder.status.in_(["PENDING", "active"]))
-            
+
             if user_id:
                 gtt_stmt = gtt_stmt.where(GTTOrder.user_id == user_id)
-                
+
             gtt_result = await db.execute(gtt_stmt)
             gtt_orders = gtt_result.scalars().all()
-            
+
             if user_id:
                 logger.info(f"Found {len(gtt_orders)} active GTT orders for user {user_id}")
             else:
@@ -299,29 +579,29 @@ class OrderMonitor:
             for gtt in gtt_orders:
                 try:
                     gtt_status_updated = False
-                    
+
                     if gtt.broker == "Zerodha" and zerodha_api:
                         try:
                             # Get GTT status from Zerodha API
                             zerodha_gtt = zerodha_api.get_gtt(trigger_id=gtt.gtt_order_id)
                             api_status = zerodha_gtt.get("status", "").lower()
-                            
+
                             if api_status and api_status != gtt.status.lower():
                                 old_status = gtt.status
                                 gtt.status = api_status
                                 gtt_status_updated = True
                                 logger.info(f"Updated GTT {gtt.gtt_order_id} status from {old_status} to {api_status}")
-                                
+
                         except Exception as api_error:
                             logger.debug(f"Could not fetch GTT status from API for {gtt.gtt_order_id}: {api_error}")
-                    
+
                     elif gtt.broker == "Upstox" and upstox_api:
                         # For Upstox GTT orders, check if trigger conditions are met
                         try:
                             ltp_data = await get_ltp(upstox_api, None, [gtt.instrument_token], db)
                             if ltp_data and len(ltp_data) > 0:
                                 ltp = ltp_data[0].last_price
-                                
+
                                 # Check trigger conditions
                                 if gtt.trigger_type == "single" and ltp >= gtt.trigger_price:
                                     # Place the actual order
@@ -340,10 +620,10 @@ class OrderMonitor:
                                     gtt.status = "TRIGGERED"
                                     gtt_status_updated = True
                                     logger.info(f"GTT {gtt.gtt_order_id} triggered at price {ltp}")
-                                    
+
                         except Exception as trigger_error:
                             logger.error(f"Error checking GTT trigger for {gtt.gtt_order_id}: {trigger_error}")
-                    
+
                     # Send notification if status changed
                     if gtt_status_updated and gtt.status in ["triggered", "cancelled", "completed"]:
                         result = await db.execute(select(User).filter(User.user_id == gtt.user_id))
@@ -354,7 +634,7 @@ class OrderMonitor:
                                 f"GTT order for {gtt.trading_symbol} status changed to {gtt.status}",
                                 user.email
                             )
-                            
+
                 except Exception as e:
                     logger.error(f"Error syncing GTT order {gtt.gtt_order_id}: {str(e)}")
 
@@ -368,93 +648,6 @@ class OrderMonitor:
         except Exception as e:
             logger.error(f"Error in sync_order_statuses: {str(e)}")
             return False
-
-    async def monitor_order(self, order_id: str, instrument_token: str, trading_symbol: str, transaction_type: str,
-                           quantity: int, product_type: str, stop_loss_price: Optional[float], target_price: Optional[float],
-                           api: Any, broker: str, db: AsyncSession, upstox_apis: Dict[str, Any], kite_apis: Dict[str, Any]):
-        logger.info(f"Starting monitor_order for order {order_id}")
-        task = asyncio.current_task()
-        self.monitor_tasks.append(task)
-        try:
-            await self.initialize_queue()
-            # Fetch the Order instance to access user_id
-            result = await db.execute(select(Order).filter(Order.order_id == order_id, Order.broker == broker))
-            order: Optional[Order] = result.scalars().first()
-            if not order:
-                logger.error(f"Order {order_id} not found in database")
-                return
-
-            if stop_loss_price or target_price:
-                logger.info(
-                    f"Queuing stop-loss/target for order {order_id}: stop_loss={stop_loss_price}, target={target_price}")
-                sl_transaction = "BUY" if transaction_type == "SELL" else "SELL"
-                if stop_loss_price:
-                    await self.order_queue.put({
-                        "queued_order_id": f"queued_{order_id}_sl",
-                        "parent_order_id": order_id,
-                        "instrument_token": instrument_token,
-                        "trading_symbol": trading_symbol,
-                        "transaction_type": sl_transaction,
-                        "quantity": quantity,
-                        "order_type": "LIMIT",
-                        "price": stop_loss_price,
-                        "trigger_price": 0,
-                        "product_type": product_type,
-                        "validity": "DAY",
-                        "is_gtt": "False",
-                        "status": "QUEUED",
-                        "broker": broker,
-                        "user_id": order.user_id
-                    })
-                if target_price:
-                    await self.order_queue.put({
-                        "queued_order_id": f"queued_{order_id}_target",
-                        "parent_order_id": order_id,
-                        "instrument_token": instrument_token,
-                        "trading_symbol": trading_symbol,
-                        "transaction_type": sl_transaction,
-                        "quantity": quantity,
-                        "order_type": "LIMIT",
-                        "price": target_price,
-                        "trigger_price": 0,
-                        "product_type": product_type,
-                        "validity": "DAY",
-                        "is_gtt": "False",
-                        "status": "QUEUED",
-                        "broker": broker,
-                        "user_id": order.user_id
-                    })
-                await self._store_queued_orders(db)
-                result = await db.execute(select(User).filter(User.user_id == order.user_id))
-                user = result.scalars().first()
-                if user:
-                    await notify("SL/Target Orders Queued", f"Queued SL and target for {trading_symbol}", user.email)
-
-            max_attempts = 60
-            attempt = 0
-            backoff = 5
-            max_backoff = 30
-            while self.running and attempt < max_attempts:
-                try:
-                    order_status = (api.get_order_status(order_id=order_id).data.status if broker == "Upstox"
-                                    else api.order_history(order_id=order_id)[-1]["status"].lower())
-                    await self._update_order_status(order_id, order_status, broker, db)
-                    if order_status.lower() == "complete":
-                        await self._process_queued_orders(order_id, instrument_token, trading_symbol, api, broker, db,
-                                                          upstox_apis, kite_apis)
-                        break
-                    elif order_status.lower() in ["rejected", "cancelled", "triggered"]:
-                        await self._clear_queued_orders(order_id, db)
-                        break
-                    attempt += 1
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 1.5, max_backoff)
-                except Exception as e:
-                    logger.error(f"Error monitoring order {order_id}: {str(e)}")
-                    break
-        finally:
-            if task in self.monitor_tasks:
-                self.monitor_tasks.remove(task)
 
     async def monitor_gtt_orders(self, upstox_api: Optional[Any], db: AsyncSession):
         stmt = select(GTTOrder).where(GTTOrder.status == "PENDING", GTTOrder.broker == "Upstox")
@@ -493,81 +686,11 @@ class OrderMonitor:
 
     async def _update_order_status(self, order_id: str, status: str, broker: str, db: AsyncSession):
         query = """
-            UPDATE orders 
-            SET status = :status 
+            UPDATE orders
+            SET status = :status
             WHERE order_id = :order_id AND broker = :broker
         """
         await async_execute_query(db, text(query), {"status": status, "order_id": order_id, "broker": broker})
-
-    async def _store_queued_orders(self, db: AsyncSession):
-        logger.info("Storing queued orders")
-        while not self.order_queue.empty():
-            order = await self.order_queue.get()
-            logger.info(f"Inserting queued order: {order['queued_order_id']}")
-            try:
-                await async_execute_query(db, text("""
-                    INSERT INTO queued_orders (
-                        queued_order_id, parent_order_id, instrument_token, trading_symbol, transaction_type, 
-                        quantity, order_type, price, trigger_price, product_type, validity, is_gtt, status,
-                        broker, user_id)
-                     VALUES (
-                        :queued_order_id, :parent_order_id, :instrument_token, :trading_symbol, :transaction_type, 
-                        :quantity, :order_type, :price, :trigger_price, :product_type, :validity, :is_gtt, :status,
-                        :broker, :user_id)
-                """), order)
-                await db.commit()
-                logger.info(f"Successfully inserted queued order: {order['queued_order_id']}")
-            except Exception as e:
-                logger.error(f"Error inserting queued order {order['queued_order_id']}: {str(e)}")
-                await db.rollback()
-                raise
-            self.order_queue.task_done()
-
-    async def _process_queued_orders(self, order_id: str, instrument_token: str, trading_symbol: str, api: Any,
-                                     broker: str, db: AsyncSession, upstox_apis: Dict[str, Any], kite_apis: Dict[str, Any]):
-        query = """
-            SELECT * FROM queued_orders 
-            WHERE parent_order_id = :order_id AND status = 'QUEUED'
-        """
-        queued_orders = await async_fetch_query(db, text(query), {"order_id": order_id})
-        for row in queued_orders:
-            try:
-                await place_order(
-                    api=api,
-                    instrument_token=instrument_token,
-                    trading_symbol=trading_symbol,
-                    transaction_type=row["transaction_type"],
-                    quantity=row["quantity"],
-                    price=row["price"],
-                    order_type=row["order_type"],
-                    trigger_price=row["trigger_price"],
-                    is_amo=False,
-                    product_type=row["product_type"],
-                    validity=row["validity"],
-                    stop_loss=None,
-                    target=None,
-                    broker=broker,
-                    db=db,
-                    upstox_apis=upstox_apis,
-                    kite_apis=kite_apis,
-                    user_id=row.get("user_id", "default_user")
-                )
-                update_query = """
-                    UPDATE queued_orders 
-                    SET status = 'PLACED' 
-                    WHERE queued_order_id = :queued_order_id
-                """
-                await async_execute_query(db, text(update_query), {"queued_order_id": row["queued_order_id"]})
-            except Exception as e:
-                logger.error(f"Error processing queued order for {order_id}: {str(e)}")
-
-    async def _clear_queued_orders(self, order_id: str, db: AsyncSession):
-        query = """
-            UPDATE queued_orders 
-            SET status = 'CANCELLED' 
-            WHERE parent_order_id = :order_id AND status = 'QUEUED'
-        """
-        await async_execute_query(db, text(query), {"order_id": order_id})
 
     async def cancel_all_tasks(self):
         self.running = False
@@ -658,7 +781,7 @@ class OrderManager:
                     async with session_factory() as db:
                         try:
                             query = """
-                                SELECT * FROM scheduled_orders 
+                                SELECT * FROM scheduled_orders
                                 WHERE status = :status
                                 ORDER BY schedule_datetime ASC
                             """
@@ -714,8 +837,8 @@ class OrderManager:
                                             logger.error(f"API not available for user {user_id}, broker {order['broker']}")
                                             # Mark order as failed due to API unavailability
                                             update_query = """
-                                                UPDATE scheduled_orders 
-                                                SET status = 'FAILED', error_message = 'API not available' 
+                                                UPDATE scheduled_orders
+                                                SET status = 'FAILED', error_message = 'API not available'
                                                 WHERE scheduled_order_id = :order_id
                                             """
                                             await async_execute_query(db, text(update_query),
@@ -751,7 +874,7 @@ class OrderManager:
 
                                         # Update order status to executed
                                         update_query = """
-                                            UPDATE scheduled_orders 
+                                            UPDATE scheduled_orders
                                             SET status = 'EXECUTED', executed_at = :executed_at, executed_order_id = :executed_order_id
                                             WHERE scheduled_order_id = :order_id
                                         """
@@ -784,8 +907,8 @@ class OrderManager:
                                     # Mark order as failed
                                     try:
                                         update_query = """
-                                            UPDATE scheduled_orders 
-                                            SET status = 'FAILED', error_message = :error_msg 
+                                            UPDATE scheduled_orders
+                                            SET status = 'FAILED', error_message = :error_msg
                                             WHERE scheduled_order_id = :order_id
                                         """
                                         await async_execute_query(db, text(update_query), {
@@ -825,12 +948,12 @@ class OrderManager:
                 gtt_id = str(uuid.uuid4())
                 query = """
                     INSERT INTO gtt_orders (
-                        gtt_order_id, instrument_token, trading_symbol, transaction_type, quantity, 
-                        trigger_type, trigger_price, limit_price, last_price, second_trigger_price, second_limit_price, 
+                        gtt_order_id, instrument_token, trading_symbol, transaction_type, quantity,
+                        trigger_type, trigger_price, limit_price, last_price, second_trigger_price, second_limit_price,
                         status, broker, created_at, user_id
                     ) VALUES (
-                        :gtt_id, :instrument_token, :trading_symbol, :transaction_type, :quantity, 
-                        :trigger_type, :trigger_price, :limit_price, :last_price, :second_trigger_price, 
+                        :gtt_id, :instrument_token, :trading_symbol, :transaction_type, :quantity,
+                        :trigger_type, :trigger_price, :limit_price, :last_price, :second_trigger_price,
                         :second_limit_price, :status, :broker, :created_at, :user_id
                     )
                 """
@@ -907,12 +1030,12 @@ class OrderManager:
 
             query = """
                 INSERT INTO gtt_orders (
-                    gtt_order_id, instrument_token, trading_symbol, transaction_type, quantity, 
-                    trigger_type, trigger_price, limit_price, last_price, second_trigger_price, second_limit_price, 
+                    gtt_order_id, instrument_token, trading_symbol, transaction_type, quantity,
+                    trigger_type, trigger_price, limit_price, last_price, second_trigger_price, second_limit_price,
                     status, broker, created_at, user_id
                 ) VALUES (
-                    :gtt_id, :instrument_token, :trading_symbol, :transaction_type, :quantity, 
-                    :trigger_type, :trigger_price, :limit_price, :last_price, :second_trigger_price, 
+                    :gtt_id, :instrument_token, :trading_symbol, :transaction_type, :quantity,
+                    :trigger_type, :trigger_price, :limit_price, :last_price, :second_trigger_price,
                     :second_limit_price, :status, :broker, :created_at, :user_id
                 )
             """
@@ -999,7 +1122,7 @@ class OrderManager:
                 orders=orders
             )
             query = """
-                UPDATE gtt_orders 
+                UPDATE gtt_orders
                 SET trigger_type = :trigger_type, trigger_price = :trigger_price, limit_price = :limit_price,
                     second_trigger_price = :second_trigger_price, second_limit_price = :second_limit_price,
                     quantity = :quantity, last_price = :last_price
@@ -1145,12 +1268,21 @@ async def fetch_zerodha_access_token(db: AsyncSession, user_id: str, request_tok
 async def place_order(api, instrument_token, trading_symbol, transaction_type, quantity, price=0, order_type="MARKET",
                       trigger_price=0, is_amo=False, product_type="D", validity='DAY', stop_loss=None, target=None,
                       broker="Upstox", db: AsyncSession = None, upstox_apis=None, kite_apis=None,
-                      user_id: str = "default_user", order_monitor=None):
+                      user_id: str = "default_user", order_monitor=None, is_trailing_stop_loss=False,
+                      trailing_stop_loss_percent=None, trail_start_target_percent=None):
     try:
         if quantity <= 0:
             raise ValueError("Quantity must be positive")
         if price < 0 or trigger_price < 0:
             raise ValueError("Price and trigger price cannot be negative")
+
+        # Validate trailing stop loss parameters
+        if is_trailing_stop_loss:
+            if not trailing_stop_loss_percent or trailing_stop_loss_percent <= 0:
+                raise ValueError("Trailing stop loss percentage must be greater than 0")
+            if not trail_start_target_percent or trail_start_target_percent <= 0:
+                raise ValueError("Trail start target percentage must be greater than 0")
+
         if broker == "Upstox":
             order = upstox_client.PlaceOrderRequest(
                 quantity=quantity,
@@ -1187,7 +1319,8 @@ async def place_order(api, instrument_token, trading_symbol, transaction_type, q
             )
             primary_order_id = response
 
-        order_data = pd.DataFrame([{
+        # Prepare order data for database
+        order_data_dict = {
             "order_id": primary_order_id,
             "broker": broker,
             "trading_symbol": trading_symbol,
@@ -1202,21 +1335,45 @@ async def place_order(api, instrument_token, trading_symbol, transaction_type, q
             "remarks": "Order placed via API",
             "order_timestamp": datetime.now(),
             "user_id": user_id,
-        }])
+            "stop_loss": stop_loss if stop_loss is not None else 0,
+            "target": target if target is not None else 0,
+            "is_amo": is_amo
+        }
 
+        # Add trailing stop loss information if enabled
+        if is_trailing_stop_loss:
+            order_data_dict.update({
+                "is_trailing_stop_loss": True,
+                "trailing_stop_loss_percent": trailing_stop_loss_percent,
+                "trail_start_target_percent": trail_start_target_percent,
+                "trailing_activated": False,  # Track if trailing has been activated
+                "highest_price_achieved": None  # Track highest price reached for trailing
+            })
+        else:
+            order_data_dict.update({
+                "is_trailing_stop_loss": False,
+                "trailing_stop_loss_percent": None,
+                "trail_start_target_percent": None,
+                "trailing_activated": None,
+                "highest_price_achieved": None
+            })
+
+        order_data = pd.DataFrame([order_data_dict])
         await load_sql_data(order_data, "orders", load_type="append", index_required=False, db=db)
+
         result = await db.execute(select(User).filter(User.user_id == user_id))
         user = result.scalars().first()
         if user:
-            await notify(f"Order Placed: {transaction_type} for {trading_symbol}",
+            order_type_msg = "Trailing Stop Loss Order" if is_trailing_stop_loss else "Regular Order"
+            await notify(f"{order_type_msg} Placed: {transaction_type} for {trading_symbol}",
                          f"Order ID: {primary_order_id}, Quantity: {quantity}, Price: {price}", user.email)
-        logger.info(f"Order placed: {primary_order_id} for {trading_symbol}, user {user_id}")
+        logger.info(f"Order placed: {primary_order_id} for {trading_symbol}, user {user_id}, trailing_stop_loss: {is_trailing_stop_loss}")
 
-        if stop_loss or target:
-            asyncio.create_task(order_monitor.monitor_order(
-                primary_order_id, instrument_token, trading_symbol, transaction_type, quantity,
-                product_type, stop_loss, target, api, broker, db, upstox_apis, kite_apis
-            ))
+        # NOTE: Removed individual order monitoring since monitor_trailing_stop_loss_orders now handles all monitoring
+        # The centralized monitoring function runs every 5 minutes and handles:
+        # - Regular stop loss/target monitoring
+        # - Trailing stop loss monitoring
+        # - Better performance through batched processing
 
         return response
     except ValueError as ve:
@@ -1263,7 +1420,7 @@ async def modify_order(api, order_id: str, quantity: Optional[int] = None, order
                 validity=zerodha_validity
             )
         query = """
-            UPDATE orders 
+            UPDATE orders
             SET quantity = :quantity, order_type = :order_type, price = :price, trigger_price = :trigger_price, validity = :validity
             WHERE order_id = :order_id AND broker = :broker
         """
@@ -2060,6 +2217,7 @@ async def schedule_strategy_execution(api, strategy: str, instrument_token: str,
     except Exception as e:
         logger.error(f"Error scheduling strategy {strategy}: {str(e)}")
         return {"status": "error", "message": str(e)}
+
 
 async def stop_strategy_execution(strategy: str, instrument_token: str, user_id: str, db: AsyncSession):
     try:

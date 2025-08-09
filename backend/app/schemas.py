@@ -181,6 +181,10 @@ class PlaceOrderRequest(BaseModel):
     validity: str = "DAY"
     broker: str
     schedule_datetime: Optional[str] = None
+    # Add trailing stop loss fields
+    is_trailing_stop_loss: Optional[bool] = False
+    trailing_stop_loss_percent: Optional[float] = None
+    trail_start_target_percent: Optional[float] = None
 
     @field_validator("schedule_datetime")
     def validate_schedule_datetime(cls, v):

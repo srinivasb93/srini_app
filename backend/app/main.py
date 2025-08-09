@@ -340,21 +340,6 @@ async def root():
 # ============================================================================
 # APPLICATION STARTUP/SHUTDOWN EVENTS
 # ============================================================================
-
-@app.on_event("startup")
-async def log_startup():
-    """Log startup completion"""
-    logger.info("FastAPI application startup completed")
-    logger.info(f"Global services status:")
-    logger.info(f"   • order_monitor: {'✅ Ready' if order_monitor else '❌ Not initialized'}")
-    logger.info(f"   • order_manager: {'✅ Ready' if order_manager else '❌ Not initialized'}")
-    logger.info(f"   • user_apis: {len(user_apis)} users")
-
-@app.on_event("shutdown")
-async def log_shutdown():
-    """Log shutdown initiation"""
-    logger.info("👋 FastAPI application shutdown initiated")
-
 @app.get("/system/info")
 async def get_system_info():
     """Get detailed system information"""
@@ -614,6 +599,9 @@ async def place_new_order(order: PlaceOrderRequest, user_id: str = Depends(get_c
                 kite_apis=user_apis_dict["zerodha"],
                 user_id=user_id,
                 order_monitor=order_monitor,
+                is_trailing_stop_loss=order.is_trailing_stop_loss,
+                trailing_stop_loss_percent=order.trailing_stop_loss_percent,
+                trail_start_target_percent=order.trail_start_target_percent
             )
             return {"status": "success", "order_id": response.data.order_id if order.broker == "Upstox" else response}
     except Exception as e:
@@ -1289,7 +1277,8 @@ async def backtest_strategy_endpoint(request: BacktestRequest, user_id: str = De
             params=request.params,
             start_date=request.start_date,
             end_date=request.end_date,
-            ws_callback=ws_callback
+            ws_callback=ws_callback,
+            db=db
         )
 
         result = sanitize_floats(result)
@@ -1607,11 +1596,36 @@ if __name__ == "__main__":
         # await get_quote(symbol='RELIANCE', source='nsepython', fallback_sources=['nsetools', 'openchart'],
         #                         user_id="4fbba468-6a86-4516-8236-2f8abcbfd2ef", db=db)
         # await get_historical_data(upstox_api=None, upstox_access_token='None', instrument='RELIANCE', from_date='2023-01-01', to_date='2023-10-01', unit='days', interval='1', db=nsedata_db)
-        print(await get_ohlc_data(broker='Zerodha', instruments='NSE_EQ|INE002A01018,NSE_EQ|INE669E01016,NSE_EQ|INE176A01028', user_id="4fbba468-6a86-4516-8236-2f8abcbfd2ef", db=db))
+        # print(await get_ohlc_data(broker='Zerodha', instruments='NSE_EQ|INE002A01018,NSE_EQ|INE669E01016,NSE_EQ|INE176A01028', user_id="4fbba468-6a86-4516-8236-2f8abcbfd2ef", db=db))
         # print(await get_ltp_openchart(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
         # print(await get_ltp_from_nse(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
         # print(await get_ohlc_openchart(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
         # print(await get_ohlc_from_nse(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
         # print(await get_quotes_from_nse(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
+        # Call place_new_order with appropriate parameters
+        order_payload = PlaceOrderRequest(
+            trading_symbol='IDEA',
+            instrument_token="NSE_EQ|INE002A01018",
+            transaction_type="BUY",
+            quantity=1,
+            order_type="LIMIT",
+            product_type="CNC",
+            validity="DAY",
+            price=6.58,
+            trigger_price=0.0,
+            stop_loss=6.54,
+            target=6.75,
+            is_trailing_stop_loss=True,
+            is_amo=True,
+            trailing_stop_loss_percent=2,
+            trail_start_target_percent=3,
+            broker="Zerodha"
+        )
+        order_status = await place_new_order(
+            order=order_payload,
+            user_id="e4269837-0ccd-484f-af70-a5dfa2abe230",
+            db=db
+        )
+        print(f"Order Status: {order_status}")
         # await get_ohlc()
     asyncio.run(main())

@@ -31,7 +31,6 @@
 - **Chart Analysis**: Interactive candlestick charts
 
 ### 🖥️ User Interface
-- **Streamlit Dashboard**: Interactive web interface
 - **NiceGUI Interface**: Modern responsive web UI
 - **Real-time Updates**: WebSocket-based live data
 - **Mobile Responsive**: Works on all devices
@@ -208,7 +207,7 @@ POST /sip/portfolios
 ```
 algo-trading-app/
 ├── backend/          # FastAPI backend
-├── frontend/         # Streamlit/NiceGUI frontend
+├── frontend/         # NiceGUI frontend
 ├── common_utils/     # Shared utilities
 ├── docker-compose.yml
 └── README.md

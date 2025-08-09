@@ -669,7 +669,7 @@ if __name__ in {"__main__", "__mp_main__"}:
     # ui.add_css('static/styles.css')
 
     ui.run(title="AlgoTrade Pro - Advanced Trading Platform",
-           port=8083,
+           port=8081,
            reload=True,
            uvicorn_reload_dirs='.',
            uvicorn_reload_includes='*.py',

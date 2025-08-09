@@ -35,6 +35,19 @@ class Order(Base):
     remarks = Column(String)
     order_timestamp = Column(DateTime)
     user_id = Column(String)
+    # Add stop loss and target fields
+    stop_loss = Column(Float, nullable=True)
+    target = Column(Float, nullable=True)
+    is_amo = Column(Boolean, default=False)
+    exit_order_id = Column(String, nullable=True)  # Track exit order for this position
+    # Add trailing stop loss fields
+    is_trailing_stop_loss = Column(Boolean, default=False)
+    trailing_stop_loss_percent = Column(Float, nullable=True)
+    trail_start_target_percent = Column(Float, nullable=True)
+    trailing_activated = Column(Boolean, default=False)
+    highest_price_achieved = Column(Float, nullable=True)
+    lowest_price_achieved = Column(Float, nullable=True)  # For SELL orders trailing stop
+    trailing_stop_price = Column(Float, nullable=True)
 
 class ScheduledOrder(Base):
     __tablename__ = "scheduled_orders"

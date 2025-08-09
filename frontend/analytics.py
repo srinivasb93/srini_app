@@ -164,15 +164,13 @@ async def render_analytics_page(fetch_api, user_storage, instruments):
                     value="1d"
                 ).classes("input")
             with ui.column().classes("flex-grow"):
-                ui.label("Start Date").classes("text-subtitle1 mb-2")
-                start_date = ui.date(
-                    value=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
-                ).classes("input")
+                start_date = ui.input("Start Date",
+                                      value=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")).props(
+                    "dense type=date").classes("flex-1")
             with ui.column().classes("flex-grow"):
-                ui.label("End Date").classes("text-subtitle1 mb-2")
-                end_date = ui.date(
-                    value=datetime.now().strftime("%Y-%m-%d")
-                ).classes("input")
+                end_date = ui.input("End Date",
+                                      value=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")).props(
+                    "dense type=date").classes("flex-1")
 
         # Indicators, Drawing Tools, Watchlist, Replay, and Templates UI
         with ui.row().classes("w-full items-center gap-4 mt-2"):
