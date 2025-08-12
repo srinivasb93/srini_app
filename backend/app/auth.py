@@ -103,10 +103,22 @@ class UserManager:
             user_id: str = payload.get("sub")
             if user_id is None:
                 raise credentials_exception
+            
+            # Fetch user from database
+            result = await db.execute(select(User).filter(User.user_id == user_id))
+            user = result.scalars().first()
+            if user is None:
+                raise credentials_exception
+            
+            return {
+                "sub": user.user_id,
+                "email": user.email,
+                "user_id": user.user_id
+            }
         except JWTError:
             raise credentials_exception
-        result = await db.execute(select(User).filter(User.user_id == user_id))
-        user = result.scalars().first()
-        if user is None:
-            raise credentials_exception
-        return user
+
+# Create a dependency function for easier import
+async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
+    """Dependency function to get current user from JWT token"""
+    return await UserManager.get_current_user(token, db)

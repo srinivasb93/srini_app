@@ -46,6 +46,7 @@ from backend.app.database import (
 
 from backend.app.api_manager import initialize_user_apis
 from backend.app.routes.sip_routes import sip_router
+from backend.app.routes.watchlist import watchlist_router
 from backend.app.routes.equity_data_routes import equity_router, nse_openchart
 from backend.app.routes.mutual_fund_routes import mf_router
 from backend.app.routes import data
@@ -241,6 +242,7 @@ async def log_requests(request: Request, call_next):
 # Include routers
 app.include_router(sip_router, tags=["sip-strategy"])
 app.include_router(data.router, prefix="/api", tags=["data"])
+app.include_router(watchlist_router, prefix="/api", tags=["watchlist"])
 app.include_router(equity_router)
 app.include_router(mf_router)
 
@@ -1265,12 +1267,14 @@ async def execute_strategy_endpoint(request: StrategyRequest, user_id: str = Dep
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/algo-trading/backtest", tags=["algo-trading"], dependencies=[Depends(backtest_limiter)])
-async def backtest_strategy_endpoint(request: BacktestRequest, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def backtest_strategy_endpoint(request: BacktestRequest, user_id: str = Depends(get_current_user),
+                                     db: AsyncSession = Depends(get_db), nse_db: AsyncSession = Depends(get_nsedata_db)):
     try:
         async def ws_callback(data):
             # Placeholder for WebSocket progress (handled in WebSocket endpoint)
             pass
         result = await backtest_strategy(
+            trading_symbol=request.trading_symbol,
             instrument_token=request.instrument_token,
             timeframe=request.timeframe,
             strategy=request.strategy,
@@ -1278,7 +1282,8 @@ async def backtest_strategy_endpoint(request: BacktestRequest, user_id: str = De
             start_date=request.start_date,
             end_date=request.end_date,
             ws_callback=ws_callback,
-            db=db
+            db=db,
+            nse_db=nse_db
         )
 
         result = sanitize_floats(result)
@@ -1343,7 +1348,7 @@ async def stop_strategy(strategy: str, instrument_token: str, user_id: str = Dep
         logger.error(f"Error stopping strategy {strategy} for {instrument_token}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/strategies/broker/{broker}", response_model=List[StrategyResponse], tags=["algo-trading"])
+@app.get("/strategies/all/{broker}", response_model=List[StrategyResponse], tags=["algo-trading"])
 async def get_strategies(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail={"error": {"code": "INVALID_BROKER", "message": "Invalid broker"}})
@@ -1561,6 +1566,7 @@ if __name__ == "__main__":
         # from backend.app.routes.sip_routes import run_sip_backtest, SIPBacktestRequest, SIPConfigRequest
         # from fastapi import BackgroundTasks
         from backend.app.database import get_db, get_nsedata_db
+        from backend.app.routes.data import fetch_table_data
         from backend.app.routes.equity_data_routes import get_quote, get_historical_data
         #
         # request_config = SIPBacktestRequest(
@@ -1603,29 +1609,30 @@ if __name__ == "__main__":
         # print(await get_ohlc_from_nse(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
         # print(await get_quotes_from_nse(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
         # Call place_new_order with appropriate parameters
-        order_payload = PlaceOrderRequest(
-            trading_symbol='IDEA',
-            instrument_token="NSE_EQ|INE002A01018",
-            transaction_type="BUY",
-            quantity=1,
-            order_type="LIMIT",
-            product_type="CNC",
-            validity="DAY",
-            price=6.58,
-            trigger_price=0.0,
-            stop_loss=6.54,
-            target=6.75,
-            is_trailing_stop_loss=True,
-            is_amo=True,
-            trailing_stop_loss_percent=2,
-            trail_start_target_percent=3,
-            broker="Zerodha"
-        )
-        order_status = await place_new_order(
-            order=order_payload,
-            user_id="e4269837-0ccd-484f-af70-a5dfa2abe230",
-            db=db
-        )
-        print(f"Order Status: {order_status}")
+        # order_payload = PlaceOrderRequest(
+        #     trading_symbol='IDEA',
+        #     instrument_token="NSE_EQ|INE002A01018",
+        #     transaction_type="BUY",
+        #     quantity=1,
+        #     order_type="LIMIT",
+        #     product_type="CNC",
+        #     validity="DAY",
+        #     price=6.58,
+        #     trigger_price=0.0,
+        #     stop_loss=6.54,
+        #     target=6.75,
+        #     is_trailing_stop_loss=True,
+        #     is_amo=True,
+        #     trailing_stop_loss_percent=2,
+        #     trail_start_target_percent=3,
+        #     broker="Zerodha"
+        # )
+        # order_status = await place_new_order(
+        #     order=order_payload,
+        #     user_id="e4269837-0ccd-484f-af70-a5dfa2abe230",
+        #     db=db
+        # )
+        # print(f"Order Status: {order_status}")
         # await get_ohlc()
+        print(await fetch_table_data(table_name='ALL_STOCKS', filters="\"STK_INDEX\" LIKE '%NIFTY%'", required_db='nsedata', trading_db=db, nsedata_db=nsedata_db))
     asyncio.run(main())

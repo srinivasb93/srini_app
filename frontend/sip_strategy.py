@@ -189,10 +189,10 @@ class EnhancedSIPStrategy:
 
         # Control buttons
         with ui.row().classes("gap-4 mt-6"):
-            ui.button("🔄 Refresh Status", on_click=refresh_scheduler_status).classes("bg-blue-500 text-white")
-            ui.button("▶️ Start Scheduler", on_click=lambda: self.control_scheduler(fetch_api, "start")).classes("bg-green-500 text-white")
-            ui.button("⏸️ Pause Scheduler", on_click=lambda: self.control_scheduler(fetch_api, "pause")).classes("bg-yellow-500 text-white")
-            ui.button("🛑 Stop Scheduler", on_click=lambda: self.control_scheduler(fetch_api, "shutdown")).classes("bg-red-500 text-white")
+            ui.button("🔄 Refresh Status", on_click=refresh_scheduler_status).classes("bg-blue-500 btn-primary-text")
+            ui.button("▶️ Start Scheduler", on_click=lambda: self.control_scheduler(fetch_api, "start")).classes("bg-green-500 btn-primary-text")
+            ui.button("⏸️ Pause Scheduler", on_click=lambda: self.control_scheduler(fetch_api, "pause")).classes("bg-yellow-500 btn-primary-text")
+            ui.button("🛑 Stop Scheduler", on_click=lambda: self.control_scheduler(fetch_api, "shutdown")).classes("bg-red-500 btn-primary-text")
 
         # Job list
         jobs_container = ui.column().classes("w-full mt-8")
@@ -1751,8 +1751,7 @@ class EnhancedSIPStrategy:
                     ui.label(f"⚡ Force Trades: {trade_breakdown.get('force_trades', 0)}").classes(
                         "text-sm text-orange-600")
                     ui.label(f"🚫 Monthly Limits Hit: {result.get('monthly_limit_exceeded', 0)}").classes("text-sm")
-                    ui.label(f"⏭️ Price Threshold Skipped: {result.get('price_threshold_skipped', 0)}").classes(
-                        "text-sm")
+                    ui.label(f"⏭️ Price Threshold Skipped: {result.get('price_threshold_skipped', 0)}").classes("text-sm")
 
         # Monthly Summary (show first few months as sample)
         monthly_summary = result.get('monthly_summary', {})
@@ -1948,7 +1947,7 @@ class EnhancedSIPStrategy:
         ui.label("📊 Benchmark Test").classes("text-lg font-bold mb-4")
         ui.label("Test fixed SIP benchmark performance").classes("text-gray-600 mb-4")
 
-        symbol_input = ui.input(label="Symbol", placeholder="ICICIB22").classes("w-full mb-4")
+        symbol_input = ui.input(label="ICICI Bank Symbol", placeholder="ICICIB22").classes("w-full mb-4")
 
         with ui.row().classes("gap-4"):
             start_date = ui.date(value="2023-01-01")

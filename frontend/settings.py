@@ -33,9 +33,9 @@ async def render_settings_page(fetch_api, user_storage, apply_theme_from_storage
                 ui.button("Reset All", icon="refresh", color="red").classes("text-white")
 
         # Main content in grid layout
-        with ui.row().classes("w-full gap-4 p-4"):
+        with ui.row().classes("settings-layout w-full gap-6 p-4"):
             # General Settings (left panel)
-            with ui.card().classes("dashboard-card w-1/2"):
+            with ui.card().classes("dashboard-card flex-1"):
                 with ui.row().classes("card-header w-full items-center p-4"):
                     ui.icon("tune", size="1.5rem").classes("text-purple-400")
                     ui.label("General Preferences").classes("card-title")

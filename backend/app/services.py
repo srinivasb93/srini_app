@@ -1844,10 +1844,9 @@ async def get_ltp(upstox_api, kite_api, instruments: List[str], db: AsyncSession
         logger.error(f"Error fetching LTP: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-async def get_historical_data(upstox_api, upstox_access_token, instrument: str, from_date: str, to_date: str, unit: str,
-                              interval: str, db: AsyncSession = None, nse_db: AsyncSession = None) -> HistoricalDataResponse:
-    instruments_map = await fetch_symbols_for_instruments(db, [instrument])
-    trading_symbol = instruments_map[0].trading_symbol
+async def get_historical_data(upstox_api, upstox_access_token, trading_symbol: str,
+                              from_date: str, to_date: str, unit: str,
+                              interval: str, instrument: str = None, db: AsyncSession = None, nse_db: AsyncSession = None) -> HistoricalDataResponse:
     logger.info(f"Fetching historical data for {trading_symbol} from {from_date} to {to_date}")
     data_points = []
 
@@ -2102,7 +2101,7 @@ async def execute_strategy(api, strategy: str, instrument_token: str, quantity: 
         else:
             strategy_name = strategy
             is_custom = False
-        data = await get_historical_data(upstox_api=api, kite_api=None, instrument=instrument_token,
+        data = await get_historical_data(upstox_api=api, upstox_access_token=None, instrument=instrument_token,
                                          from_date=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
                                          to_date=datetime.now().strftime("%Y-%m-%d"), interval="day")
         if not data.data:
@@ -2247,8 +2246,9 @@ async def stop_strategy_execution(strategy: str, instrument_token: str, user_id:
         return {"status": "error", "message": str(e)}
 
 
-async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str, params: Dict, start_date: str,
-                            end_date: str, ws_callback: Optional[Callable] = None, db: Optional[AsyncSession] = None):
+async def backtest_strategy(trading_symbol: str, instrument_token: str, timeframe: str, strategy: str,
+                            params: Dict, start_date: str, end_date: str, ws_callback: Optional[Callable] = None,
+                            db: Optional[AsyncSession] = None, nse_db: Optional[AsyncSession] = None):
     """
     Main service to orchestrate a backtest, correctly handling single runs,
     custom strategies, and parameter optimization.
@@ -2262,12 +2262,12 @@ async def backtest_strategy(instrument_token: str, timeframe: str, strategy: str
             start_date, end_date, db, ws_callback
         )
 
-    logger.info(f"Starting backtest for {instrument_token} from {start_date} to {end_date}")
+    logger.info(f"Starting backtest for {trading_symbol} from {start_date} to {end_date}")
     logger.info(f"Strategy: {strategy}, Timeframe: {timeframe}, Params: {params}")
 
     try:
         # --- 1. Data Fetching ---
-        df = await get_historical_dataframe(instrument_token, timeframe, start_date, end_date, db)
+        df = await get_historical_dataframe(trading_symbol, instrument_token, timeframe, start_date, end_date, db, nse_db)
 
         # --- 2. Strategy Identification ---
         strategy_func, strategy_name, is_custom = get_strategy_details(strategy)
@@ -3070,9 +3070,10 @@ def check_short_sell_signal(row, atr):
 
 
 # Helper functions to refactor backtest_strategy
-async def get_historical_dataframe(instrument_token, timeframe, start_date, end_date, db):
+async def get_historical_dataframe(trading_symbol, instrument_token, timeframe, start_date, end_date, db, nse_db):
     data = await get_historical_data(upstox_api=None, upstox_access_token=None, instrument=instrument_token,
-                                     from_date=start_date, to_date=end_date, unit="days", interval=timeframe, db=db)
+                                     trading_symbol=trading_symbol, from_date=start_date, to_date=end_date,
+                                     unit="days", interval=timeframe, db=db, nse_db=nse_db)
     if not data.data:
         raise ValueError(f"No historical data for {instrument_token}")
 

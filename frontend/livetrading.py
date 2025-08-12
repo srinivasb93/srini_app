@@ -38,10 +38,10 @@ async def render_live_trading_page(fetch_api, user_storage, get_cached_instrumen
         # Trading status and metrics
         await render_enhanced_trading_status(fetch_api, user_storage, broker)
 
-        # Main content in grid layout
-        with ui.row().classes("w-full gap-4 p-4"):
+        # Main content in grid layout - FIXED to use settings-layout for side-by-side panels
+        with ui.row().classes("settings-layout w-full gap-4 p-4"):
             # Active strategies panel (left)
-            with ui.card().classes("dashboard-card w-1/2"):
+            with ui.card().classes("dashboard-card flex-1"):
                 with ui.row().classes("card-header w-full justify-between items-center p-4"):
                     with ui.row().classes("items-center gap-2"):
                         ui.icon("auto_awesome", size="1.5rem").classes("text-purple-400")

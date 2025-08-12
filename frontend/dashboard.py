@@ -39,33 +39,31 @@ dashboard_state = {
 
 
 async def render_dashboard_page(fetch_api, user_storage, get_cached_instruments):
-    """Main enhanced dashboard page"""
+    """Main enhanced dashboard page with fixed layout"""
 
-    broker = user_storage.get('broker', 'Zerodha')
+    broker = user_storage.get('default_broker', 'Zerodha')
 
-    # Main dashboard container
-    with ui.column().classes("dashboard-container w-full min-h-screen"):
+    # CRITICAL: Main dashboard container with proper viewport handling
+    with ui.column().classes("w-full"):
         # Enhanced Dashboard Title
         render_enhanced_dashboard_title(broker)
 
-        # Main Dashboard Grid Layout (matches reference image)
-        with ui.element('div').classes("dashboard-grid w-full p-4"):
-            # Left Panel - Enhanced Watchlist (25% width)
-            with ui.element('div').classes("dashboard-left-panel"):
+        # FIXED: Responsive grid layout that prevents truncation
+        with ui.row().classes("w-full gap-4 p-4").style("min-height: calc(100vh - 120px); overflow: visible;"):
+            # Left Panel - Watchlist and Quick Trade (flexible width)
+            with ui.column().classes("flex-none").style("width: 300px; min-width: 280px;"):
                 await render_enhanced_watchlist_section(fetch_api, user_storage, get_cached_instruments, broker)
                 await render_enhanced_quick_trade_section(fetch_api, user_storage, get_cached_instruments, broker)
 
-            # Center Panel - Chart and Portfolio Overview (50% width)
-            with ui.element('div').classes("dashboard-center-panel"):
-                # await render_enhanced_chart_section(fetch_api, user_storage, get_cached_instruments,broker)
+            # Center Panel - Portfolio Overview (expandable)
+            with ui.column().classes("flex-1").style("min-width: 400px;"):
                 await render_enhanced_portfolio_section(fetch_api, user_storage, broker)
 
-            # Right Panel - Quick Trade, Orders, Strategies, News (25% width)
-            with ui.element('div').classes("dashboard-right-panel"):
+            # Right Panel - Orders, Strategies, Market Summary (flexible width)
+            with ui.column().classes("flex-none").style("width: 300px; min-width: 280px;"):
                 await render_enhanced_order_book_section(fetch_api, user_storage, broker)
                 await render_enhanced_strategies_section(fetch_api, user_storage, broker)
                 await render_enhanced_market_summary_section(fetch_api, user_storage, broker)
-                # await render_enhanced_news_section()
 
     # Initialize real-time updates
     await setup_dashboard_updates(fetch_api, user_storage, get_cached_instruments, broker)
@@ -73,15 +71,15 @@ async def render_dashboard_page(fetch_api, user_storage, get_cached_instruments)
 
 def render_enhanced_dashboard_title(broker):
     """Enhanced dashboard title with status indicators"""
-    with ui.row().classes("dashboard-title-section w-full justify-between items-center p-2"):
+    with ui.row().classes("page-header-standard w-full justify-between items-center"):
         # Left side - Title and subtitle
         with ui.column().classes("gap-2"):
             with ui.row().classes("items-center gap-1"):
                 ui.icon("candlestick_chart", size="1rem").classes("text-cyan-400")
-                ui.label(f"{broker} Trading Dashboard").classes("text-3xl font-bold text-white dashboard-title")
+                ui.label(f"{broker} Trading Dashboard").classes("page-title-standard theme-header-text")
                 ui.chip("LIVE", color="green").classes("text-xs status-chip")
 
-            ui.label("Real-time market data and portfolio management").classes("text-gray-400 dashboard-subtitle")
+            ui.label("Real-time market data and portfolio management").classes("page-subtitle-standard")
 
 async def render_enhanced_watchlist_section(fetch_api, user_storage, get_cached_instruments, broker):
     """Enhanced watchlist section using existing watchlist.py functionality"""
@@ -148,8 +146,8 @@ async def render_enhanced_watchlist_item(symbol, instruments_map, fetch_api, bro
         with ui.row().classes(f"watchlist-item {border_class} w-full justify-between items-center p-3 mb-2"):
             # Left side - Symbol and price
             with ui.column().classes("gap-1 flex-1"):
-                ui.label(symbol).classes("font-semibold text-white text-sm symbol-text")
-                ui.label(f"₹{price:,.2f}").classes("text-gray-300 text-xs price-text")
+                ui.label(symbol).classes("font-semibold theme-text-primary text-sm symbol-text")
+                ui.label(f"₹{price:,.2f}").classes("theme-text-secondary text-xs price-text")
 
             # Right side - Change and percentage
             with ui.column().classes("gap-1 items-end"):
@@ -161,7 +159,7 @@ async def render_enhanced_watchlist_item(symbol, instruments_map, fetch_api, bro
     except Exception as e:
         logger.error(f"Error rendering watchlist item {symbol}: {e}")
         with ui.row().classes("watchlist-item watchlist-error w-full p-3 mb-2"):
-            ui.label(symbol).classes("text-white")
+            ui.label(symbol).classes("theme-text-primary")
             ui.label("Error").classes("text-red-500")
 
 
@@ -229,7 +227,7 @@ async def create_dashboard_chart(fetch_api, user_storage, instruments_map, broke
 async def render_enhanced_portfolio_section(fetch_api, user_storage, broker):
     """Enhanced portfolio section using existing portfolio.py functionality"""
 
-    with ui.card().classes("dashboard-card portfolio-card w-full"):
+    with ui.card().classes("dashboard-card w-full"):
         # Header
         with ui.row().classes("card-header w-full items-center p-2"):
             ui.icon("account_balance_wallet", size="1.5rem").classes("text-green-400")
@@ -238,7 +236,7 @@ async def render_enhanced_portfolio_section(fetch_api, user_storage, broker):
         ui.separator().classes("card-separator")
 
         # Portfolio metrics container
-        portfolio_metrics_container = ui.row().classes("portfolio-metrics w-full p-2 gap-2")
+        portfolio_metrics_container = ui.row().classes("w-full p-2 gap-2")
 
         try:
             # Fetch portfolio data using existing API calls
@@ -273,274 +271,237 @@ async def render_enhanced_portfolio_section(fetch_api, user_storage, broker):
 
             with portfolio_metrics_container:
                 # Available Funds
-                with ui.column().classes("metric-card flex-1"):
-                    ui.label("Available Funds").classes("metric-label")
-                    ui.label(available_funds).classes("metric-value")
-                    ui.label("Cash Balance").classes("metric-sublabel")
+                with ui.column().classes("dashboard-card metric-card flex-1"):
+                    with ui.column().classes("p-4 text-center"):
+                        ui.icon("account_balance", size="2rem").classes("text-blue-400 mb-2")
+                        ui.label("Available Funds").classes("text-sm text-gray-400")
+                        ui.label(available_funds).classes("text-2xl font-bold theme-text-primary")
+                        ui.label("Cash Balance").classes("text-sm text-gray-400")
 
                 # Invested Value
-                with ui.column().classes("metric-card flex-1"):
-                    ui.label("Invested Value").classes("metric-label")
-                    ui.label(f"₹{total_invested:,.2f}").classes("metric-value")
-                    ui.label("Current Investment").classes("metric-sublabel")
+                with ui.column().classes("dashboard-card metric-card flex-1"):
+                    with ui.column().classes("p-4 text-center"):
+                        ui.icon("currency_rupee", size="2rem").classes("text-purple-400 mb-2")
+                        ui.label("Invested Value").classes("text-sm text-gray-400")
+                        ui.label(f"₹{total_invested:,.2f}").classes("text-2xl font-bold theme-text-primary")
+                        ui.label("Current Investment").classes("text-sm text-gray-400")
 
                 # Portfolio Value
-                with ui.column().classes("metric-card flex-1"):
-                    ui.label("Portfolio Value").classes("metric-label")
-                    ui.label(f"₹{portfolio_value:,.2f}").classes("metric-value")
-                    ui.label("Current Holdings").classes("metric-sublabel")
+                with ui.column().classes("dashboard-card metric-card flex-1"):
+                    with ui.column().classes("p-4 text-center"):
+                        ui.icon("account_balance_wallet", size="2rem").classes("text-cyan-400 mb-2")
+                        ui.label("Portfolio Value").classes("text-sm text-gray-400")
+                        ui.label(f"₹{portfolio_value:,.2f}").classes("text-2xl font-bold theme-text-primary")
+                        ui.label("Current Holdings").classes("text-sm text-gray-400")
 
                 # Overall P&L
-                total_pnl_class = "positive-change" if total_pnl > 0 else "negative-change"
-                with ui.column().classes("metric-card flex-1"):
-                    ui.label("Overall P&L").classes("metric-label")
-                    ui.label(f"₹{total_pnl:,.2f}").classes(f"metric-value {total_pnl_class}")
-                    ui.label(f"({total_pnl_pct:,.2f}%)").classes(f"metric-sublabel {total_pnl_class}")
+                total_pnl_color = "text-green-400" if total_pnl >= 0 else "text-red-400"
+                pnl_icon = "trending_up" if total_pnl >= 0 else "trending_down"
+                with ui.column().classes("dashboard-card metric-card flex-1"):
+                    with ui.column().classes("p-4 text-center"):
+                        ui.icon(pnl_icon, size="2rem").classes(f"{total_pnl_color} mb-2")
+                        ui.label("Overall P&L").classes("text-sm text-gray-400")
+                        ui.label(f"₹{total_pnl:,.2f}").classes(f"text-2xl font-bold {total_pnl_color}")
+                        ui.label(f"({total_pnl_pct:+.2f}%)").classes(f"text-sm {total_pnl_color}")
 
                 # Daily P&L
-                daily_pnl_class = "positive-change" if daily_pnl > 0 else "negative-change"
-                with ui.column().classes("metric-card flex-1"):
-                    ui.label("Daily P&L").classes("metric-label")
-                    ui.label(f"₹{daily_pnl:,.2f}").classes(f"metric-value {daily_pnl_class}")
-                    ui.label(f"({daily_pnl_pct:,.2f}%)").classes(f"metric-sublabel {daily_pnl_class}")
+                daily_pnl_color = "text-green-400" if daily_pnl >= 0 else "text-red-400"
+                daily_pnl_icon = "trending_up" if daily_pnl >= 0 else "trending_down"
+                with ui.column().classes("dashboard-card metric-card flex-1"):
+                    with ui.column().classes("p-4 text-center"):
+                        ui.icon(daily_pnl_icon, size="2rem").classes(f"{daily_pnl_color} mb-2")
+                        ui.label("Daily P&L").classes("text-sm text-gray-400")
+                        ui.label(f"₹{daily_pnl:,.2f}").classes(f"text-2xl font-bold {daily_pnl_color}")
+                        ui.label(f"({daily_pnl_pct:+.2f}%)").classes(f"text-sm {daily_pnl_color}")
 
                 # Open Positions
-                with ui.column().classes("metric-card flex-1"):
-                    ui.label("Open Positions").classes("metric-label")
-                    ui.label(str(open_positions)).classes("metric-value")
-                    ui.label("Active Trades").classes("metric-sublabel")
+                with ui.column().classes("dashboard-card metric-card flex-1"):
+                    with ui.column().classes("p-4 text-center"):
+                        ui.icon("donut_small", size="2rem").classes("text-orange-400 mb-2")
+                        ui.label("Open Positions").classes("text-sm text-gray-400")
+                        ui.label(str(open_positions)).classes("text-2xl font-bold theme-text-primary")
+                        ui.label("Active Trades").classes("text-sm text-gray-400")
 
         except Exception as e:
-            logger.error(f"Error rendering portfolio section: {e}")
+            logger.error(f"Error loading portfolio data: {e}")
             with portfolio_metrics_container:
                 ui.label("Error loading portfolio data").classes("text-red-500 text-center p-4")
 
-        return portfolio_metrics_container
-
 
 async def render_enhanced_quick_trade_section(fetch_api, user_storage, get_cached_instruments, broker):
-    """Enhanced quick trade section using existing order_management.py functionality"""
+    """Enhanced quick trade section"""
 
-    with ui.card().classes("dashboard-card quick-trade-card w-full"):
+    with ui.card().classes("dashboard-card trading-card w-full"):
         # Header
         with ui.row().classes("card-header w-full items-center p-4"):
-            ui.icon("bolt", size="1.5rem").classes("text-yellow-400")
+            ui.icon("flash_on", size="1.5rem").classes("text-yellow-400")
             ui.label("Quick Trade").classes("card-title")
 
         ui.separator().classes("card-separator")
 
         # Quick trade form
-        with ui.column().classes("quick-trade-form w-full p-4 gap-3"):
-            # Symbol selection
-            symbol_select = ui.select(
-                options=["NIFTY50", "BANKNIFTY", "RELIANCE", "TCS", "INFY"],
-                value="NIFTY50",
-                label="Symbol"
-            ).classes("trade-input").props("outlined dark")
+        with ui.column().classes("quick-trade-form p-4 gap-3"):
+            # Symbol and quantity row
+            with ui.row().classes("w-full gap-2"):
+                symbol_input = ui.input("Symbol", placeholder="RELIANCE").classes("flex-1")
+                quantity_input = ui.number("Qty", value=1, min=1).classes("w-24")
 
-            # Order type
-            order_type_select = ui.select(
-                options=["LIMIT", "MARKET", "SL", "SL-M"],
-                value="LIMIT",
-                label="Order Type"
-            ).classes("trade-input").props("outlined dark")
+            # Order type and product row
+            with ui.row().classes("w-full gap-2"):
+                order_type = ui.select(["MARKET", "LIMIT"], value="MARKET").classes("flex-1")
+                product_type = ui.select(["CNC", "MIS"] if broker == "Zerodha" else ["D", "I"],
+                                       value="CNC" if broker == "Zerodha" else "D").classes("flex-1")
 
-            # Quantity
-            quantity_input = ui.number(
-                label="Quantity",
-                value=100,
-                min=1
-            ).classes("trade-input").props("outlined dark")
+            # Price input (conditional)
+            price_input = ui.number("Price", value=0, step=0.05).classes("w-full")
+            price_input.visible = False
 
-            # Price (for limit orders)
-            price_input = ui.number(
-                label="Price",
-                value=19850.75,
-                step=0.01
-            ).classes("trade-input").props("outlined dark")
+            def toggle_price_input():
+                price_input.visible = order_type.value == "LIMIT"
+
+            order_type.on_value_change(toggle_price_input)
 
             # Action buttons
-            with ui.row().classes("trade-buttons w-full gap-2 mt-4"):
-                all_instruments_map = await get_cached_instruments(broker)
-                async def place_quick_order(buy_sell='BUY'):
-                    # Use existing order_management.py functionality
-                    order_data = {
-                        "trading_symbol": symbol_select.value,
-                        "instrument_token": all_instruments_map[symbol_select.value],
-                        "quantity": int(quantity_input.value),
-                        "order_type": order_type_select.value,
-                        "transaction_type": buy_sell,
-                        "product_type": "MIS",
-                        "price": float(price_input.value) if order_type_select.value == "LIMIT" else 0,
-                        "trigger_price": 0,
-                        "validity": "DAY",
-                        "disclosed_quantity": 0,
-                        "is_amo": False,
-                        "broker": broker
-                    }
+            with ui.row().classes("trade-buttons w-full gap-2 mt-3"):
+                ui.button("BUY", on_click=lambda: place_quick_order("BUY")).classes("buy-button flex-1")
+                ui.button("SELL", on_click=lambda: place_quick_order("SELL")).classes("sell-button flex-1")
 
-                    # Call existing API
-                    result = await fetch_api(f"/orders", method="POST", data=order_data)
-                    if result:
-                        ui.notify("Order placed successfully!", type="positive")
-                    else:
-                        ui.notify("Order placement failed!", type="negative")
+        async def place_quick_order(transaction_type):
+            """Place quick order"""
+            if not symbol_input.value:
+                ui.notify("Please enter a symbol", type="warning")
+                return
 
-                ui.button("BUY", icon="trending_up", on_click=lambda : place_quick_order('BUY')).classes(
-                    "buy-button trade-action-btn flex-1")
-                ui.button("SELL", icon="trending_down", on_click=lambda : place_quick_order('SELL')).classes(
-                    "sell-button trade-action-btn flex-1")
+            # Get instrument token
+            instruments = await get_cached_instruments(broker)
+            if symbol_input.value not in instruments:
+                ui.notify("Symbol not found", type="warning")
+                return
+
+            order_data = {
+                "trading_symbol": symbol_input.value,
+                "instrument_token": instruments[symbol_input.value],
+                "quantity": int(quantity_input.value),
+                "transaction_type": transaction_type,
+                "order_type": order_type.value,
+                "product_type": product_type.value,
+                "price": float(price_input.value) if order_type.value == "LIMIT" else 0,
+                "validity": "DAY",
+                "broker": broker
+            }
+
+            response = await fetch_api("/orders", method="POST", data=order_data)
+            if response and response.get('order_id'):
+                ui.notify(f"Order placed: {response['order_id']}", type='positive')
+                # Clear form
+                symbol_input.value = ""
+                quantity_input.value = 1
+                price_input.value = 0
+            else:
+                ui.notify("Failed to place order", type='negative')
 
 
 async def render_enhanced_order_book_section(fetch_api, user_storage, broker):
-    """Enhanced order book section - COMPACT for right panel"""
+    """Enhanced order book section"""
 
-    with ui.card().classes("dashboard-card order-book-card w-full"):
+    with ui.card().classes("dashboard-card orders-card w-full"):
         # Header
-        with ui.row().classes("card-header w-full justify-between items-center p-3"):
-            ui.label("Order Book").classes("card-title text-sm")
-            ui.label("NIFTY50").classes("text-xs text-cyan-400")
+        with ui.row().classes("card-header w-full items-center p-4"):
+            ui.icon("list_alt", size="1.5rem").classes("text-blue-400")
+            ui.label("Recent Orders").classes("card-title")
 
         ui.separator().classes("card-separator")
 
-        # Order book content
-        order_book_container = ui.column().classes("order-book-content w-full p-2")
+        # Orders container
+        orders_container = ui.column().classes("w-full p-4 gap-2")
 
         try:
-            # Use your existing order book API integration
-            order_book = await fetch_api(f"/order-book/{broker}", method="GET")
+            # Fetch recent orders
+            orders_data = await fetch_api(f"/orders/{broker}") or []
+            recent_orders = orders_data[-5:] if orders_data else []  # Last 5 orders
 
-            with order_book_container:
-                if order_book and len(order_book) > 0:
-                    # Show top 5 orders for compact view
-                    for order in order_book[:5]:
-                        side_class = "buy-order" if order["TransType"] == "BUY" else "sell-order"
-                        side_color = "text-green-400" if order["TransType"] == "BUY" else "text-red-400"
+            with orders_container:
+                if recent_orders:
+                    for order in recent_orders:
+                        symbol = order.get("trading_symbol", "N/A")
+                        order_type = order.get("order_type", "N/A")
+                        transaction_type = order.get("transaction_type", "N/A")
+                        quantity = order.get("quantity", 0)
+                        status = order.get("status", "UNKNOWN")
 
-                        with ui.row().classes(f"order-row {side_class} w-full justify-between items-center p-1 mb-1"):
-                            ui.label(f"₹{order['Price']:,.0f}").classes("order-price text-xs text-white")
-                            ui.label(str(order["Quantity"])).classes("order-size text-xs text-gray-300")
-                            ui.label(order["TransType"]).classes(f"order-side text-xs {side_color}")
-                            ui.label(order["Status"]).classes("text-xs text-gray-400")
+                        # Status color
+                        status_color = {
+                            "COMPLETE": "text-green-400",
+                            "OPEN": "text-yellow-400",
+                            "CANCELLED": "text-red-400",
+                            "REJECTED": "text-red-400"
+                        }.get(status, "text-gray-400")
+
+                        with ui.row().classes("w-full justify-between items-center py-2 border-b border-gray-700"):
+                            with ui.column().classes("flex-1"):
+                                ui.label(f"{symbol} ({transaction_type})").classes("theme-text-primary font-medium text-sm")
+                                ui.label(f"{order_type} • Qty: {quantity}").classes("text-gray-400 text-xs")
+
+                            ui.label(status).classes(f"{status_color} text-xs font-semibold")
                 else:
-                    # Fallback sample data
-                    sample_orders = [
-                        {"price": 19852.25, "size": 150, "side": "SELL"},
-                        {"price": 19851.00, "size": 200, "side": "SELL"},
-                        {"price": 19850.75, "size": 100, "side": "BUY"},
-                        {"price": 19850.25, "size": 250, "side": "BUY"},
-                        {"price": 19849.50, "size": 180, "side": "BUY"},
-                    ]
-
-                    for order in sample_orders:
-                        side_class = "buy-order" if order["side"] == "BUY" else "sell-order"
-                        side_color = "text-green-400" if order["side"] == "BUY" else "text-red-400"
-
-                        with ui.row().classes(f"order-row {side_class} w-full justify-between items-center p-1 mb-1"):
-                            ui.label(f"₹{order['price']:,.0f}").classes("order-price text-xs text-white")
-                            ui.label(str(order["size"])).classes("order-size text-xs text-gray-300")
-                            ui.label(order["side"]).classes(f"order-side text-xs {side_color}")
+                    ui.label("No recent orders").classes("text-gray-400 text-center p-4")
 
         except Exception as e:
-            logger.error(f"Error rendering order book: {e}")
-            with order_book_container:
-                ui.label("Error loading order book").classes("text-red-500 text-center p-4 text-xs")
-
-        return order_book_container
+            logger.error(f"Error loading orders: {e}")
+            with orders_container:
+                ui.label("Error loading orders").classes("text-red-500 text-center p-4")
 
 
 async def render_enhanced_strategies_section(fetch_api, user_storage, broker):
-    """Enhanced strategies section - COMPACT for right panel"""
+    """Enhanced strategies section"""
 
     with ui.card().classes("dashboard-card strategies-card w-full"):
         # Header
-        with ui.row().classes("card-header w-full justify-between items-center p-3"):
-            ui.label("Active Strategies").classes("card-title text-sm")
-            ui.button(icon="add").props("flat round").classes("text-cyan-400")
+        with ui.row().classes("card-header w-full items-center p-4"):
+            ui.icon("psychology", size="1.5rem").classes("text-purple-400")
+            ui.label("Active Strategies").classes("card-title")
 
         ui.separator().classes("card-separator")
 
-        # Strategies content
-        strategies_container = ui.column().classes("strategies-content w-full p-2")
+        # Strategies container
+        strategies_container = ui.column().classes("w-full p-4 gap-2")
 
         try:
-            # TODO: Integrate with your existing strategies.py and livetrading.py
-            # active_strategies = await fetch_api(f"/strategies/{broker}/active")
-            # live_trades = await fetch_api(f"/live-trades/{broker}")
-
-            # Sample strategy data (replace with real data)
-            sample_strategies = [
-                {"name": "RSI Mean Reversion", "status": "active", "pnl": "+2.5%", "trades": 3},
-                {"name": "Moving Average Cross", "status": "paused", "pnl": "+1.2%", "trades": 1},
-                {"name": "Bollinger Bands", "status": "active", "pnl": "-0.8%", "trades": 2},
-            ]
+            # Fetch active strategies
+            strategies_data = await fetch_api(f"/strategies/all/{broker}") or []
+            active_strategies = [s for s in strategies_data if s.get("status") == "ACTIVE"]
 
             with strategies_container:
-                for strategy in sample_strategies:
-                    status_class = "strategy-active" if strategy["status"] == "active" else "strategy-paused"
-                    status_color = "green" if strategy["status"] == "active" else "orange"
-                    pnl_class = "positive-change" if "+" in strategy["pnl"] else "negative-change"
+                if active_strategies:
+                    for strategy in active_strategies[:3]:  # Show top 3 active strategies
+                        name = strategy.get("name", "N/A")
+                        pnl = strategy.get("pnl", 0)
+                        status = strategy.get("status", "INACTIVE")
 
-                    with ui.column().classes(f"strategy-card {status_class} w-full p-2 mb-2"):
-                        # Strategy header
-                        with ui.row().classes("w-full justify-between items-center"):
-                            ui.label(strategy["name"]).classes("strategy-name font-medium text-white text-xs")
-                            ui.chip(strategy["status"].upper(), color=status_color).classes("strategy-status text-xs")
+                        pnl_color = "text-green-400" if pnl > 0 else "text-red-400"
+                        status_color = "text-green-400" if status == "ACTIVE" else "text-gray-400"
 
-                        # Strategy metrics
-                        with ui.row().classes("strategy-metrics w-full justify-between items-center mt-1"):
-                            with ui.column().classes("gap-0"):
-                                ui.label("P&L Today").classes("text-xs text-gray-400")
-                                ui.label(strategy["pnl"]).classes(f"text-xs {pnl_class} font-semibold")
-                            with ui.column().classes("gap-0"):
-                                ui.label("Trades").classes("text-xs text-gray-400")
-                                ui.label(str(strategy["trades"])).classes("text-xs text-white font-semibold")
+                        with ui.row().classes("w-full justify-between items-center py-2 border-b border-gray-700"):
+                            with ui.column().classes("flex-1"):
+                                ui.label(name).classes("theme-text-primary font-medium text-sm")
+                                ui.label(status).classes(f"{status_color} text-xs")
+
+                            ui.label(f"₹{pnl:+.2f}").classes(f"{pnl_color} text-sm font-semibold")
+                else:
+                    ui.label("No active strategies").classes("text-gray-400 text-center p-4")
+
+                # Quick action button
+                ui.button("Manage Strategies", icon="settings",
+                         on_click=lambda: ui.navigate.to('/strategies')).classes("w-full mt-2 text-purple-400").props("outline")
 
         except Exception as e:
-            logger.error(f"Error rendering strategies: {e}")
+            logger.error(f"Error loading strategies: {e}")
             with strategies_container:
-                ui.label("Error loading strategies").classes("text-red-500 text-center p-4 text-xs")
-
-        return strategies_container
-
-
-async def render_enhanced_news_section():
-    """Enhanced market news section (new feature)"""
-
-    with ui.card().classes("dashboard-card news-card w-full"):
-        # Header
-        with ui.row().classes("card-header w-full items-center p-4"):
-            ui.icon("newspaper", size="1.5rem").classes("text-blue-400")
-            ui.label("Market News").classes("card-title")
-
-        ui.separator().classes("card-separator")
-
-        # News content
-        news_container = ui.column().classes("news-content w-full p-2")
-
-        # Sample news data (this would come from a news API in real implementation)
-        sample_news = [
-            {"title": "Fed announces interest rate decision", "time": "2 hours ago", "impact": "high"},
-            {"title": "NIFTY reports strong quarterly earnings", "time": "4 hours ago", "impact": "medium"},
-            {"title": "Tech sector shows resilience amid volatility", "time": "6 hours ago", "impact": "low"}
-        ]
-
-        with news_container:
-            for news in sample_news:
-                impact_color = {"high": "news-high-impact", "medium": "news-medium-impact", "low": "news-low-impact"}[
-                    news["impact"]]
-
-                with ui.column().classes(f"news-item {impact_color} w-full p-3 mb-2"):
-                    ui.label(news["title"]).classes("news-title text-sm text-white font-medium")
-                    with ui.row().classes("news-meta w-full justify-between items-center mt-1"):
-                        ui.label(news["time"]).classes("news-time text-xs text-gray-500")
-                        ui.chip(news["impact"].upper()).classes(f"news-impact-chip text-xs")
-
-        return news_container
+                ui.label("Error loading strategies").classes("text-red-500 text-center p-4")
 
 
 async def render_enhanced_market_summary_section(fetch_api, user_storage, broker):
-    """Enhanced market summary section with analytics"""
+    """Enhanced market summary section with proper height management"""
 
     with ui.card().classes("dashboard-card market-summary-card w-full"):
         # Header
@@ -550,109 +511,72 @@ async def render_enhanced_market_summary_section(fetch_api, user_storage, broker
 
         ui.separator().classes("card-separator")
 
-        # Market summary content
-        market_summary_container = ui.column().classes("market-summary-content w-full p-2")
+        # Market data container with proper height constraints
+        market_container = ui.column().classes("w-full p-4 gap-3 max-h-80 overflow-y-auto")
 
         try:
-            # Fetch real market data (you can integrate with your existing APIs)
-            # market_data = await fetch_api(f"/market-summary/{broker}")
+            # Market indices data
+            indices_data = [
+                {"name": "NIFTY 50", "value": 21736.60, "change": +234.50, "change_pct": +1.09},
+                {"name": "SENSEX", "value": 72240.26, "change": +759.49, "change_pct": +1.06},
+                {"name": "NIFTY BANK", "value": 46816.35, "change": +682.25, "change_pct": +1.48},
+                {"name": "NIFTY IT", "value": 36245.80, "change": -125.30, "change_pct": -0.34},
+                {"name": "NIFTY AUTO", "value": 18963.45, "change": +289.15, "change_pct": +1.55}
+            ]
 
-            # For now, using sample data with real market analytics structure
-            with market_summary_container:
-                # Market Indices Section
-                with ui.column().classes("market-indices w-full mb-3"):
-                    ui.label("Major Indices").classes("text-sm font-semibold text-gray-300 mb-2")
+            with market_container:
+                ui.label("Major Indices").classes("theme-text-primary font-semibold mb-2")
 
-                    indices = [
-                        {"name": "NIFTY 50", "value": 19850.75, "change": 125.30, "change_pct": 0.63},
-                        {"name": "BANK NIFTY", "value": 44250.25, "change": -89.50, "change_pct": -0.20},
-                        {"name": "SENSEX", "value": 66589.93, "change": 245.86, "change_pct": 0.37}
-                    ]
+                for index in indices_data:
+                    change_color = "text-green-400" if index["change"] > 0 else "text-red-400"
+                    change_icon = "▲" if index["change"] > 0 else "▼"
 
-                    for index in indices:
-                        change_class = "positive-change" if index["change"] > 0 else "negative-change"
-                        trend_icon = "trending_up" if index["change"] > 0 else "trending_down"
+                    with ui.row().classes("w-full justify-between items-center py-2"):
+                        with ui.column().classes("flex-1"):
+                            ui.label(index["name"]).classes("theme-text-primary font-medium text-sm")
+                            ui.label(f"{index['value']:,.2f}").classes("text-gray-300 text-sm")
 
-                        with ui.row().classes("index-item w-full justify-between items-center py-1"):
-                            with ui.column().classes("flex-1 gap-0"):
-                                ui.label(index["name"]).classes("text-xs font-medium text-white")
-                                ui.label(f"{index['value']:,.2f}").classes("text-xs text-gray-300")
+                        with ui.column().classes("items-end"):
+                            ui.label(f"{change_icon} {abs(index['change']):,.2f}").classes(f"{change_color} text-sm font-semibold")
+                            ui.label(f"({index['change_pct']:+.2f}%)").classes(f"{change_color} text-xs")
 
-                            with ui.column().classes("items-end gap-0"):
-                                with ui.row().classes("items-center gap-1"):
-                                    ui.icon(trend_icon, size="0.6rem").classes(change_class)
-                                    ui.label(f"{index['change']:+.2f}").classes(f"text-xs {change_class}")
-                                ui.label(f"({index['change_pct']:+.2f}%)").classes(f"text-xs {change_class}")
+                # Sector performance
+                ui.separator().classes("my-3")
+                ui.label("Top Movers").classes("theme-text-primary font-semibold mb-2")
 
-                ui.separator().classes("my-2 opacity-30")
+                movers_data = [
+                    {"symbol": "RELIANCE", "change_pct": +2.85, "price": 2456.30},
+                    {"symbol": "TCS", "change_pct": -1.24, "price": 3789.45},
+                    {"symbol": "HDFC BANK", "change_pct": +1.67, "price": 1543.20},
+                    {"symbol": "INFOSYS", "change_pct": -0.89, "price": 1678.90}
+                ]
 
-                # Market Statistics Section
-                with ui.column().classes("market-stats w-full mb-3"):
-                    ui.label("Market Stats").classes("text-sm font-semibold text-gray-300 mb-2")
+                for mover in movers_data:
+                    change_color = "text-green-400" if mover["change_pct"] > 0 else "text-red-400"
+                    change_icon = "▲" if mover["change_pct"] > 0 else "▼"
 
-                    # Market breadth
-                    with ui.row().classes("market-breadth w-full justify-between items-center py-1"):
-                        ui.label("Advances").classes("text-xs text-gray-400")
-                        ui.label("1,247").classes("text-xs positive-change font-semibold")
+                    with ui.row().classes("w-full justify-between items-center py-1"):
+                        with ui.column().classes("flex-1"):
+                            ui.label(mover["symbol"]).classes("theme-text-primary font-medium text-sm")
+                            ui.label(f"₹{mover['price']:,.2f}").classes("text-gray-300 text-xs")
 
-                    with ui.row().classes("market-breadth w-full justify-between items-center py-1"):
-                        ui.label("Declines").classes("text-xs text-gray-400")
-                        ui.label("823").classes("text-xs negative-change font-semibold")
+                        ui.label(f"{change_icon} {abs(mover['change_pct']):.2f}%").classes(f"{change_color} text-sm font-semibold")
 
-                    with ui.row().classes("market-breadth w-full justify-between items-center py-1"):
-                        ui.label("Unchanged").classes("text-xs text-gray-400")
-                        ui.label("145").classes("text-xs text-gray-300 font-semibold")
+                # Market status at bottom with proper padding
+                ui.separator().classes("my-3")
 
-                ui.separator().classes("my-2 opacity-30")
+                market_open = 9 <= datetime.now().hour < 16
+                status_text = "Market Open" if market_open else "Market Closed"
+                status_color = "text-green-400" if market_open else "text-red-400"
 
-                # Market Sentiment Section
-                with ui.column().classes("market-sentiment w-full mb-3"):
-                    ui.label("Market Sentiment").classes("text-sm font-semibold text-gray-300 mb-2")
-
-                    # VIX
-                    with ui.row().classes("sentiment-item w-full justify-between items-center py-1"):
-                        ui.label("VIX").classes("text-xs text-gray-400")
-                        with ui.row().classes("items-center gap-2"):
-                            ui.label("16.85").classes("text-xs text-white font-semibold")
-                            ui.chip("Low Vol", color="green").classes("text-xs h-4")
-
-                    # FII/DII Activity
-                    with ui.row().classes("sentiment-item w-full justify-between items-center py-1"):
-                        ui.label("FII Flow").classes("text-xs text-gray-400")
-                        ui.label("₹+245 Cr").classes("text-xs positive-change font-semibold")
-
-                    with ui.row().classes("sentiment-item w-full justify-between items-center py-1"):
-                        ui.label("DII Flow").classes("text-xs text-gray-400")
-                        ui.label("₹+186 Cr").classes("text-xs positive-change font-semibold")
-
-            ui.separator().classes("my-2 opacity-30")
-
-            # Market Trend Analysis
-            with ui.column().classes("market-trend w-full"):
-                ui.label("Trend Analysis").classes("text-sm font-semibold text-gray-300 mb-2")
-
-                # Overall market trend
-                with ui.row().classes("trend-summary w-full items-center justify-center py-2"):
-                    ui.icon("trending_up", size="1rem").classes("text-green-400")
-                    ui.label("BULLISH").classes("text-sm font-bold text-green-400 ml-2")
-
-                # Key levels
-                with ui.column().classes("key-levels w-full gap-1"):
-                    with ui.row().classes("level-item w-full justify-between"):
-                        ui.label("Support").classes("text-xs text-gray-400")
-                        ui.label("19,750").classes("text-xs text-blue-400")
-
-                    with ui.row().classes("level-item w-full justify-between"):
-                        ui.label("Resistance").classes("text-xs text-gray-400")
-                        ui.label("19,950").classes("text-xs text-orange-400")
+                with ui.row().classes("w-full justify-center items-center p-2"):
+                    ui.icon("circle", size="0.5rem").classes(status_color)
+                    ui.label(status_text).classes(f"{status_color} font-semibold text-sm ml-2")
 
         except Exception as e:
-            logger.error(f"Error rendering market summary: {e}")
-            with market_summary_container:
-                ui.label("Error loading market data").classes("text-red-500 text-center p-4 text-xs")
-
-        return market_summary_container
-
+            logger.error(f"Error loading market data: {e}")
+            with market_container:
+                ui.label("Error loading market data").classes("text-red-500 text-center p-4")
 async def setup_dashboard_updates(fetch_api, user_storage, get_cached_instruments, broker):
     """Setup real-time dashboard updates"""
 
@@ -708,7 +632,7 @@ async def setup_dashboard_updates(fetch_api, user_storage, get_cached_instrument
 def format_currency(value):
     """Format currency values consistently"""
     if isinstance(value, (int, float)):
-        return f"₹{value:,.2f}"
+        return f"���{value:,.2f}"
     return "₹0.00"
 
 

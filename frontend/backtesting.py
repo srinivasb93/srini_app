@@ -653,7 +653,7 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
                     metrics_tab = ui.tab("Metrics", icon="analytics")
                     optimization_tab = ui.tab("Optimization", icon="auto_awesome")
 
-                with ui.tab_panels(results_tabs, value=performance_tab).classes("w-full mt-2 h-full overflow-auto"):
+                with ui.tab_panels(results_tabs, value=performance_tab).classes("w-full mt-2 overflow-auto").style("height: calc(100vh - 120px);"):
                     with ui.tab_panel(performance_tab) as performance_panel:
                         ui.label("Run a backtest to see performance charts.").classes("absolute-center text-gray-500")
                     with ui.tab_panel(trades_tab) as trades_panel:
@@ -666,7 +666,7 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
     async def fetch_strategies_for_backtest():
         nonlocal strategy_options
         try:
-            custom_strategies_list = await fetch_api(f"/strategies/broker/{broker}")
+            custom_strategies_list = await fetch_api(f"/strategies/all/{broker}")
             custom_strategies = {s["strategy_id"]: s["name"] for s in
                                  custom_strategies_list} if custom_strategies_list else {}
             strategy_options.clear()
@@ -734,7 +734,8 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
                 strategy_value = json.dumps(strategy_response)
 
             backtest_payload = {
-                "instrument_token": instrument_select.value,
+                "trading_symbol": instrument_select.value,
+                "instrument_token": instruments[instrument_select.value],
                 "timeframe": "day",
                 "strategy": strategy_value,
                 "params": params,
@@ -899,88 +900,86 @@ def display_backtest_results(performance_panel, trades_panel, metrics_panel, res
     # 2. Performance Panel - Show charts
     with performance_panel:
         if not df.empty:
-            # Create performance charts
-            fig = create_performance_charts(df, metrics, theme_mode)
-            ui.plotly(convert_plotly_timestamps(fig)).classes("w-full h-128")
+            # Container with proper height distribution and optimized spacing
+            with ui.column().classes("w-full h-full gap-2"):
+                # Performance charts with smaller, optimized height
+                fig = create_performance_charts(df, metrics, theme_mode)
+                ui.plotly(convert_plotly_timestamps(fig)).classes("w-full").style("height: 400px; min-height: 400px;")
 
-            # Add candlestick chart
-            with ui.card().classes("w-full p-4 my-4"):
-                with ui.row().classes("items-center justify-between"):
-                    ui.label("Price Chart with Signals").classes("text-h6")
-                    ui.button("Refresh", icon="refresh", on_click=lambda: ui.notify("Chart refreshed")).props("outline")
+                # Candlestick chart card with reduced height
+                with ui.card().classes("w-full p-3"):
+                    with ui.row().classes("items-center justify-between"):
+                        ui.label("Price Chart with Signals").classes("text-h6")
+                        ui.button("Refresh", icon="refresh", on_click=lambda: ui.notify("Chart refreshed")).props("outline dense")
 
-                # Fetch OHLC data if not available in results
-                ohlc_data = results.get("OHLC", pd.DataFrame())
+                    # Fetch OHLC data if not available in results
+                    ohlc_data = results.get("OHLC", pd.DataFrame())
 
-                if not isinstance(ohlc_data, pd.DataFrame) and isinstance(ohlc_data, list):
-                    ohlc_data = pd.DataFrame(ohlc_data)
+                    if not isinstance(ohlc_data, pd.DataFrame) and isinstance(ohlc_data, list):
+                        ohlc_data = pd.DataFrame(ohlc_data)
 
-                # If no OHLC data in results, fetch it
-                if ohlc_data.empty:
-                    instrument = results.get("Instrument", "")
-                    from_date = results.get("StartDate", "")
-                    to_date = results.get("EndDate", "")
+                    # If no OHLC data in results, fetch it
+                    if ohlc_data.empty:
+                        instrument = results.get("Instrument", "")
+                        from_date = results.get("StartDate", "")
+                        to_date = results.get("EndDate", "")
 
-                    # Show loading indicator
-                    chart_loading = ui.spinner("dots", size="lg").classes("self-center")
+                        # Show loading indicator
+                        chart_loading = ui.spinner("dots", size="lg").classes("self-center")
 
-                    # Create a background task to fetch data
-                    async def fetch_and_update_chart():
-                        nonlocal ohlc_data
-                        if instrument and from_date and to_date:
-                            # Fetch data from API
-                            ohlc_data = await fetch_ohlc_data(
-                                fetch_api,
-                                instrument,
-                                from_date,
-                                to_date,
-                                interval=results.get("Timeframe", "1day")
-                            )
+                        # Create a background task to fetch data
+                        async def fetch_and_update_chart():
+                            nonlocal ohlc_data
+                            if instrument and from_date and to_date:
+                                # Fetch data from API
+                                ohlc_data = await fetch_ohlc_data(
+                                    fetch_api,
+                                    instrument,
+                                    from_date,
+                                    to_date,
+                                    interval=results.get("Timeframe", "1day")
+                                )
 
-                            # Remove loading indicator
-                            chart_loading.delete()
+                                # Remove loading indicator
+                                chart_loading.delete()
 
-                            if not ohlc_data.empty:
-                                # Create and display candlestick chart
-                                candlestick_options = create_candlestick_chart(ohlc_data, tradebook, theme_mode)
-                                ui.echart(candlestick_options).classes("w-full h-96")
+                                if not ohlc_data.empty:
+                                    # Create and display candlestick chart with smaller height
+                                    candlestick_options = create_candlestick_chart(ohlc_data, tradebook, theme_mode)
+                                    ui.echart(candlestick_options).style("height: 280px; min-height: 280px;")
+                                else:
+                                    ui.label("Could not retrieve price chart data.").classes("text-subtitle2")
                             else:
-                                ui.label("Could not retrieve price chart data.").classes("text-subtitle2")
-                        else:
-                            chart_loading.delete()
-                            ui.label("Missing instrument or date information for chart.").classes("text-subtitle2")
+                                chart_loading.delete()
+                                ui.label("Missing instrument or date information for chart.").classes("text-subtitle2")
 
-                    # Start background task
-                    ui.timer(0, fetch_and_update_chart, once=True)
-                else:
-                    # Use existing OHLC data
-                    candlestick_options = create_candlestick_chart(ohlc_data, tradebook, theme_mode)
-                    ui.echart(candlestick_options).classes("w-full h-96")
+                        # Start background task
+                        ui.timer(0, fetch_and_update_chart, once=True)
+                    else:
+                        # Use existing OHLC data with smaller height
+                        candlestick_options = create_candlestick_chart(ohlc_data, tradebook, theme_mode)
+                        ui.echart(candlestick_options).style("height: 280px; min-height: 280px;")
 
-            # Update the Performance Summary section to prevent overlap:
-            with ui.card().classes("w-full p-4 mb-4"):
-                with ui.row().classes("items-center justify-between"):
-                    ui.label("Performance Summary").classes("text-h6")
-                    ui.button("Refresh Chart", icon="refresh", on_click=lambda: ui.notify("Charts refreshed")).props("outline")
+                # Performance Summary section (Compact design)
+                with ui.card().classes("w-full p-3"):
+                    ui.label("Performance Summary").classes("text-h6 mb-2")
 
-                ui.separator().classes("my-2")
+                    # Compact layout with smaller cards
+                    with ui.grid(columns=3).classes("gap-2 w-full"):
+                        # Quick summary metrics with reduced padding
+                        with ui.card().classes("p-2"):
+                            ui.label("Returns").classes("text-caption")
+                            color = "text-positive" if metrics["TotalProfit"] > 0 else "text-negative"
+                            ui.label(f"₹{metrics['TotalProfit']:,.0f} ({metrics['TotalProfit']/results.get('InitialInvestment', 100000)*100:.1f}%)").classes(f"{color} text-subtitle1 font-bold")
 
-                # Fix the layout with consistent column widths
-                with ui.grid(columns=3).classes("gap-4 w-full"):
-                    # Quick summary metrics
-                    with ui.card().classes("p-3"):
-                        ui.label("Returns").classes("text-subtitle2")
-                        color = "text-positive" if metrics["TotalProfit"] > 0 else "text-negative"
-                        ui.label(f"₹{metrics['TotalProfit']:,.2f} ({metrics['TotalProfit']/results.get('InitialInvestment', 100000)*100:.1f}%)").classes(f"{color} text-h6")
+                        with ui.card().classes("p-2"):
+                            ui.label("Win Rate").classes("text-caption")
+                            ui.label(f"{metrics['WinRate']:.1f}% ({int(metrics['TotalTrades'] * metrics['WinRate']/100)}/{metrics['TotalTrades']})").classes("text-subtitle1 font-bold")
 
-                    with ui.card().classes("p-3"):
-                        ui.label("Winning Trades").classes("text-subtitle2")
-                        ui.label(f"{metrics['WinRate']:.1f}% ({int(metrics['TotalTrades'] * metrics['WinRate']/100)}/{metrics['TotalTrades']})").classes("text-h6")
-
-                    with ui.card().classes("p-3"):
-                        ui.label("Risk-Adjusted Return").classes("text-subtitle2")
-                        color = "text-positive" if metrics["SharpeRatio"] > 1 else "text-negative"
-                        ui.label(f"Sharpe: {metrics['SharpeRatio']:.2f}").classes(f"{color} text-h6")
+                        with ui.card().classes("p-2"):
+                            ui.label("Sharpe Ratio").classes("text-caption")
+                            color = "text-positive" if metrics["SharpeRatio"] > 1 else "text-negative"
+                            ui.label(f"{metrics['SharpeRatio']:.2f}").classes(f"{color} text-subtitle1 font-bold")
         else:
             ui.label("No trades executed in this backtest.").classes("text-warning")
 
@@ -988,68 +987,70 @@ def display_backtest_results(performance_panel, trades_panel, metrics_panel, res
     with trades_panel:
         completed_trades = process_tradebook_for_display(tradebook)
         if completed_trades:
+            # Container with proper height distribution
+            with ui.column().classes("w-full h-full gap-4"):
+                # Single table with constrained height
+                ui.aggrid({
+                    "columnDefs": [
+                        {"headerName": "Entry Date", "field": "EntryDate",
+                         "valueFormatter": "value ? new Date(value).toLocaleDateString() : 'N/A'",
+                         "width": 130},
+                        {"headerName": "Exit Date", "field": "ExitDate",
+                         "valueFormatter": "value ? new Date(value).toLocaleDateString() : 'N/A'",
+                         "width": 130},
+                        {"headerName": "Entry ₹", "field": "EntryPrice",
+                         "valueFormatter": "params.value.toFixed(2)", "width": 110},
+                        {"headerName": "Exit ₹", "field": "ExitPrice",
+                         "valueFormatter": "params.value ? params.value.toFixed(2) : 'N/A'", "width": 110},
+                        {"headerName": "Quantity", "field": "Quantity",
+                         "valueFormatter": "params.value.toFixed(0)", "width": 100},
+                        {"headerName": "P&L", "field": "PNL",
+                         "valueFormatter": "params.value.toFixed(2)",
+                         "cellStyle": "params.value >= 0 ? {'color': '#16a34a', 'font-weight': 'bold'} : {'color': '#dc2626', 'font-weight': 'bold'}",
+                         "width": 120},
+                        {"headerName": "Exit Reason", "field": "ExitReason", "width": 140},
+                        {"headerName": "Duration", "field": "HoldingPeriod", "width": 120}
+                    ],
+                    "rowData": completed_trades,
+                    "defaultColDef": {"sortable": True, "filter": True, "resizable": True},
+                    "domLayout": "normal",
+                    "pagination": True,
+                    "paginationPageSize": 20,
+                    "rowHeight": 40,
+                    "headerHeight": 50
+                }).classes("w-full").style("height: 400px;")  # Fixed height instead of h-full
 
-            # Single full-height table
-            ui.aggrid({
-                "columnDefs": [
-                    {"headerName": "Entry Date", "field": "EntryDate",
-                     "valueFormatter": "value ? new Date(value).toLocaleDateString() : 'N/A'",
-                     "width": 130},
-                    {"headerName": "Exit Date", "field": "ExitDate",
-                     "valueFormatter": "value ? new Date(value).toLocaleDateString() : 'N/A'",
-                     "width": 130},
-                    {"headerName": "Entry ₹", "field": "EntryPrice",
-                     "valueFormatter": "params.value.toFixed(2)", "width": 110},
-                    {"headerName": "Exit ₹", "field": "ExitPrice",
-                     "valueFormatter": "params.value ? params.value.toFixed(2) : 'N/A'", "width": 110},
-                    {"headerName": "Quantity", "field": "Quantity",
-                     "valueFormatter": "params.value.toFixed(0)", "width": 100},
-                    {"headerName": "P&L", "field": "PNL",
-                     "valueFormatter": "params.value.toFixed(2)",
-                     "cellStyle": "params.value >= 0 ? {'color': '#16a34a', 'font-weight': 'bold'} : {'color': '#dc2626', 'font-weight': 'bold'}",
-                     "width": 120},
-                    {"headerName": "Exit Reason", "field": "ExitReason", "width": 140},
-                    {"headerName": "Duration", "field": "HoldingPeriod", "width": 120}
-                ],
-                "rowData": completed_trades,
-                "defaultColDef": {"sortable": True, "filter": True, "resizable": True},
-                "domLayout": "normal",
-                "pagination": True,  # Show all rows
-                "rowHeight": 40,
-                "headerHeight": 50
-            }).classes("w-full h-full")  # Takes full height of the tab panel
+                # Quick stats chips
+                with ui.row().classes("w-full gap-4 flex-wrap"):
+                    ui.chip(f"Total Profit: ₹{metrics['TotalProfit']:,.2f}", icon="account_balance").props("outline")
+                    ui.chip(f"Win Rate: {metrics['WinRate']:.1f}%", icon="percent").props("outline")
+                    ui.chip(f"Trades: {metrics['TotalTrades']}", icon="format_list_numbered").props("outline")
+                    ui.chip(f"Winning Trades: {int(metrics['TotalTrades'] * metrics['WinRate'] / 100)}",
+                            icon="thumb_up").props("outline")
+                    ui.chip(
+                        f"Losing Trades: {metrics['TotalTrades'] - int(metrics['TotalTrades'] * metrics['WinRate'] / 100)}",
+                        icon="thumb_down").props("outline")
 
-            # Quick stats at the bottom
-            with ui.row().classes("w-full mt-4 gap-4"):
-                ui.chip(f"Total Profit: ₹{metrics['TotalProfit']:,.2f}", icon="account_balance").props("outline")
-                ui.chip(f"Win Rate: {metrics['WinRate']:.1f}%", icon="percent").props("outline")
-                ui.chip(f"Trades: {metrics['TotalTrades']}", icon="format_list_numbered").props("outline")
-                ui.chip(f"Winning Trades: {int(metrics['TotalTrades'] * metrics['WinRate'] / 100)}",
-                        icon="thumb_up").props("outline")
-                ui.chip(
-                    f"Losing Trades: {metrics['TotalTrades'] - int(metrics['TotalTrades'] * metrics['WinRate'] / 100)}",
-                    icon="thumb_down").props("outline")
+                # TRADE STATISTICS (Always visible now)
+                with ui.card().classes("w-full"):
+                    with ui.card_section().classes("p-4"):
+                        ui.label("📊 Trade Statistics").classes("text-h6 font-bold mb-3")
 
-            # SECTION 2: TRADE STATISTICS (Separate Card)
-            with ui.card().classes("w-full mb-4"):
-                with ui.card_section().classes("p-4"):
-                    ui.label("📊 Trade Statistics").classes("text-h6 font-bold mb-3")
+                        with ui.grid(columns=4).classes("gap-4"):
+                            def create_stat_card(title, value, color="blue"):
+                                with ui.card().classes(f"p-3 bg-{color}-50 border border-{color}-200"):
+                                    ui.label(title).classes("text-sm font-medium text-gray-700")
+                                    ui.label(str(value)).classes(f"text-xl font-bold text-{color}-700")
 
-                    with ui.grid(columns=4).classes("gap-4"):
-                        def create_stat_card(title, value, color="blue"):
-                            with ui.card().classes(f"p-3 bg-{color}-50 border border-{color}-200"):
-                                ui.label(title).classes("text-sm font-medium text-gray-700")
-                                ui.label(str(value)).classes(f"text-xl font-bold text-{color}-700")
-
-                        # Calculate statistics
-                        avg_profit = metrics['TotalProfit'] / metrics['TotalTrades'] if metrics[
+                            # Calculate statistics
+                            avg_profit = metrics['TotalProfit'] / metrics['TotalTrades'] if metrics[
                                                                                             'TotalTrades'] > 0 else 0
-                        win_loss_ratio = abs(metrics["AverageWin"] / metrics["AverageLoss"]) if metrics[
+                            win_loss_ratio = abs(metrics["AverageWin"] / metrics["AverageLoss"]) if metrics[
                                                                                                     "AverageLoss"] != 0 else 0
-                        create_stat_card("Avg Profit/Trade", f"₹{avg_profit:.2f}", "green" if avg_profit > 0 else "red")
-                        create_stat_card("Win/Loss Ratio", f"{win_loss_ratio:.2f}", "purple")
-                        create_stat_card("Largest Win", f"₹{metrics['LargestWin']:.2f}", "green")
-                        create_stat_card("Largest Loss", f"₹{abs(metrics['LargestLoss']):.2f}", "red")
+                            create_stat_card("Avg Profit/Trade", f"₹{avg_profit:.2f}", "green" if avg_profit > 0 else "red")
+                            create_stat_card("Win/Loss Ratio", f"{win_loss_ratio:.2f}", "purple")
+                            create_stat_card("Largest Win", f"₹{metrics['LargestWin']:.2f}", "green")
+                            create_stat_card("Largest Loss", f"₹{abs(metrics['LargestLoss']):.2f}", "red")
 
         else:
             with ui.column().classes("w-full h-full items-center justify-center"):
@@ -1366,3 +1367,4 @@ def display_strategy_comparison(container, all_results, user_storage):
             ui.plotly(fig_radar).classes("w-full h-80")
         else:
             ui.label("No data available for strategy comparison.").classes("text-warning")
+

@@ -301,6 +301,7 @@ class StrategyResponse(BaseModel):
         from_attributes = True
 
 class BacktestRequest(BaseModel):
+    trading_symbol: str
     instrument_token: str
     timeframe: str
     strategy: str

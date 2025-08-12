@@ -11,7 +11,7 @@ import secrets
 from collections import deque
 
 # Import module functions
-from theme_manager import theme_manager, apply_page_theme, PageTheme, ThemeMode
+from unified_theme_manager import apply_unified_theme, reset_theme_styles, PageTheme, ThemeMode
 from ui_context_manager import safe_notify, create_safe_task, with_safe_ui_context
 from order_management import render_order_management
 from strategies import render_strategies_page
@@ -165,16 +165,17 @@ async def connect_websocket(max_retries=5, initial_backoff=2):
 
 
 def apply_theme_from_storage():
-    """Apply theme using the centralized theme manager"""
-    theme_mode = app.storage.user.get(STORAGE_THEME_KEY, "Dark").lower()
-    theme_manager.current_theme = ThemeMode(theme_mode)
+    """Apply theme using the unified theme manager"""
+    theme_mode = app.storage.user.get(STORAGE_THEME_KEY, "dark").lower()
+    # Theme will be applied when pages load
 
 # Replace the existing toggle_theme() function
 def toggle_theme():
-    """Toggle theme using theme manager"""
-    current = theme_manager.current_theme
+    """Toggle theme using unified theme manager"""
+    from unified_theme_manager import switch_unified_theme, unified_theme_manager, ThemeMode
+    current = unified_theme_manager.current_theme
     new_theme = ThemeMode.LIGHT if current == ThemeMode.DARK else ThemeMode.DARK
-    theme_manager.switch_theme(new_theme, app.storage.user)
+    switch_unified_theme(new_theme, app.storage.user)
     app.storage.user[STORAGE_THEME_KEY] = new_theme.value
 
 
@@ -207,22 +208,11 @@ async def get_cached_instruments(broker, exchange_filter="NSE", force_refresh=Fa
 def render_header():
     """Enhanced header with compact navigation and profile dropdown"""
     with ui.header(elevated=True).classes('justify-between items-center'):
-        # Apply glassmorphism to header
-        ui.add_head_html('''
-        <style>
-            .q-header {
-                background: rgba(0, 0, 0, 0.4) !important;
-                backdrop-filter: blur(20px);
-                border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-                padding: 0.75rem 1.5rem !important;
-            }
-        </style>
-        ''')
 
         # Left side - Logo and Title
         with ui.row().classes("items-center gap-3"):
             ui.icon("candlestick_chart", size="1.75rem").classes("text-cyan-400")
-            ui.label("AlgoTrade Pro").classes("text-xl font-bold text-white")
+            ui.label("AlgoTrade Pro").classes("text-xl font-bold theme-text-primary")
             ui.chip("LIVE", color="green").classes("text-xs animate-pulse")
 
         # Center - Compact Navigation
@@ -257,11 +247,11 @@ def render_header():
                     group_name, sub_items = item[0], item[1]
                     with ui.button(group_name, icon="arrow_drop_down").props(
                             'flat dense no-caps').classes("nav-tab-btn text-sm"):
-                        with ui.menu().classes("bg-gray-900/95 backdrop-blur-lg border border-white/10"):
+                        with ui.menu().classes("q-menu"):
                             for sub_name, sub_route, sub_icon in sub_items:
                                 ui.menu_item(sub_name,
                                              on_click=lambda r=sub_route: ui.navigate.to(r)).props(
-                                    f'icon={sub_icon}').classes("text-white hover:bg-white/10")
+                                    f'icon={sub_icon}').classes("q-item")
 
         # Right side - Status and Profile
         with ui.row().classes("items-center gap-4"):
@@ -270,19 +260,18 @@ def render_header():
             status_color = "green" if market_open else "red"
             status_text = "Market Open" if market_open else "Market Closed"
 
-            with ui.row().classes(
-                    f"status-indicator bg-{status_color}-900/20 border border-{status_color}-500/30 px-3 py-1 rounded-full"):
+            with ui.row().classes("status-indicator market-status"):
                 ui.icon("circle", size="0.5rem").classes(f"text-{status_color}-500")
-                ui.label(status_text).classes("text-sm text-white")
+                ui.label(status_text).classes("text-sm theme-text-primary")
 
             # Connection Status
-            with ui.row().classes("status-indicator bg-cyan-900/20 border border-cyan-500/30 px-3 py-1 rounded-full"):
+            with ui.row().classes("status-indicator connection-status"):
                 ui.icon("wifi", size="1rem").classes("text-cyan-400")
-                ui.label(f"Connected: {app.storage.user.get(STORAGE_BROKER_KEY)}").classes("text-sm text-white") if app.storage.user.get(
+                ui.label(f"Connected: {app.storage.user.get(STORAGE_BROKER_KEY)}").classes("text-sm theme-text-primary") if app.storage.user.get(
                     STORAGE_BROKER_KEY) else ui.label("Not Connected").classes("text-sm text-red-400")
 
             # Current Time
-            time_label = ui.label().classes("text-sm text-gray-300 font-mono")
+            time_label = ui.label().classes("text-sm theme-text-secondary font-mono")
 
             def update_time():
                 time_label.text = datetime.now().strftime("%H:%M:%S IST")
@@ -355,7 +344,7 @@ async def login_page(client: Client):
     except Exception as e:
         logger.error(f"Error accessing app.storage.user in login_page: {e}")
 
-    apply_page_theme(PageTheme.LOGIN, app.storage.user)
+    apply_unified_theme(PageTheme.LOGIN, app.storage.user)
 
     async def handle_login():
         if not email.value or not password.value:
@@ -461,7 +450,7 @@ async def dashboard_page(client: Client):
     client.on_disconnect(page_cleanup)
 
     # Apply enhanced theme and render header
-    apply_page_theme(PageTheme.DASHBOARD, app.storage.user)
+    apply_unified_theme(PageTheme.DASHBOARD, app.storage.user)
     render_header()
 
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
@@ -508,7 +497,7 @@ async def order_management_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_page_theme(PageTheme.TRADING, app.storage.user)
+    apply_unified_theme(PageTheme.TRADING, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_order_management(fetch_api, app.storage.user, await get_cached_instruments(broker))
@@ -520,7 +509,7 @@ async def analytics_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_page_theme(PageTheme.ANALYTICS, app.storage.user)
+    apply_unified_theme(PageTheme.ANALYTICS, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_analytics_page(fetch_api, app.storage.user, await get_cached_instruments(broker))
@@ -532,7 +521,7 @@ async def strategies_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_page_theme(PageTheme.DEFAULT, app.storage.user)
+    apply_unified_theme(PageTheme.STRATEGIES, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_strategies_page(fetch_api, app.storage.user, await get_cached_instruments(broker))
@@ -544,7 +533,7 @@ async def sip_strategies_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_page_theme(PageTheme.SIP_STRATEGY, app.storage.user)
+    apply_unified_theme(PageTheme.STRATEGIES, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_sip_strategy_page(fetch_api, app.storage.user)
@@ -556,7 +545,7 @@ async def backtesting_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_page_theme(PageTheme.BACKTESTING, app.storage.user)
+    apply_unified_theme(PageTheme.BACKTESTING, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_backtesting_page(fetch_api, app.storage.user, await get_cached_instruments(broker))
@@ -568,7 +557,7 @@ async def order_book_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_page_theme(PageTheme.ORDERBOOK, app.storage.user)
+    apply_unified_theme(PageTheme.ORDERBOOK, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_order_book_page(fetch_api, app.storage.user, broker)
@@ -580,7 +569,7 @@ async def portfolio_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_page_theme(PageTheme.PORTFOLIO, app.storage.user)
+    apply_unified_theme(PageTheme.PORTFOLIO, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_portfolio_page(fetch_api, app.storage.user, broker)
@@ -592,7 +581,7 @@ async def positions_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_page_theme(PageTheme.POSITIONS, app.storage.user)
+    apply_unified_theme(PageTheme.POSITIONS, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_positions_page(fetch_api, app.storage.user, broker)
@@ -604,7 +593,7 @@ async def live_trading_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_page_theme(PageTheme.LIVE_TRADING, app.storage.user)
+    apply_unified_theme(PageTheme.LIVE_TRADING, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_live_trading_page(fetch_api, app.storage.user, broker)
@@ -616,7 +605,7 @@ async def watchlist_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_page_theme(PageTheme.WATCHLIST, app.storage.user)
+    apply_unified_theme(PageTheme.WATCHLIST, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_watchlist_page(fetch_api, app.storage.user, get_cached_instruments, broker)
@@ -628,7 +617,7 @@ async def settings_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_page_theme(PageTheme.SETTINGS, app.storage.user)
+    apply_unified_theme(PageTheme.SETTINGS, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_settings_page(fetch_api, app.storage.user, apply_theme_from_storage)
@@ -639,7 +628,7 @@ async def strategy_performance_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_page_theme(PageTheme.DEFAULT, app.storage.user)
+    apply_unified_theme(PageTheme.DEFAULT, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     ui.label("Strategy Performance Dashboard").classes("text-h5 q-pa-md")
@@ -669,7 +658,7 @@ if __name__ in {"__main__", "__mp_main__"}:
     # ui.add_css('static/styles.css')
 
     ui.run(title="AlgoTrade Pro - Advanced Trading Platform",
-           port=8081,
+           port=8084,
            reload=True,
            uvicorn_reload_dirs='.',
            uvicorn_reload_includes='*.py',
