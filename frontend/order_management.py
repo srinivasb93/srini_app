@@ -548,19 +548,15 @@ async def render_scheduled_orders(fetch_api, user_storage, instruments, broker):
 
                 with ui.column().classes("flex-1 gap-2"):
                     ui.label("Schedule Date").classes("text-sm font-medium text-gray-300")
-                    schedule_date = ui.input("Choose Date",
+                    schedule_date = ui.input(
                                           value=(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")).props(
                         "dense type=date").classes("w-full")
 
                 with ui.column().classes("flex-1 gap-2"):
                     ui.label("Schedule Time").classes("text-sm font-medium text-gray-300")
-                    schedule_time = ui.input("Choose Time",
+                    schedule_time = ui.input(
                                           value=(datetime.now() + timedelta(minutes=15)).strftime("%H:%M")).props(
                         "dense type=time").classes("w-full")
-                    # ui.label("Schedule Time").classes("text-sm font-medium text-gray-300")
-                    # schedule_time = ui.time(
-                    #     value="09:15"
-                    # ).classes('w-full')
 
                 with ui.column().classes("flex-1 gap-2"):
                     ui.label("AMO").classes("text-sm font-medium text-gray-300")
@@ -575,7 +571,8 @@ async def render_scheduled_orders(fetch_api, user_storage, instruments, broker):
             update_price_fields()
 
             # Market Price Section
-            market_price_label = ui.label(f"{symbol_select.value} Last Price").classes("text-sm font-medium text-gray-300")
+            ui.label("Last Price").classes("text-sm font-medium text-gray-300")
+            market_price_label = ui.label("").classes("text-sm font-medium text-gray-300")
             async def update_market_price(symbol):
                 instrument_token = instruments.get(symbol)
                 if instrument_token:
@@ -1001,9 +998,13 @@ async def render_auto_orders(fetch_api, user_storage, instruments, broker):
 
                 with ui.column().classes("flex-1 gap-2"):
                     ui.label("Square Off Time").classes("text-sm font-medium text-gray-300")
-                    square_off_time = ui.time(
+                    square_off_time = ui.input(
                         value="15:20"
-                    ).classes('w-full')
+                    ).props("dense type=time").classes("w-full")
+
+                    # square_off_time = ui.time(
+                    #     value="15:20"
+                    # ).classes('w-full')
 
             # Additional Settings
             with ui.row().classes('w-full gap-6 mt-4'):

@@ -533,7 +533,7 @@ async def sip_strategies_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_unified_theme(PageTheme.STRATEGIES, app.storage.user)
+    apply_unified_theme(PageTheme.SIP_STRATEGY, app.storage.user)
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_sip_strategy_page(fetch_api, app.storage.user)
@@ -658,7 +658,7 @@ if __name__ in {"__main__", "__mp_main__"}:
     # ui.add_css('static/styles.css')
 
     ui.run(title="AlgoTrade Pro - Advanced Trading Platform",
-           port=8084,
+           port=8083,
            reload=True,
            uvicorn_reload_dirs='.',
            uvicorn_reload_includes='*.py',

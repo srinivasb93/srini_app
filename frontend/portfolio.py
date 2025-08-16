@@ -9,12 +9,12 @@ async def render_portfolio_page(fetch_api, user_storage, broker):
     # Main container with dashboard styling
     with ui.column().classes("enhanced-dashboard w-full min-h-screen"):
         # Enhanced title section (matching dashboard.py and positions.py)
-        with ui.row().classes("dashboard-title-section w-full justify-between items-center p-4"):
+        with ui.row().classes("dashboard-title-section w-full justify-between items-center p-2"):
             # Left side - Title and subtitle
             with ui.column().classes("gap-2"):
                 with ui.row().classes("items-center gap-2"):
                     ui.icon("account_balance_wallet", size="2rem").classes("text-purple-400")
-                    ui.label(f"Portfolio Overview - {broker}").classes("text-3xl font-bold theme-text-primary dashboard-title")
+                    ui.label(f"Portfolio Overview - {broker}").classes("text-1xl font-bold theme-text-primary dashboard-title")
                     ui.chip("LIVE", color="green").classes("text-xs status-chip")
 
                 ui.label("Monitor your investment portfolio and track performance").classes(
@@ -26,7 +26,7 @@ async def render_portfolio_page(fetch_api, user_storage, broker):
                 ui.button("Refresh", icon="refresh").classes("text-gray-400")
 
         # Portfolio summary cards
-        portfolio_container = ui.column().classes("w-full p-4 gap-4")
+        portfolio_container = ui.column().classes("w-full p-2 gap-4")
 
         # Status label for updates
         status_label = ui.label("Loading portfolio...").classes("text-sm text-gray-400 p-4")
@@ -47,11 +47,11 @@ async def render_portfolio_page(fetch_api, user_storage, broker):
 
         with portfolio_container:
             # Summary metrics cards ABOVE the table
-            summary_container = ui.row().classes("w-full gap-4 mb-4")
+            summary_container = ui.row().classes("w-full gap-4 mb-2")
 
             # Enhanced portfolio table card BELOW the summary cards
             with ui.card().classes("dashboard-card w-full"):
-                with ui.row().classes("card-header w-full justify-between items-center p-4"):
+                with ui.row().classes("card-header w-full justify-between items-center p-2"):
                     with ui.row().classes("items-center gap-2"):
                         ui.icon("table_chart", size="1.5rem").classes("text-purple-400")
                         ui.label("Holdings Details").classes("card-title")
@@ -61,9 +61,16 @@ async def render_portfolio_page(fetch_api, user_storage, broker):
                             ui.element('div').classes("w-2 h-2 bg-purple-400 rounded-full animate-pulse")
                             ui.label("Live Prices").classes("text-xs text-purple-400")
 
-                ui.separator().classes("card-separator")
-
-                portfolio_table = ui.table(columns=columns, rows=[], row_key='Symbol').classes('w-full p-4')
+                portfolio_table = ui.table(columns=columns, rows=[], row_key='Symbol').classes('w-full p-2')
+                # Add custom header styling with gradient background
+                portfolio_table.add_slot('header', '''
+                                <q-tr class="bg-gradient-to-r from-purple-500/20 to-blue-500/20 border-b-2 border-purple-400/30">
+                                    <q-th v-for="col in props.cols" :key="col.name" :props="props"
+                                          class="theme-text-primary font-semibold text-sm tracking-wider py-3">
+                                        {{ col.label }}
+                                    </q-th>
+                                </q-tr>
+                            ''')
                 portfolio_table.add_slot('body-cell-PnL', '''
                     <q-td :props="props">
                         <span :class="props.row.pnl_classes">{{ props.row.PnL }}</span>
@@ -226,9 +233,11 @@ async def render_portfolio_page(fetch_api, user_storage, broker):
                 with ui.card().classes("dashboard-card metric-card flex-1"):
                     with ui.column().classes("p-4 text-center"):
                         ui.icon(pnl_icon, size="2rem").classes(f"{overall_pnl_color} mb-2")
-                        ui.label("Overall P&L").classes("text-sm text-gray-400")
+                        with ui.row().classes("items-center justify-center gap-2"):
+                            ui.label("Overall P&L").classes("text-sm text-gray-400")
+                            ui.label(f"({overall_pnl_pct:+.2f}%)").classes(f"text-sm {overall_pnl_color}")
                         ui.label(f"₹{overall_pnl:,.2f}").classes(f"text-2xl font-bold {overall_pnl_color}")
-                        ui.label(f"({overall_pnl_pct:+.2f}%)").classes(f"text-sm {overall_pnl_color}")
+
 
                 # Today's P&L
                 day_pnl_color = "text-green-400" if total_day_pnl >= 0 else "text-red-400"
@@ -236,7 +245,9 @@ async def render_portfolio_page(fetch_api, user_storage, broker):
                 with ui.card().classes("dashboard-card metric-card flex-1"):
                     with ui.column().classes("p-4 text-center"):
                         ui.icon(day_pnl_icon, size="2rem").classes(f"{day_pnl_color} mb-2")
-                        ui.label("Today's P&L").classes("text-sm text-gray-400")
+                        with ui.row().classes("items-center justify-center gap-2"):
+                            ui.label("Today's P&L").classes("text-sm text-gray-400")
+                            ui.label(f"({(total_day_pnl / total_invested_value * 100 if total_invested_value > 0 else 0):+.2f}%)").classes(f"text-sm {day_pnl_color}")
                         ui.label(f"₹{total_day_pnl:,.2f}").classes(f"text-2xl font-bold {day_pnl_color}")
 
             # Update table with new data

@@ -129,6 +129,8 @@ class UnifiedThemeManager:
         # COMPLETE UNIFIED CSS - Everything in one place
         # Using multi-line string to avoid IDE parsing issues
         complete_css = '''
+        
+        /* UNIFIED THEME CSS - Consolidating all styling systems */
         /* UNIFIED THEME CSS - Consolidating all styling systems */
         
         /* Import fonts */
@@ -159,7 +161,7 @@ class UnifiedThemeManager:
             --radius-sm: 6px;
             --radius-md: 8px;
             --radius-lg: 16px;
-            --radius-xl: 24px;
+            --radius-xl: 26px;
             --radius-full: 9999px;
             
             --transition-fast: 0.15s ease;
@@ -170,7 +172,7 @@ class UnifiedThemeManager:
             --size-xs: 0.25rem;    /* 4px */
             --size-sm: 0.5rem;     /* 8px */
             --size-md: 1rem;       /* 16px */
-            --size-lg: 1.5rem;     /* 24px */
+            --size-lg: 1.5rem;     /* 26px */
             --size-xl: 2rem;       /* 32px */
             --size-2xl: 2.5rem;    /* 40px */
             --size-3xl: 3rem;      /* 48px */
@@ -291,8 +293,8 @@ class UnifiedThemeManager:
             background: var(--surface-color);
             backdrop-filter: blur(10px);
             border-radius: var(--radius-lg);
-            padding: var(--spacing-lg);
-            margin-bottom: var(--spacing-lg);
+            padding: var(--spacing-sm);
+            margin-bottom: var(--spacing-xs);
             border: 1px solid var(--border-color);
         }
         
@@ -371,7 +373,7 @@ class UnifiedThemeManager:
         
         /* Base field container alignment */
         .q-field {
-            min-height: 40px !important;
+            min-height: 26px !important;
             margin-bottom: 0.5rem !important;
             display: flex !important;
             align-items: center !important;
@@ -382,7 +384,7 @@ class UnifiedThemeManager:
             background: var(--surface-color) !important;
             border: 1px solid var(--border-color) !important;
             border-radius: var(--radius-md) !important;
-            min-height: 40px !important;
+            min-height: 26px !important;
             padding: 0 !important;
             transition: all var(--transition-fast) !important;
             position: relative !important;
@@ -393,7 +395,7 @@ class UnifiedThemeManager:
         
         /* CRITICAL: Fix the nested control container alignment */
         .q-field__control-container {
-            min-height: 38px !important;
+            min-height: 26px !important;
             padding: 0 0.75rem !important;
             display: flex !important;
             align-items: center !important;
@@ -411,7 +413,7 @@ class UnifiedThemeManager:
         
         /* CRITICAL: Native input alignment */
         .q-field__native {
-            min-height: 36px !important;
+            min-height: 26px !important;
             padding: 0 !important;
             color: var(--text-primary) !important;
             font-size: 0.875rem !important;
@@ -431,7 +433,7 @@ class UnifiedThemeManager:
             border: none !important;
             color: var(--text-primary) !important;
             font-size: 0.875rem !important;
-            min-height: 36px !important;
+            min-height: 26px !important;
             padding: 0 !important;
             outline: none !important;
             box-shadow: none !important;
@@ -527,7 +529,7 @@ class UnifiedThemeManager:
             width: 0 !important; /* Let flex handle the sizing */
         }
         
-        @media (max-width: 1024px) {
+        @media (max-width: 1026px) {
             .settings-layout {
                 grid-template-columns: 1fr !important;
             }
@@ -666,7 +668,7 @@ class UnifiedThemeManager:
         }
         
         .p-4 {
-            padding: 1rem !important;
+            padding: .75rem !important;
         }
         
         .p-6 {
@@ -726,7 +728,7 @@ class UnifiedThemeManager:
         
         .dashboard-title {
             color: var(--text-primary) !important;
-            font-size: 2.5rem !important;
+            font-size: 1.5rem !important;
             font-weight: 700 !important;
             line-height: 1.2 !important;
         }
@@ -742,8 +744,14 @@ class UnifiedThemeManager:
         if self.current_theme == ThemeMode.LIGHT:
             complete_css += self._get_light_theme_overrides()
 
+        # Apply page-specific styles
+        page_specific_css = self._get_page_specific_styles(page_type)
+        if page_specific_css:
+            complete_css += page_specific_css
+
         # Apply the complete CSS
         ui.add_head_html(f'<style>{complete_css}</style>')
+        
 
     def _get_light_theme_overrides(self) -> str:
         """Light theme specific overrides"""
@@ -848,7 +856,7 @@ class UnifiedThemeManager:
 
         styles = {
             PageTheme.DASHBOARD: '''
-            /* Dashboard Specific - Compact grid layout */
+            /* Dashboard Specific - Enhanced layout with proper alignment */
             .dashboard-grid {
                 display: grid;
                 grid-template-columns: 300px 1fr 280px;
@@ -874,24 +882,153 @@ class UnifiedThemeManager:
                 overflow-y: auto;
             }
             
+            /* Enhanced Quick Trade Form Layout */
             .quick-trade-form {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 0.75rem;
-                padding: 1rem;
+                display: flex !important;
+                flex-direction: column !important;
+                gap: 1rem !important;
+                padding: 1rem !important;
+                width: 100% !important;
             }
             
             .quick-trade-form .q-field,
-            .quick-trade-form .q-select {
-                min-height: 40px !important;
+            .quick-trade-form .q-select,
+            .quick-trade-form .q-input {
+                width: 100% !important;
+                min-height: 44px !important;
             }
             
-            .trade-buttons {
-                grid-column: 1 / -1;
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 0.75rem;
-                margin-top: 0.5rem;
+            .quick-trade-form .flex-1 {
+                flex: 1 1 0% !important;
+                min-width: 0 !important;
+            }
+            
+            /* Trade Button Styling */
+            .quick-trade-form .q-btn {
+                min-height: 48px !important;
+                font-weight: 600 !important;
+                text-transform: uppercase !important;
+                letter-spacing: 0.5px !important;
+                border-radius: 8px !important;
+                transition: all 0.2s ease !important;
+            }
+            
+            .quick-trade-form .q-btn:hover {
+                transform: translateY(-1px) !important;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3) !important;
+            }
+            
+            /* Recent Orders Widget Enhanced Alignment */
+            .orders-container {
+                width: 100% !important;
+                overflow-x: hidden !important;
+            }
+            
+            .order-row-grid {
+                display: grid !important;
+                grid-template-columns: 2fr 1fr 1fr 1fr 1fr !important;
+                gap: 0.5rem !important;
+                align-items: center !important;
+                padding: 0.5rem !important;
+                min-height: 32px !important;
+                border-radius: 6px !important;
+                transition: all 0.2s ease !important;
+            }
+            
+            .order-row-grid:hover {
+                background: rgba(255, 255, 255, 0.05) !important;
+                transform: translateX(2px) !important;
+            }
+            
+            /* Portfolio Summary Compact Layout */
+            .portfolio-metrics-row {
+                display: grid !important;
+                grid-template-columns: repeat(5, 1fr) !important;
+                gap: 1rem !important;
+                padding: 1rem !important;
+                text-align: center !important;
+            }
+            
+            .portfolio-metric {
+                display: flex !important;
+                flex-direction: column !important;
+                align-items: center !important;
+                gap: 0.25rem !important;
+            }
+            
+            /* Watchlist and Active Strategies 20% Width Enforcement */
+            .dashboard-left-sidebar {
+                flex: 0 0 20% !important;
+                max-width: 20% !important;
+                min-width: 20% !important;
+                width: 20% !important;
+            }
+            
+            /* Historical Chart and Market Data Proper Positioning */
+            .dashboard-center-content {
+                flex: 0 0 45% !important;
+                max-width: 45% !important;
+                min-width: 45% !important;
+                width: 45% !important;
+            }
+            
+            .dashboard-right-content {
+                flex: 0 0 35% !important;
+                max-width: 35% !important;
+                min-width: 35% !important;
+                width: 35% !important;
+            }
+            
+            /* Improved Card Spacing and Alignment */
+            .dashboard-card {
+                width: 100% !important;
+                margin-bottom: 1rem !important;
+                border-radius: 12px !important;
+                overflow: hidden !important;
+            }
+            
+            .dashboard-card .card-header {
+                padding: 1rem !important;
+                border-bottom: 1px solid var(--border-color) !important;
+                background: rgba(0, 0, 0, 0.1) !important;
+            }
+            
+            .dashboard-card .card-title {
+                font-size: 1rem !important;
+                font-weight: 600 !important;
+                color: var(--text-primary) !important;
+            }
+            
+            /* Responsive Dashboard Layout */
+            @media (max-width: 1400px) {
+                .dashboard-left-sidebar {
+                    flex: 0 0 22% !important;
+                    max-width: 22% !important;
+                    min-width: 22% !important;
+                }
+                
+                .dashboard-center-content {
+                    flex: 0 0 43% !important;
+                    max-width: 43% !important;
+                    min-width: 43% !important;
+                }
+                
+                .dashboard-right-content {
+                    flex: 0 0 35% !important;
+                    max-width: 35% !important;
+                    min-width: 35% !important;
+                }
+            }
+            
+            @media (max-width: 1200px) {
+                .dashboard-left-sidebar,
+                .dashboard-center-content,
+                .dashboard-right-content {
+                    flex: 1 1 100% !important;
+                    max-width: 100% !important;
+                    min-width: 100% !important;
+                    width: 100% !important;
+                }
             }
             ''',
 
@@ -1454,6 +1591,102 @@ class UnifiedThemeManager:
             .reset-btn {
                 background: var(--surface-color) !important;
                 border: 1px solid var(--error-color) !important;
+            }
+            ''',
+            
+            PageTheme.SIP_STRATEGY: '''
+            /* SIP Strategy Specific - Clean and theme-aware styling */
+            
+            /* Clear all nested element backgrounds to prevent layering */
+            .sip-strategy-page * {
+                background-color: transparent !important;
+            }
+            
+            /* Main cards should have proper surface color only */
+            .sip-strategy-page .q-card {
+                border: 1px solid var(--border-color) !important;
+                border-radius: var(--radius-lg) !important;
+                box-shadow: var(--shadow-md) !important;
+                backdrop-filter: blur(var(--blur-amount)) !important;
+                transition: all var(--transition-base) !important;
+                max-width: 100% !important;
+                margin: 0.25rem 0 !important;
+            }
+            
+            .sip-strategy-page .q-card:hover {
+                transform: translateY(-2px) !important;
+                box-shadow: var(--shadow-lg) !important;
+                border-color: var(--accent-color) !important;
+            }
+            
+            /* Form controls with proper theme-aware styling */
+            .sip-strategy-page .q-field__control {
+                background: var(--surface-color) !important;
+                border: 1px solid var(--border-color) !important;
+                border-radius: var(--radius-md) !important;
+                min-height: var(--form-height-md) !important;
+                transition: all var(--transition-fast) !important;
+            }
+            
+            .sip-strategy-page .q-field__control:hover {
+                border-color: var(--accent-color) !important;
+                box-shadow: 0 0 0 2px rgba(34, 197, 252, 0.1) !important;
+            }
+            
+            .sip-strategy-page .q-field__control:focus-within {
+                border-color: var(--accent-color) !important;
+                box-shadow: 0 0 0 3px rgba(34, 197, 252, 0.2) !important;
+            }
+            
+            /* Input text styling */
+            .sip-strategy-page .q-field input,
+            .sip-strategy-page .q-field textarea,
+            .sip-strategy-page .q-field .q-field__native {
+                color: var(--text-primary) !important;
+                background: transparent !important;
+            }
+            
+            /* Labels */
+            .sip-strategy-page .q-field__label {
+                color: var(--text-secondary) !important;
+                background: var(--primary-color) !important;
+            }
+            
+            /* Buttons */
+            .sip-strategy-page .q-btn {
+                background: linear-gradient(135deg, var(--accent-color) 0%, #0284c7 100%) !important;
+                color: white !important;
+                border-radius: var(--radius-md) !important;
+                min-height: var(--form-height-md) !important;
+                font-weight: 500 !important;
+                transition: all var(--transition-fast) !important;
+            }
+            
+            .sip-strategy-page .q-btn:hover {
+                transform: translateY(-1px) !important;
+                box-shadow: var(--shadow-md) !important;
+            }
+            
+            /* Layout fixes */
+            .sip-strategy-page .q-row {
+                display: flex !important;
+                flex-direction: row !important;
+                flex-wrap: wrap !important;
+                align-items: flex-start !important;
+                gap: var(--spacing-sm) !important;
+                margin: var(--spacing-xs) 0 !important;
+            }
+            
+            .sip-strategy-page .q-column {
+                display: flex !important;
+                flex-direction: column !important;
+                align-items: stretch !important;
+                gap: var(--spacing-xs) !important;
+                margin: 0 !important;
+            }
+            
+            .sip-strategy-page .q-field {
+                margin: var(--spacing-xs) 0 !important;
             }
             '''
         }

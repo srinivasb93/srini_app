@@ -419,7 +419,7 @@ if __name__ == "__main__":
     # print(md.nse_events())
     # print(md.nse_get_fno_snapshot_live())
     # print(md.nse_symbol_quote('SBIN'))
-    print(md.equity_history_virgin('BATAINDIA', 'EQ', '01-01-2023', '01-02-2023'))
+    # print(md.equity_history_virgin('BATAINDIA', 'EQ', '01-01-2023', '01-02-2023'))
     # print(md.security_wise_archive('01-01-2023', '01-01-2024', 'SBIN', series='EQ'))
     # print(md.nse_get_advances_declines())
     # data = md.fetch_index_pe_pb_div_data(start_date="1-1-2020",
@@ -429,6 +429,6 @@ if __name__ == "__main__":
     # print(md.load_all_stocks_table_with_stock_index(indices_list))
     # print(md.get_main_nse_indices_list())
     # print(index_history("NIFTY 50", "01-01-2023", "01-01-2024"))
-    # print(index_pe_pb_div("NIFTY 50", "01-01-2023", "01-01-2024"))
+    print(index_pe_pb_div("NIFTY 50", "01-01-2023", "01-01-2024"))
     # print(index_total_returns("NIFTY 50", "01-01-2023", "01-01-2024"))
     # print(get_bhavcopy("2023-01-01"))

@@ -128,49 +128,60 @@ class EnhancedSIPStrategy:
         return f"{value:.{decimals}f}%"
 
     async def render(self, fetch_api, user_storage):
-        """Render enhanced SIP strategy interface"""
+        """Render enhanced SIP strategy interface with dramatic visual improvements"""
         self.fetch_api = fetch_api
-        # Ensure full width
-        with ui.tabs().classes("w-full max-w-full") as tabs:
-            backtest_tab = ui.tab("📊 Backtesting", icon="analytics")
-            portfolio_tab = ui.tab("💼 Portfolios", icon="account_balance_wallet")
-            multi_portfolio_tab = ui.tab("🎯 Multi-Portfolio", icon="dashboard")
-            reports_tab = ui.tab("📋 Reports", icon="description")
-            signals_tab = ui.tab("📡 Signals", icon="notifications_active")
-            analytics_tab = ui.tab("📈 Analytics", icon="trending_up")
-            config_tab = ui.tab("⚙️ Configuration", icon="settings")
-            scheduler_tab = ui.tab("⏰ Scheduler", icon="schedule")  # NEW TAB for scheduler controls
+        
+        # Main wrapper with SIP strategy specific styling class
+        with ui.column().classes("sip-strategy-page w-full min-h-screen p-2"):
+            
+            # Page header with tabs in the same row
+            with ui.card().classes("w-full mb-4"):
+                with ui.row().classes("w-full items-center justify-between p-4"):
+                    with ui.column().classes("gap-2"):
+                        ui.label("🚀 SIP Strategy Management").classes("page-title-standard text-2xl font-bold")
+                        ui.label("Advanced systematic investment planning with AI-powered analytics").classes("page-subtitle-standard text-sm")
+                    
+                    # Tabs in the same row as header
+                    with ui.tabs().classes("flex-1 ml-8") as tabs:
+                        backtest_tab = ui.tab("📊 Backtesting", icon="analytics").classes("text-sm px-4 py-2")
+                        portfolio_tab = ui.tab("💼 Portfolios", icon="account_balance_wallet").classes("text-sm px-4 py-2")
+                        multi_portfolio_tab = ui.tab("🎯 Multi-Portfolio", icon="dashboard").classes("text-sm px-4 py-2")
+                        reports_tab = ui.tab("📋 Reports", icon="description").classes("text-sm px-4 py-2")
+                        signals_tab = ui.tab("📡 Signals", icon="notifications_active").classes("text-sm px-4 py-2")
+                        analytics_tab = ui.tab("📈 Analytics", icon="trending_up").classes("text-sm px-4 py-2")
+                        config_tab = ui.tab("⚙️ Configuration", icon="settings").classes("text-sm px-4 py-2")
+                        scheduler_tab = ui.tab("⏰ Scheduler", icon="schedule").classes("text-sm px-4 py-2")
 
-        with ui.tab_panels(tabs, value=backtest_tab).classes("w-full max-w-full"):
-            with ui.tab_panel(backtest_tab).classes("w-full max-w-full"):
-                await self.render_enhanced_backtest_panel(fetch_api, user_storage)
+            with ui.tab_panels(tabs, value=backtest_tab).classes("w-full"):
+                with ui.tab_panel(backtest_tab).classes("w-full"):
+                    await self.render_enhanced_backtest_panel(fetch_api, user_storage)
 
-            with ui.tab_panel(portfolio_tab).classes("w-full max-w-full"):
-                await self.render_enhanced_portfolio_panel(fetch_api, user_storage)
+                with ui.tab_panel(portfolio_tab).classes("w-full"):
+                    await self.render_enhanced_portfolio_panel(fetch_api, user_storage)
 
-            with ui.tab_panel(multi_portfolio_tab).classes("w-full max-w-full"):
-                await self.render_multi_portfolio_panel(fetch_api, user_storage)
+                with ui.tab_panel(multi_portfolio_tab).classes("w-full"):
+                    await self.render_multi_portfolio_panel(fetch_api, user_storage)
 
-            with ui.tab_panel(reports_tab).classes("w-full max-w-full"):
-                await self.render_investment_reports_panel(fetch_api, user_storage)
+                with ui.tab_panel(reports_tab).classes("w-full"):
+                    await self.render_investment_reports_panel(fetch_api, user_storage)
 
-            with ui.tab_panel(signals_tab).classes("w-full max-w-full"):
-                await self.render_enhanced_signals_panel(fetch_api, user_storage)
+                with ui.tab_panel(signals_tab).classes("w-full"):
+                    await self.render_enhanced_signals_panel(fetch_api, user_storage)
 
-            with ui.tab_panel(analytics_tab).classes("w-full max-w-full"):
-                await self.render_enhanced_analytics_panel(fetch_api, user_storage)
+                with ui.tab_panel(analytics_tab).classes("w-full"):
+                    await self.render_enhanced_analytics_panel(fetch_api, user_storage)
 
-            with ui.tab_panel(config_tab).classes("w-full max-w-full"):
-                await self.render_enhanced_config_panel(fetch_api, user_storage)
+                with ui.tab_panel(config_tab).classes("w-full"):
+                    await self.render_enhanced_config_panel(fetch_api, user_storage)
 
-            with ui.tab_panel(scheduler_tab).classes("w-full max-w-full"):  # NEW TAB
-                await self.render_scheduler_panel(fetch_api, user_storage)
+                with ui.tab_panel(scheduler_tab).classes("w-full"):
+                    await self.render_scheduler_panel(fetch_api, user_storage)
 
     async def render_scheduler_panel(self, fetch_api, user_storage):
         """Scheduler management panel with job trades view"""
 
         ui.label("⏰ Scheduler Management").classes("text-2xl font-bold mb-4")
-        ui.label("Control and monitor the automated signal processing scheduler").classes("text-gray-600 mb-6")
+        ui.label("Control and monitor the automated signal processing scheduler").classes("theme-text-primary mb-6")
 
         scheduler_container = ui.column().classes("w-full")
 
@@ -351,154 +362,229 @@ class EnhancedSIPStrategy:
             self.show_error(f"Failed to {action} job")
 
     async def render_enhanced_backtest_panel(self, fetch_api, user_storage):
-        """Enhanced backtesting interface with benchmark comparison and monthly limits, using sub-tabs"""
-        # Sub-tabs for different backtesting sections
-        with ui.tabs().classes("w-full") as sub_tabs:
-            main_backtest = ui.tab("Main Backtest")
-            multi_configs = ui.tab("Batch Multi-Configs")
-            optimize = ui.tab("Optimize Config")
-            quick_test = ui.tab("Quick Test")
-            benchmark = ui.tab("Benchmark Test")
-            symbols = ui.tab("Symbols Search")
-
-        with ui.tab_panels(sub_tabs, value=main_backtest).classes("w-full"):
-            with ui.tab_panel(main_backtest).classes("w-full"):
-                await self.render_main_backtest_section(fetch_api, user_storage)
-
-            with ui.tab_panel(multi_configs).classes("w-full"):
-                await self.render_batch_multi_configs_section(fetch_api, user_storage)
-
-            with ui.tab_panel(optimize).classes("w-full"):
-                await self.render_optimize_config_section(fetch_api, user_storage)
-
-            with ui.tab_panel(quick_test).classes("w-full"):
-                await self.render_quick_test_section(fetch_api, user_storage)
-
-            with ui.tab_panel(benchmark).classes("w-full"):
-                await self.render_benchmark_test_section(fetch_api, user_storage)
-
-            with ui.tab_panel(symbols).classes("w-full"):
-                await self.render_symbols_search_section(fetch_api, user_storage)
+        """Enhanced backtest panel with side menu navigation and modern styling"""
+        # Side menu layout for backtesting options
+        with ui.row().classes("w-full gap-4"):
+            # Left sidebar menu
+            with ui.card().classes("w-72 h-fit"):
+                with ui.column().classes("w-full"):
+                    with ui.row().classes("p-4 border-b border-slate-600/30"):
+                        ui.icon("menu", size="1.2rem").classes("text-cyan-400")
+                        ui.label("Backtesting Options").classes("ml-3 text-lg font-bold")
+                    
+                    # Menu items container
+                    menu_container = ui.column().classes("w-full p-3")
+                    
+                    # Create menu state
+                    selected_option = {"current": "main_backtest"}
+                    content_area = None
+                    
+                    def create_modern_menu_item(key: str, label: str, icon: str, description: str, color: str = "slate"):
+                        is_selected = selected_option["current"] == key
+                        btn_classes = f"w-full justify-start p-3 mb-2 rounded-lg transition-all duration-300 {'bg-cyan-500/20 border-cyan-400/60' if is_selected else 'hover:bg-slate-700/60 border-slate-600/40 hover:border-cyan-400/40'} border"
+                        
+                        with ui.button().classes(btn_classes).props("flat no-caps") as btn:
+                            with ui.row().classes("w-full items-center gap-3"):
+                                ui.icon(icon, size="1.2rem").classes(f"text-{color}-400")
+                                with ui.column().classes("gap-1 flex-1 text-left"):
+                                    ui.label(label).classes(f"font-bold text-sm {'text-cyan-300' if is_selected else 'text-slate-200'}")
+                                    ui.label(description).classes("text-xs text-slate-400")
+                                if is_selected:
+                                    ui.icon("chevron_right", size="1rem").classes("text-cyan-400")
+                        
+                        async def on_click():
+                            selected_option["current"] = key
+                            await update_content()
+                            await refresh_menu()
+                        
+                        btn.on_click(on_click)
+                        return btn
+                    
+                    async def refresh_menu():
+                        menu_container.clear()
+                        with menu_container:
+                            create_modern_menu_item("main_backtest", "Main Backtest", "analytics", "Core strategy testing", "cyan")
+                            create_modern_menu_item("multi_configs", "Batch Multi-Configs", "layers", "Test multiple configurations", "green")
+                            create_modern_menu_item("optimize", "Optimize Config", "tune", "Parameter optimization", "purple")
+                            create_modern_menu_item("quick_test", "Quick Test", "speed", "Rapid validation", "yellow")
+                            create_modern_menu_item("benchmark", "Benchmark Test", "compare_arrows", "Compare with benchmarks", "orange")
+                            create_modern_menu_item("symbols", "Symbols Search", "search", "Find trading symbols", "blue")
+            
+            # Right content area
+            content_area = ui.column().classes("flex-1")
+            
+            # Content panels based on selection
+            async def update_content():
+                content_area.clear()
+                with content_area:
+                    with ui.card().classes("w-full p-4"):
+                        if selected_option["current"] == "main_backtest":
+                            await self.render_main_backtest_section(fetch_api, user_storage)
+                        elif selected_option["current"] == "multi_configs":
+                            await self.render_batch_multi_configs_section(fetch_api, user_storage)
+                        elif selected_option["current"] == "optimize":
+                            await self.render_optimize_config_section(fetch_api, user_storage)
+                        elif selected_option["current"] == "quick_test":
+                            await self.render_quick_test_section(fetch_api, user_storage)
+                        elif selected_option["current"] == "benchmark":
+                            await self.render_benchmark_test_section(fetch_api, user_storage)
+                        elif selected_option["current"] == "symbols":
+                            await self.render_symbols_search_section(fetch_api, user_storage)
+            
+            # Initialize menu and content
+            await refresh_menu()
+            await update_content()
 
     async def clear_results(self):
         self.results_container.clear()
         ui.notify("Results cleared", type="info")
 
     async def render_main_backtest_section(self, fetch_api, user_storage):
-        """Render main backtest configuration and results"""
+        """Render main backtest configuration and results with enhanced styling"""
 
-        with ui.card().classes("w-full mb-4 p-6"):
-            ui.label("📋 Backtest Configuration").classes("text-lg font-semibold mb-4")
+        # Configuration header
+        with ui.row().classes("w-full items-center mb-4"):
+            ui.icon("settings", size="1.5rem").classes("text-cyan-400")
+            ui.label("📋 Backtest Configuration").classes("text-lg font-bold ml-3")
+
+            ui.chip("Main Backtest", icon="analytics", color="primary").classes("text-sm px-3 py-1").props("outline")
 
             with ui.row().classes("w-full gap-6"):
+                with ui.column().classes("flex: 0 0 30%; max-width: 30%; min-width: 30%;"):
+                    with ui.card().classes("w-full p-4 mb-4"):
+                        with ui.row().classes("items-center mb-4"):
+                            ui.icon("tune", size="1.5rem").classes("text-blue-400")
+                            ui.label("Basic Settings").classes("font-bold text-lg ml-3 text-blue-300")
+
+                        self.symbols_input = ui.textarea(
+                            label="📈 Symbols (one per line)",
+                            placeholder="ICICIB22\nHDFCNEXT50\nMOTILALOSML\nNIFTYBEES",
+                            value="ICICIB22\nGOLDBEES"
+                        ).classes("w-full").props("outlined dense")
+
+                        with ui.row().classes("w-full gap-3"):
+                            self.start_date = ui.input("Start Date", value="2020-01-01").props(
+                                "outlined dense type=date").classes("flex-1 min-w-0")
+
+                            self.end_date = ui.input("End Date", value=datetime.now().strftime("%Y-%m-%d")).props(
+                                "outlined dense type=date").classes("flex-1 min-w-0")
+
+                        with ui.row().classes("w-full gap-3"):
+                            self.enable_monthly_limits = ui.checkbox("Enable Monthly Limits", value=True).classes("flex-1")
+                            self.max_monthly = ui.number(
+                                label="Max Amount in a Month (₹)",
+                                value=self.default_config["max_amount_in_a_month"] or 4 * self.default_config["fixed_investment"],
+                                min=1000, step=500
+                            ).classes("flex-1").props("outlined dense")
+
                 with ui.column().classes("flex-1"):
-                    ui.label("Basic Settings").classes("font-medium mb-2")
+                    with ui.card().classes("w-full p-4 mb-4"):
+                        with ui.row().classes("items-center mb-4"):
+                            ui.icon("psychology", size="1.5rem").classes("text-green-400")
+                            ui.label("Strategy Parameters").classes("font-bold text-lg ml-3 text-green-300")
 
-                    self.symbols_input = ui.textarea(
-                        label="📈 Symbols (one per line)",
-                        placeholder="ICICIB22\nHDFCNEXT50\nMOTILALOSML\nNIFTYBEES",
-                        value="ICICIB22\nGOLDBEES"
-                    ).classes("w-full")
+                        with ui.row().classes("w-full gap-3"):
+                            self.fixed_investment = ui.number(
+                                label="💰 Monthly Investment (₹)",
+                                value=self.default_config["fixed_investment"],
+                                min=1000, step=500
+                            ).classes("flex-1").props("outlined dense")
 
-                    with ui.row().classes("w-full gap-2"):
-                        self.start_date = ui.date(
-                            value="2020-01-01"
-                        ).classes("flex-1")
+                            self.fallback_day = ui.number(
+                                label="📅 Investment Day",
+                                value=self.default_config["fallback_day"],
+                                min=1, max=28, step=1
+                            ).classes("flex-1").props("outlined dense")
 
-                        self.end_date = ui.date(
-                            value=datetime.now().strftime("%Y-%m-%d")
-                        ).classes("flex-1")
+                            self.min_gap_days = ui.number(
+                                label="⏰ Min Gap (days)",
+                                value=self.default_config["min_investment_gap_days"],
+                                min=1, max=30, step=1
+                            ).classes("flex-1").props("outlined dense")
 
-                    self.enable_monthly_limits = ui.checkbox("Enable Monthly Limits", value=True).classes("mt-2")
+                        with ui.row().classes("w-full gap-3"):
+                            self.major_dd = ui.number(
+                                label="Major Drawdown (%)",
+                                value=self.default_config["major_drawdown_threshold"],
+                                min=-50, max=0, step=1
+                            ).classes("flex-1").props("outlined dense")
 
-                with ui.column().classes("flex-1"):
-                    ui.label("Strategy Parameters").classes("font-medium mb-2")
+                            self.major_mult = ui.number(
+                                label="Major Multiplier",
+                                value=self.default_config["major_drawdown_inv_multiplier"],
+                                min=1, max=10, step=0.5
+                            ).classes("flex-1").props("outlined dense")
 
-                    self.fixed_investment = ui.number(
-                        label="💰 Monthly Investment (₹)",
-                        value=self.default_config["fixed_investment"],
-                        min=1000, step=500
-                    ).classes("w-full")
+                        with ui.row().classes("w-full gap-3"):
+                            self.minor_dd = ui.number(
+                                label="Minor Drawdown (%)",
+                                value=self.default_config["minor_drawdown_threshold"],
+                                min=-20, max=0, step=1
+                            ).classes("flex-1").props("outlined dense")
 
-                    with ui.row().classes("w-full gap-2"):
-                        self.major_dd = ui.number(
-                            label="Major Drawdown (%)",
-                            value=self.default_config["major_drawdown_threshold"],
-                            min=-50, max=0, step=1
-                        ).classes("flex-1")
+                            self.minor_mult = ui.number(
+                                label="Minor Multiplier",
+                                value=self.default_config["minor_drawdown_inv_multiplier"],
+                                min=1, max=8, step=0.5
+                            ).classes("flex-1").props("outlined dense")
 
-                        self.major_mult = ui.number(
-                            label="Major Multiplier",
-                            value=self.default_config["major_drawdown_inv_multiplier"],
-                            min=1, max=10, step=0.5
-                        ).classes("flex-1")
+                        with ui.row().classes("w-full gap-3"):
+                            self.extreme_dd = ui.number(
+                                label="Extreme Drawdown (%)",
+                                value=self.default_config["extreme_drawdown_threshold"],
+                                min=-50, max=0, step=1
+                            ).classes("flex-1").props("outlined dense")
 
-                    with ui.row().classes("w-full gap-2"):
-                        self.minor_dd = ui.number(
-                            label="Minor Drawdown (%)",
-                            value=self.default_config["minor_drawdown_threshold"],
-                            min=-20, max=0, step=1
-                        ).classes("flex-1")
+                            self.extreme_mult = ui.number(
+                                label="Extreme Multiplier",
+                                value=self.default_config["extreme_drawdown_inv_multiplier"],
+                                min=1, max=10, step=0.5
+                            ).classes("flex-1").props("outlined dense")
 
-                        self.minor_mult = ui.number(
-                            label="Minor Multiplier",
-                            value=self.default_config["minor_drawdown_inv_multiplier"],
-                            min=1, max=8, step=0.5
-                        ).classes("flex-1")
+                        with ui.row().classes("w-full gap-3"):
+                            self.rolling_window = ui.number(
+                                label="🔄 Rolling Window (days)",
+                                value=self.default_config["rolling_window"],
+                                min=20, max=365, step=5
+                            ).classes("flex-1").props("outlined dense")
 
-                    with ui.row().classes("w-full gap-2"):
-                        self.extreme_dd = ui.number(
-                            label="Extreme Drawdown (%)",
-                            value=self.default_config["extreme_drawdown_threshold"],
-                            min=-50, max=0, step=1
-                        ).classes("flex-1")
+                            self.price_reduction_threshold = ui.number(
+                                label="📉 Price Reduction Threshold (%)",
+                                value=self.default_config["price_reduction_threshold"],
+                                min=1, max=10, step=0.5
+                            ).classes("flex-1").props("outlined dense")
 
-                        self.extreme_mult = ui.number(
-                            label="Extreme Multiplier",
-                            value=self.default_config["extreme_drawdown_inv_multiplier"],
-                            min=1, max=10, step=0.5
-                        ).classes("flex-1")
+        with ui.row().classes("w-full gap-4 mt-3 justify-center"):
+                    ui.button("🚀 RUN BACKTEST", icon="analytics", on_click=self.run_enhanced_backtest).classes(
+                        "bg-blue-500 text-white px-6 py-3 font-bold")
+                    ui.button("📈 COMPARE STRATEGIES", icon="compare_arrows", on_click=self.run_strategy_comparison).classes(
+                        "bg-green-500 text-white px-6 py-3 font-bold")
+                    ui.button("🗑️ CLEAR RESULTS", on_click=self.clear_results).classes(
+                        "bg-red-500 text-white px-4 py-2 rounded").props("outline")
+        # ui.button("🚀 RUN BACKTEST", icon="analytics", on_click=self.run_enhanced_backtest).classes(
+        #     "bg-blue-500 text-white px-6 py-3 font-bold")
+        # ui.button("📈 COMPARE STRATEGIES", icon="compare_arrows", on_click=self.run_strategy_comparison).classes(
+        #     "bg-green-500 text-white px-6 py-3 font-bold")
+        # ui.button("🗑️ CLEAR RESULTS", on_click=self.clear_results).classes(
+        #     "bg-red-500 text-white px-4 py-2 rounded").props("outline")
+        # # Action buttons
+        # with ui.card().classes("w-full p-4 mt-4"):
+        #     with ui.row().classes("w-full items-center justify-between mb-4"):
+        #         with ui.row().classes("items-center gap-3"):
+        #             ui.icon("rocket_launch", size="1.5rem").classes("text-orange-400")
+        #             ui.label("Backtest Actions").classes("font-bold text-lg text-orange-300")
+        #
+        #         ui.button("🗑️ Clear Results", on_click=self.clear_results).classes(
+        #             "bg-red-500 text-white px-4 py-2 rounded").props("outline")
+        #
+        #     with ui.row().classes("gap-4 w-full justify-center"):
+        #         ui.button("🚀 RUN BACKTEST", icon="analytics", on_click=self.run_enhanced_backtest).classes(
+        #             "bg-blue-500 text-white px-6 py-3 font-bold")
+        #         ui.button("📈 COMPARE STRATEGIES", icon="compare_arrows", on_click=self.run_strategy_comparison).classes(
+        #             "bg-green-500 text-white px-6 py-3 font-bold")
 
-                    with ui.row().classes("w-full gap-2"):
-                        self.fallback_day = ui.number(
-                            label="📅 Investment Day",
-                            value=self.default_config["fallback_day"],
-                            min=1, max=28, step=1
-                        ).classes("flex-1")
-
-                        self.min_gap_days = ui.number(
-                            label="⏰ Min Gap (days)",
-                            value=self.default_config["min_investment_gap_days"],
-                            min=1, max=30, step=1
-                        ).classes("flex-1")
-
-                    self.rolling_window = ui.number(
-                        label="🔄 Rolling Window (days)",
-                        value=self.default_config["rolling_window"],
-                        min=20, max=365, step=5
-                    ).classes("w-full")
-
-                    self.price_reduction_threshold = ui.number(
-                        label="📉 Price Reduction Threshold (%)",
-                        value=self.default_config["price_reduction_threshold"],
-                        min=1, max=10, step=0.5
-                    ).classes("w-full")
-
-                    self.max_monthly = ui.number(
-                        label="📅 Max Monthly Amount (₹)",
-                        value=self.default_config["fixed_investment"] * 4,
-                        min=1000, step=1000
-                    ).classes("w-full")
-
-        # Results container with clear button
-        self.results_container = ui.column().classes("w-full")
-
-        ui.button("🗑️ Clear Results", on_click=self.clear_results).classes("bg-red-500 text-white mb-2")
-
-        # Action buttons
-        with ui.row().classes("gap-4 mt-4"):
-            ui.button("🚀 Run Enhanced Backtest", on_click=self.run_enhanced_backtest).classes("bg-blue-600 text-white px-6 py-2")
-            ui.button("📈 Compare Strategies", on_click=self.run_strategy_comparison).classes("bg-purple-500 text-white px-4 py-2")
+        # Results container
+        self.results_container = ui.column().classes("w-full mt-4")
 
     async def run_enhanced_backtest(self):
         await self.clear_results()
@@ -600,7 +686,7 @@ class EnhancedSIPStrategy:
         """Multi-symbol portfolio creation interface with enhanced config"""
 
         ui.label("🎯 Multi-Symbol Portfolio Creation").classes("text-2xl font-bold mb-4")
-        ui.label("Create portfolios with multiple symbols, automatic allocation, and monthly limits").classes("text-gray-600 mb-6")
+        ui.label("Create portfolios with multiple symbols, automatic allocation, and monthly limits").classes("theme-text-primary mb-6")
 
         with ui.card().classes("w-full mb-6 p-6"):
             ui.label("Portfolio Configuration").classes("text-lg font-semibold mb-4")
@@ -773,49 +859,61 @@ class EnhancedSIPStrategy:
             "bg-purple-600 text-white px-6 py-2 mt-4")
 
     async def render_enhanced_portfolio_panel(self, fetch_api, user_storage):
-        """Enhanced portfolio management interface with GTT status"""
+        """Enhanced portfolio management interface with modern styling and GTT status"""
 
-        ui.label("💼 SIP Portfolio Management").classes("text-2xl font-bold mb-4")
+        # Header
+        with ui.card().classes("w-full mb-4"):
+            with ui.row().classes("w-full items-center p-4"):
+                ui.icon("account_balance_wallet", size="2rem").classes("text-green-400")
+                with ui.column().classes("ml-4 gap-2"):
+                    ui.label("💼 SIP Portfolio Management").classes("text-xl font-bold")
+                    ui.label("Create and manage your systematic investment portfolios").classes("text-sm text-slate-300")
 
-        # Single symbol portfolio creation with enhanced config
-        with ui.card().classes("w-full mb-6 p-6"):
-            ui.label("Create Single-Symbol Portfolio").classes("text-lg font-semibold mb-4")
+        # Single symbol portfolio creation
+        with ui.card().classes("w-full mb-4"):
+            with ui.row().classes("w-full items-center p-4 border-b border-slate-600/30"):
+                ui.icon("add_circle", size="1.5rem").classes("text-cyan-400")
+                ui.label("Create Single-Symbol Portfolio").classes("text-lg ml-3 font-bold")
 
-            with ui.row().classes("w-full gap-4"):
-                symbol_input = ui.input(
-                    label="📈 Symbol",
-                    placeholder="ICICIB22"
-                ).classes("flex-1")
+                ui.chip("Quick Setup", icon="speed", color="positive").classes("text-sm px-3 py-1").props("outline")
+            
+            with ui.column().classes("p-4 gap-4"):
 
-                portfolio_name_input = ui.input(
-                    label="📁 Portfolio Name (optional)",
-                    placeholder="My ICICI Bank SIP"
-                ).classes("flex-1")
+                with ui.row().classes("w-full gap-4"):
+                    symbol_input = ui.input(
+                        label="📈 Symbol",
+                        placeholder="ICICIB22"
+                    ).classes("flex-1").props("outlined dense")
 
-            with ui.row().classes("w-full gap-4 mt-4"):
-                investment_amount = ui.number(
-                    label="💰 Monthly Investment (₹)",
-                    value=5000,
-                    min=500, step=500
-                ).classes("flex-1")
+                    portfolio_name_input = ui.input(
+                        label="📁 Portfolio Name (optional)",
+                        placeholder="My ICICI Bank SIP"
+                    ).classes("flex-1").props("outlined dense")
 
-                fallback_day = ui.number(
-                    label="📅 Investment Day",
-                    value=22,
-                    min=1, max=28
-                ).classes("flex-1")
+                with ui.row().classes("w-full gap-4 mt-4"):
+                    investment_amount = ui.number(
+                        label="💰 Monthly Investment (₹)",
+                        value=5000,
+                        min=500, step=500
+                    ).classes("flex-1").props("outlined dense")
 
-                min_gap = ui.number(
-                    label="⏰ Min Gap (days)",
-                    value=5,
-                    min=1, max=30
-                ).classes("flex-1")
+                    fallback_day = ui.number(
+                        label="📅 Investment Day",
+                        value=22,
+                        min=1, max=28
+                    ).classes("flex-1").props("outlined dense")
 
-            max_monthly = ui.number(
-                label="📅 Max Monthly Amount (₹)",
-                value=20000,
-                min=1000, step=1000
-            ).classes("w-full mt-2")
+                    min_gap = ui.number(
+                        label="⏰ Min Gap (days)",
+                        value=5,
+                        min=1, max=30
+                    ).classes("flex-1").props("outlined dense")
+
+                max_monthly = ui.number(
+                    label="📅 Max Monthly Amount (₹)",
+                    value=20000,
+                    min=1000, step=1000
+                ).classes("w-full mt-4").props("outlined dense")
 
             async def create_single_portfolio():
                 try:
@@ -858,10 +956,19 @@ class EnhancedSIPStrategy:
                 except Exception as e:
                     ui.notify(f"❌ Error creating portfolio: {str(e)}", type="negative")
 
-            ui.button("✨ Create Portfolio", on_click=create_single_portfolio).classes("bg-blue-500 text-white mt-4")
+                with ui.row().classes("w-full justify-center mt-4"):
+                    ui.button("✨ Create Portfolio", icon="add_circle", on_click=create_single_portfolio).classes(
+                        "bg-blue-500 text-white px-6 py-3 font-bold")
 
         # Existing portfolios
-        portfolios_container = ui.column().classes("w-full")
+        with ui.card().classes("w-full mt-4"):
+            with ui.row().classes("w-full items-center p-4 border-b border-slate-600/30"):
+                ui.icon("folder", size="1.5rem").classes("text-green-400")
+                ui.label("Your SIP Portfolios").classes("text-lg ml-3 font-bold")
+
+                ui.chip("Active", icon="trending_up", color="positive").classes("text-sm px-3 py-1").props("outline")
+            
+            portfolios_container = ui.column().classes("w-full p-4 gap-4")
 
         async def refresh_portfolios():
             """Refresh portfolio list with enhanced display including GTT status"""
@@ -874,25 +981,29 @@ class EnhancedSIPStrategy:
                     self.active_portfolios = portfolios
 
                     with portfolios_container:
-                        ui.label("📊 Your SIP Portfolios").classes("text-lg font-semibold mb-4")
-
                         for portfolio in portfolios:
                             await self.render_enhanced_portfolio_card(portfolio, fetch_api, refresh_portfolios)
                 else:
                     with portfolios_container:
-                        ui.label("📝 No portfolios found. Create your first SIP portfolio above!").classes(
-                            "text-gray-500 text-center py-8")
+                        with ui.column().classes("w-full items-center py-12 gap-4"):
+                            ui.icon("portfolio", size="3rem").classes("text-slate-400")
+                            ui.label("No portfolios found").classes("text-lg font-medium text-slate-300")
+                            ui.label("Create your first SIP portfolio above to get started!").classes(
+                                "text-sm text-slate-400 text-center")
 
             except Exception as e:
                 logger.error(f"Error fetching portfolios: {e}")
                 with portfolios_container:
-                    ui.label("❌ Error loading portfolios").classes("text-red-500")
+                    with ui.column().classes("w-full items-center py-8 gap-3"):
+                        ui.icon("error", size="2rem").classes("text-red-400")
+                        ui.label("❌ Error loading portfolios").classes("text-lg font-medium text-red-400")
+                        ui.label("Please try refreshing the page").classes("text-sm text-slate-400")
 
         # Load portfolios on page load
         await refresh_portfolios()
 
         # Refresh button
-        ui.button("🔄 Refresh Portfolios", on_click=refresh_portfolios).classes("bg-gray-500 text-white mt-4")
+        ui.button("🔄 Refresh Portfolios", on_click=refresh_portfolios).classes("bg-gray-500 text-white mt-4 px-4 py-2 rounded")
 
     async def render_enhanced_portfolio_card(self, portfolio, fetch_api, refresh_callback):
         """Render enhanced portfolio card with GTT status and monthly tracking"""
@@ -928,9 +1039,9 @@ class EnhancedSIPStrategy:
                             [f"{s['symbol']} ({s['allocation_percentage']}%)" for s in symbols[:3]])
                         if len(symbols) > 3:
                             symbols_text += f" +{len(symbols) - 3} more"
-                        ui.label(f"Symbols: {symbols_text}").classes("text-sm text-gray-600")
+                        ui.label(f"Symbols: {symbols_text}").classes("text-sm theme-text-primary")
                     elif symbols:
-                        ui.label(f"Symbol: {symbols[0]['symbol']}").classes("text-sm text-gray-600")
+                        ui.label(f"Symbol: {symbols[0]['symbol']}").classes("text-sm theme-text-primary")
 
                 # Performance metrics
                 with ui.column().classes("text-right"):
@@ -996,7 +1107,7 @@ class EnhancedSIPStrategy:
             with ui.dialog() as dialog, ui.card():
                 ui.label("⏸️ Cancel SIP Portfolio").classes("text-lg font-bold mb-4")
                 ui.label("This will stop future automated investments but keep the portfolio data.").classes(
-                    "text-gray-600 mb-4")
+                    "theme-text-primary mb-4")
                 ui.label("You can still manually invest or reactivate later.").classes("text-blue-600 mb-4")
 
                 with ui.row().classes("gap-2"):
@@ -1130,7 +1241,7 @@ class EnhancedSIPStrategy:
                         ui.label(f"📅 Next Fallback Date: {next_fallback}").classes("text-sm text-blue-600 mt-4")
 
                 else:
-                    ui.label("📊 No immediate signals detected").classes("text-gray-600")
+                    ui.label("📊 No immediate signals detected").classes("theme-text-primary")
                     ui.label("Market conditions appear normal for regular SIP investment").classes(
                         "text-sm text-gray-500")
 
@@ -1186,9 +1297,10 @@ class EnhancedSIPStrategy:
                         else:
                             ui.notify(f"❌ Investment failed: {error_msg}", type="negative")
 
-                with ui.row().classes("gap-2 mt-4"):
-                    ui.button("Cancel", on_click=dialog.close).classes("bg-gray-500 text-white")
-                    ui.button("💰 Invest Now", on_click=execute_investment).classes("bg-green-500 text-white")
+                with ui.row().classes("gap-4 mt-6 justify-center"):
+                    ui.button("Cancel", on_click=dialog.close).classes("btn-modern-danger").props("outline")
+                    ui.button("💰 Invest Now", icon="trending_up", on_click=execute_investment).classes(
+                        "btn-modern-success px-8 py-3")
 
             dialog.open()
 
@@ -1196,12 +1308,27 @@ class EnhancedSIPStrategy:
             ui.notify(f"❌ Error showing investment dialog: {str(e)}", type="negative")
 
     async def render_enhanced_signals_panel(self, fetch_api, user_storage):
-        """Enhanced signals panel with real-time updates and GTT status"""
+        """Enhanced signals panel with modern styling and real-time updates"""
 
-        ui.label("📡 Investment Signals Dashboard").classes("text-2xl font-bold mb-4")
-        ui.label("Monitor investment opportunities across all your portfolios with GTT status").classes("text-gray-600 mb-6")
-
-        signals_container = ui.column().classes("w-full")
+        # Header
+        with ui.card().classes("w-full mb-4"):
+            with ui.row().classes("w-full items-center p-4"):
+                ui.icon("notifications_active", size="2rem").classes("text-orange-400")
+                with ui.column().classes("ml-4 gap-2"):
+                    ui.label("📡 Investment Signals Dashboard").classes("text-xl font-bold")
+                    ui.label("Monitor investment opportunities across all your portfolios").classes("text-sm text-slate-300")
+        
+        # Control panel for signal refresh
+        with ui.card().classes("w-full mb-4 p-4"):
+            with ui.row().classes("w-full items-center justify-between"):
+                with ui.row().classes("items-center gap-3"):
+                    ui.icon("refresh", size="1.2rem").classes("text-cyan-400")
+                    ui.label("Signal Controls").classes("font-bold text-lg")
+                
+                ui.button("Refresh Signals", icon="refresh", on_click=lambda: refresh_signals()).classes(
+                    "bg-blue-500 text-white px-4 py-2 rounded font-semibold")
+        
+        signals_container = ui.column().classes("w-full gap-4")
 
         async def refresh_signals():
             """Refresh all signals with enhanced display including GTT"""
@@ -1212,20 +1339,26 @@ class EnhancedSIPStrategy:
 
                 if signals:
                     with signals_container:
-                        ui.label(f"📊 Found {len(signals['signals'])} Active Signals").classes("text-lg font-semibold mb-4")
+                        with ui.card().classes("w-full p-4 mb-4"):
+                            with ui.row().classes("w-full items-center gap-3"):
+                                ui.icon("signal_cellular_alt", size="1.5rem").classes("text-green-400")
+                                ui.label(f"📊 Found {len(signals['signals'])} Active Signals").classes("text-lg font-bold")
+
+                                ui.chip(f"{len(signals['signals'])}", color="positive").classes("text-sm px-3 py-1").props("outline")
 
                         for signal in signals['signals']:
                             await self.render_signal_card(signal)
                 else:
                     with signals_container:
                         with ui.card().classes("w-full p-8 text-center"):
-                            ui.label("🔍 No active signals found").classes("text-lg text-gray-500")
-                            ui.label("Check back later or trigger manual scan").classes("text-sm text-gray-400")
+                            ui.icon("search_off", size="2rem").classes("text-slate-400 mb-3")
+                            ui.label("🔍 No active signals found").classes("text-lg font-bold text-slate-300 mb-2")
+                            ui.label("Check back later or trigger manual scan").classes("text-sm text-slate-400")
 
             except Exception as e:
                 self.show_error("Failed to refresh signals", str(e))
 
-        ui.button("🔄 Refresh Signals", on_click=refresh_signals).classes("bg-blue-500 text-white mb-4")
+        # Remove duplicate button as it's already in the control panel above
 
         await refresh_signals()
 
@@ -1246,10 +1379,10 @@ class EnhancedSIPStrategy:
             'NORMAL': 'border-gray-500'
         }.get(signal_type, 'border-gray-500')
 
-        with ui.card().classes(f"w-full mb-4 p-4 border-l-4 {card_color}"):
+        with ui.card().classes("w-full mb-3 p-3"):
             with ui.row().classes("w-full justify-between items-center"):
-                ui.label(f"📡 {symbol} Signal").classes("text-lg font-bold")
-                ui.label(signal_type).classes("text-sm font-medium px-2 py-1 rounded bg-gray-100")
+                ui.label(f"📡 {symbol} Signal").classes("text-base font-bold")
+                ui.label(signal_type).classes("text-xs font-medium px-2 py-1 rounded bg-gray-100")
 
             ui.label(f"💰 Recommended: ₹{recommended_amount:,.0f}").classes("text-sm")
             ui.label(f"📈 Price: ₹{current_price:.2f}").classes("text-sm")
@@ -1265,21 +1398,24 @@ class EnhancedSIPStrategy:
         """Enhanced batch multi-configs backtest UI aligned with endpoint response"""
 
         ui.label("🔄 Batch Backtest with Multiple Configurations").classes("text-lg font-bold mb-4")
-        ui.label("Test multiple strategy configurations in batch and find the best one").classes("text-gray-600 mb-4")
-
-        symbols_input = ui.textarea(
-            label="Symbols (one per line)",
-            value="ICICIB22\nCPSEETF",
-            placeholder="Enter symbols separated by new lines"
-        ).classes("w-full mb-4")
+        ui.label("Test multiple strategy configurations in batch and find the best one").classes("theme-text-primary mb-4")
 
         with ui.row().classes("gap-4 mb-4"):
-            start_date = ui.date(value="2020-01-01")
-            end_date = ui.date(value=datetime.now().strftime("%Y-%m-%d"))
+            symbols_input = ui.textarea(
+                label="Symbols (one per line)",
+                value="ICICIB22\nCPSEETF",
+                placeholder="Enter symbols separated by new lines"
+            ).classes("flex-1 mb-4")
 
-            # FIXED: Use individual input fields instead of editable table for better UX
-            ui.label("⚙️ Configuration Management").classes("text-lg font-bold mb-2")
-            ui.label("Add and customize multiple configurations to test").classes("text-gray-600 mb-4")
+            start_date = ui.input("Start Date", value="2020-01-01").props("dense type=date").classes("flex-1 min-w-0")
+            end_date = ui.input("End Date", value=datetime.now().strftime("%Y-%m-%d")).props(
+                "dense type=date").classes("flex-1 min-w-0")
+
+        with ui.row().classes("gap-4 mb-4"):
+            with ui.column().classes("flex-1"):
+                # FIXED: Use individual input fields instead of editable table for better UX
+                ui.label("⚙️ Configuration Management").classes("text-lg font-bold mb-.5")
+                ui.label("Add and customize multiple configurations to test").classes("theme-text-primary mb-1")
 
             # Configuration storage
             configs_data = []
@@ -1583,7 +1719,7 @@ class EnhancedSIPStrategy:
             except Exception as e:
                 self.show_error("Batch backtest failed", str(e))
 
-        ui.button("🚀 Run Batch Backtest", on_click=run_batch_multi).classes("bg-blue-600 text-white px-6 py-2")
+        ui.button("🚀 Run Batch Backtest", on_click=run_batch_multi).classes("bg-blue-600 text-white px-1 py-2")
 
         # Configuration summary
         with ui.card().classes("w-full mt-4 p-4 bg-gray-50"):
@@ -1598,7 +1734,7 @@ class EnhancedSIPStrategy:
                         summary_text += f"DD: {config['minor_drawdown_threshold']:.1f}%/{config['major_drawdown_threshold']:.1f}%/{config['extreme_drawdown_threshold']:.1f}%, "
                         summary_text += f"Mult: {config['minor_drawdown_inv_multiplier']:.1f}x/{config['major_drawdown_inv_multiplier']:.1f}x/{config['extreme_drawdown_inv_multiplier']:.1f}x\n"
 
-                    ui.label(summary_text.strip()).classes("text-xs text-gray-600 whitespace-pre-line")
+                    ui.label(summary_text.strip()).classes("text-xs theme-text-primary whitespace-pre-line")
                 else:
                     ui.label("No configurations added").classes("text-gray-500")
 
@@ -1822,7 +1958,7 @@ class EnhancedSIPStrategy:
         """Render config optimization section"""
 
         ui.label("⚙️ Optimize Configuration").classes("text-lg font-bold mb-1")
-        ui.label("Find the optimal strategy parameters based on historical data").classes("text-gray-600 mb-4")
+        ui.label("Find the optimal strategy parameters based on historical data").classes("theme-text-primary mb-4")
 
         with ui.row().classes("gap-2 mb-2"):
             with ui.column().classes("w-full"):
@@ -1894,7 +2030,7 @@ class EnhancedSIPStrategy:
         """Render quick test section"""
 
         ui.label("⚡ Quick SIP Test").classes("text-lg font-bold mb-4")
-        ui.label("Rapid analysis with benchmark comparison").classes("text-gray-600 mb-4")
+        ui.label("Rapid analysis with benchmark comparison").classes("theme-text-primary mb-4")
 
         symbols_input = ui.textarea(
             label="Symbols (one per line)",
@@ -1902,8 +2038,9 @@ class EnhancedSIPStrategy:
         ).classes("w-full mb-4")
 
         with ui.row().classes("gap-4"):
-            start_date = ui.date(value="2023-01-01")
-            end_date = ui.date(value=datetime.now().strftime("%Y-%m-%d"))
+            start_date = ui.input("Start Date", value="2023-01-01").props("dense type=date").classes("flex-1 min-w-0")
+            end_date = ui.input("End Date", value=datetime.now().strftime("%Y-%m-%d")).props(
+                "dense type=date").classes("flex-1 min-w-0")
             investment_amount = ui.number(label="Investment Amount (₹)", value=5000, min=1000)
 
         quick_results = ui.column().classes("w-full mt-4")
@@ -1945,13 +2082,14 @@ class EnhancedSIPStrategy:
         """Render benchmark test section with full metrics"""
 
         ui.label("📊 Benchmark Test").classes("text-lg font-bold mb-4")
-        ui.label("Test fixed SIP benchmark performance").classes("text-gray-600 mb-4")
+        ui.label("Test fixed SIP benchmark performance").classes("theme-text-primary mb-4")
 
         symbol_input = ui.input(label="ICICI Bank Symbol", placeholder="ICICIB22").classes("w-full mb-4")
 
         with ui.row().classes("gap-4"):
-            start_date = ui.date(value="2023-01-01")
-            end_date = ui.date(value=datetime.now().strftime("%Y-%m-%d"))
+            start_date = ui.input("Start Date", value="2023-01-01").props("dense type=date").classes("flex-1 min-w-0")
+            end_date = ui.input("End Date", value=datetime.now().strftime("%Y-%m-%d")).props(
+                "dense type=date").classes("flex-1 min-w-0")
             monthly_amount = ui.number(label="Monthly Amount (₹)", value=5000, min=1000)
             investment_day = ui.number(label="Investment Day", value=15, min=1, max=28)
 
@@ -1991,7 +2129,7 @@ class EnhancedSIPStrategy:
         """Render symbols search section"""
 
         ui.label("🔍 Search Available Symbols").classes("text-lg font-bold mb-4")
-        ui.label("Search and view available symbols for backtesting").classes("text-gray-600 mb-4")
+        ui.label("Search and view available symbols for backtesting").classes("theme-text-primary mb-4")
 
         symbol_search_input = ui.input(
             label="Search Symbols",
@@ -2087,19 +2225,19 @@ class EnhancedSIPStrategy:
 
                 with ui.grid(columns=4).classes("w-full gap-4"):
                     with ui.card().classes("p-4 text-center"):
-                        ui.label("📈 Symbols").classes("text-sm text-gray-600")
+                        ui.label("📈 Symbols").classes("text-sm theme-text-primary")
                         ui.label(str(total_symbols)).classes("text-2xl font-bold text-blue-600")
 
                     with ui.card().classes("p-4 text-center"):
-                        ui.label("💰 Total Investment").classes("text-sm text-gray-600")
+                        ui.label("💰 Total Investment").classes("text-sm theme-text-primary")
                         ui.label(f"₹{total_investment:,.0f}").classes("text-2xl font-bold text-green-600")
 
                     with ui.card().classes("p-4 text-center"):
-                        ui.label("💎 Final Value").classes("text-sm text-gray-600")
+                        ui.label("💎 Final Value").classes("text-sm theme-text-primary")
                         ui.label(f"₹{total_final_value:,.0f}").classes("text-2xl font-bold text-purple-600")
 
                     with ui.card().classes("p-4 text-center"):
-                        ui.label("📈 Avg CAGR").classes("text-sm text-gray-600")
+                        ui.label("📈 Avg CAGR").classes("text-sm theme-text-primary")
                         cagr_color = "text-green-600" if avg_cagr >= 0 else "text-red-600"
                         ui.label(f"{avg_cagr:.2f}%").classes(f"text-2xl font-bold {cagr_color}")
 
@@ -2143,33 +2281,33 @@ class EnhancedSIPStrategy:
 
                     with ui.grid(columns=4).classes("w-full gap-4 mb-4"):
                         with ui.column():
-                            ui.label("💰 Investment").classes("text-xs text-gray-600")
+                            ui.label("💰 Investment").classes("text-xs theme-text-primary")
                             ui.label(f"₹{total_investment:,.0f}").classes("text-sm font-bold")
 
-                            ui.label("💎 Final Value").classes("text-xs text-gray-600 mt-2")
+                            ui.label("💎 Final Value").classes("text-xs theme-text-primary mt-2")
                             ui.label(f"₹{final_value:,.0f}").classes("text-sm font-bold")
 
                         with ui.column():
-                            ui.label("📊 Total Return").classes("text-xs text-gray-600")
+                            ui.label("📊 Total Return").classes("text-xs theme-text-primary")
                             return_color = "text-green-600" if total_return >= 0 else "text-red-600"
                             ui.label(f"{total_return:+.2f}%").classes(f"text-sm font-bold {return_color}")
 
-                            ui.label("📈 CAGR").classes("text-xs text-gray-600 mt-2")
+                            ui.label("📈 CAGR").classes("text-xs theme-text-primary mt-2")
                             cagr_color = "text-green-600" if cagr >= 8 else "text-red-600"
                             ui.label(f"{cagr:.2f}%").classes(f"text-sm font-bold {cagr_color}")
 
                         with ui.column():
-                            ui.label("🔄 Total Trades").classes("text-xs text-gray-600")
+                            ui.label("🔄 Total Trades").classes("text-xs theme-text-primary")
                             ui.label(str(num_trades)).classes("text-sm font-bold")
 
-                            ui.label("Trade Breakdown").classes("text-xs text-gray-600 mt-2")
+                            ui.label("Trade Breakdown").classes("text-xs theme-text-primary mt-2")
                             ui.label(f"Regular: {trade_breakdown.get('regular_trades', 0)} | Extreme: {trade_breakdown.get('extreme_trades', 0)}").classes("text-xs")
 
                         with ui.column():
-                            ui.label("📅 Monthly Limit Exceeded").classes("text-xs text-gray-600")
+                            ui.label("📅 Monthly Limit Exceeded").classes("text-xs theme-text-primary")
                             ui.label(str(monthly_limit_exceeded)).classes("text-sm font-bold")
 
-                            ui.label("🚫 Price Threshold Skipped").classes("text-xs text-gray-600 mt-2")
+                            ui.label("🚫 Price Threshold Skipped").classes("text-xs theme-text-primary mt-2")
                             ui.label(str(price_threshold_skipped)).classes("text-sm font-bold")
 
                     ui.label(f"📅 Period: {period}").classes("text-sm")
@@ -2462,22 +2600,22 @@ class EnhancedSIPStrategy:
                     ui.label("📊 Performance Summary").classes("text-lg font-semibold mb-2")
                     with ui.grid(columns=4).classes("w-full gap-4"):
                         with ui.card().classes("p-3 text-center"):
-                            ui.label("Strategy Return").classes("text-sm text-gray-600")
+                            ui.label("Strategy Return").classes("text-sm theme-text-primary")
                             color = "text-green-600" if strategy_return >= 0 else "text-red-600"
                             ui.label(f"{strategy_return:+.2f}%").classes(f"text-lg font-bold {color}")
 
                         with ui.card().classes("p-3 text-center"):
-                            ui.label("Benchmark Return").classes("text-sm text-gray-600")
+                            ui.label("Benchmark Return").classes("text-sm theme-text-primary")
                             color = "text-green-600" if benchmark_return >= 0 else "text-red-600"
                             ui.label(f"{benchmark_return:+.2f}%").classes(f"text-lg font-bold {color}")
 
                         with ui.card().classes("p-3 text-center"):
-                            ui.label("Outperformance").classes("text-sm text-gray-600")
+                            ui.label("Outperformance").classes("text-sm theme-text-primary")
                             color = "text-green-600" if outperformance >= 0 else "text-red-600"
                             ui.label(f"{outperformance:+.2f}%").classes(f"text-lg font-bold {color}")
 
                         with ui.card().classes("p-3 text-center"):
-                            ui.label("Final Portfolio").classes("text-sm text-gray-600")
+                            ui.label("Final Portfolio").classes("text-sm theme-text-primary")
                             ui.label(f"₹{strategy_final:,.0f}").classes("text-lg font-bold text-blue-600")
 
                 ui.plotly(fig).classes("w-full flex-1")
@@ -2491,24 +2629,27 @@ class EnhancedSIPStrategy:
     async def render_enhanced_analytics_panel(self, fetch_api, user_storage):
         """Enhanced analytics panel with comprehensive portfolio insights and benchmarks"""
 
-        ui.label("📈 Portfolio Analytics Dashboard").classes("text-2xl font-bold mb-4")
-        ui.label("Comprehensive analysis of your SIP portfolio performance with benchmarks").classes("text-gray-600 mb-6")
+        ui.label("📈 Portfolio Analytics Dashboard").classes("text-xl font-bold mb-4")
+        ui.label("Comprehensive analysis of your SIP portfolio performance").classes("text-sm text-slate-300 mb-4")
 
         # Portfolio selector
         portfolios = await self.safe_api_call(fetch_api, "/sip/portfolio")
 
         if not portfolios:
             with ui.card().classes("w-full p-8 text-center"):
-                ui.label("📊 No portfolios found").classes("text-lg text-gray-500")
-                ui.label("Create a portfolio first to view analytics").classes("text-sm text-gray-400")
+                ui.icon("analytics", size="2rem").classes("text-slate-400 mb-3")
+                ui.label("📊 No portfolios found").classes("text-lg font-bold text-slate-300 mb-2")
+                ui.label("Create a portfolio first to view analytics").classes("text-sm text-slate-400")
             return
 
         portfolio_options = {
             p['portfolio_id']: f"{p.get('portfolio_name', 'Unnamed')} ({p.get('portfolio_type', 'single')})"
             for p in portfolios}
 
-        with ui.card().classes("w-full p-4 mb-6"):
-            ui.label("Select Portfolio for Analysis").classes("font-bold mb-2")
+        with ui.card().classes("w-full p-4 mb-4"):
+            with ui.row().classes("w-full items-center mb-3"):
+                ui.icon("folder", size="1.5rem").classes("text-blue-400")
+                ui.label("Select Portfolio for Analysis").classes("font-bold text-lg ml-3")
 
             selected_portfolio = ui.select(
                 options=portfolio_options,
@@ -2546,14 +2687,14 @@ class EnhancedSIPStrategy:
         await load_analytics()
 
         # Refresh button
-        ui.button("🔄 Refresh Analytics", on_click=load_analytics).classes("bg-blue-500 text-white mt-4")
+        ui.button("🔄 Refresh Analytics", on_click=load_analytics).classes("bg-blue-500 text-white px-4 py-2 rounded font-semibold mt-4")
 
     async def display_portfolio_analytics(self, analytics, container):
         """Display comprehensive portfolio analytics with benchmarks"""
 
         with container:
             portfolio_name = analytics.get('portfolio_name', 'Portfolio')
-            ui.label(f"📊 Analytics for {portfolio_name}").classes("text-xl font-bold mb-4")
+            ui.label(f"📊 Analytics for {portfolio_name}").classes("text-lg font-bold mb-4")
 
             # Overview metrics
             total_invested = analytics.get('total_invested', 0)
@@ -2563,35 +2704,35 @@ class EnhancedSIPStrategy:
             days_invested = analytics.get('days_invested', 0)
             total_trades = analytics.get('total_trades', 0)
 
-            with ui.card().classes("w-full p-6 mb-6 bg-gradient-to-r from-purple-50 to-blue-50"):
+            with ui.card().classes("w-full p-4 mb-4"):
                 ui.label("📈 Performance Overview").classes("text-lg font-bold mb-4")
 
-                with ui.grid(columns=3).classes("w-full gap-6"):
+                with ui.grid(columns=3).classes("w-full gap-4"):
                     # Investment metrics
-                    with ui.card().classes("p-4 text-center bg-white"):
-                        ui.label("💰 Total Invested").classes("text-sm text-gray-600")
-                        ui.label(f"₹{total_invested:,.0f}").classes("text-xl font-bold text-blue-600")
+                    with ui.card().classes("p-4 text-center"):
+                        ui.label("💰 Total Invested").classes("text-sm text-slate-400")
+                        ui.label(f"₹{total_invested:,.0f}").classes("text-lg font-bold text-blue-400")
 
-                        ui.label("💎 Current Value").classes("text-sm text-gray-600 mt-2")
-                        ui.label(f"₹{current_value:,.0f}").classes("text-xl font-bold text-green-600")
+                        ui.label("💎 Current Value").classes("text-sm text-slate-400 mt-2")
+                        ui.label(f"₹{current_value:,.0f}").classes("text-lg font-bold text-green-400")
 
                     # Returns metrics
-                    with ui.card().classes("p-4 text-center bg-white"):
-                        ui.label("📊 Total Return").classes("text-sm text-gray-600")
-                        return_color = "text-green-600" if total_return_pct >= 0 else "text-red-600"
-                        ui.label(f"{total_return_pct:+.2f}%").classes(f"text-xl font-bold {return_color}")
+                    with ui.card().classes("p-4 text-center"):
+                        ui.label("📊 Total Return").classes("text-sm text-slate-400")
+                        return_color = "text-green-400" if total_return_pct >= 0 else "text-red-400"
+                        ui.label(f"{total_return_pct:+.2f}%").classes(f"text-lg font-bold {return_color}")
 
-                        ui.label("📈 CAGR").classes("text-sm text-gray-600 mt-2")
-                        cagr_color = "text-green-600" if cagr_pct >= 8 else "text-red-600"
-                        ui.label(f"{cagr_pct:.2f}%").classes(f"text-xl font-bold {cagr_color}")
+                        ui.label("📈 CAGR").classes("text-sm text-slate-400 mt-2")
+                        cagr_color = "text-green-400" if cagr_pct >= 8 else "text-red-400"
+                        ui.label(f"{cagr_pct:.2f}%").classes(f"text-lg font-bold {cagr_color}")
 
                     # Activity metrics
-                    with ui.card().classes("p-4 text-center bg-white"):
-                        ui.label("📅 Days Invested").classes("text-sm text-gray-600")
-                        ui.label(str(days_invested)).classes("text-xl font-bold text-purple-600")
+                    with ui.card().classes("p-4 text-center"):
+                        ui.label("📅 Days Invested").classes("text-sm text-slate-400")
+                        ui.label(str(days_invested)).classes("text-lg font-bold text-purple-400")
 
-                        ui.label("🔄 Total Trades").classes("text-sm text-gray-600 mt-2")
-                        ui.label(str(total_trades)).classes("text-xl font-bold text-orange-600")
+                        ui.label("🔄 Total Trades").classes("text-sm text-slate-400 mt-2")
+                        ui.label(str(total_trades)).classes("text-lg font-bold text-orange-400")
 
             # Symbol-wise analytics (for multi-symbol portfolios)
             symbols_analytics = analytics.get('symbols_analytics', {})
@@ -2603,7 +2744,7 @@ class EnhancedSIPStrategy:
                         with ui.row().classes("w-full justify-between items-center"):
                             ui.label(f"📈 {symbol}").classes("text-lg font-bold")
                             ui.label(f"Allocation: {symbol_data.get('allocation_percent', 0):.1f}%").classes(
-                                "text-sm text-gray-600")
+                                "text-sm text-slate-400")
 
                         with ui.grid(columns=4).classes("w-full gap-4 mt-4"):
                             ui.label(f"Invested: ₹{symbol_data.get('invested', 0):,.0f}").classes("text-sm")
@@ -2611,14 +2752,14 @@ class EnhancedSIPStrategy:
                             ui.label(f"Avg Price: ₹{symbol_data.get('avg_buy_price', 0):.2f}").classes("text-sm")
 
                             return_pct = symbol_data.get('return_percent', 0)
-                            return_color = "text-green-600" if return_pct >= 0 else "text-red-600"
+                            return_color = "text-green-400" if return_pct >= 0 else "text-red-400"
                             ui.label(f"Return: {return_pct:+.2f}%").classes(f"text-sm {return_color}")
 
     async def render_enhanced_config_panel(self, fetch_api, user_storage):
         """Enhanced configuration panel with all user input parameters - FIXED VERSION"""
 
-        ui.label("⚙️ Enhanced SIP Configuration").classes("text-2xl font-bold mb-4")
-        ui.label("Complete configuration including all strategy parameters").classes("text-gray-600 mb-6")
+        ui.label("⚙️ Enhanced SIP Configuration").classes("text-xl font-bold mb-4")
+        ui.label("Complete configuration including all strategy parameters").classes("text-sm text-slate-300 mb-4")
 
         # Load current configuration
         try:
@@ -2638,8 +2779,8 @@ class EnhancedSIPStrategy:
             }
 
         # FIXED: Complete configuration form with all parameters
-        with ui.card().classes("w-full max-w-4xl mx-auto p-6"):
-            ui.label("💰 Investment Parameters").classes("text-lg font-semibold mb-4")
+        with ui.card().classes("w-full max-w-4xl mx-auto p-4"):
+            ui.label("💰 Investment Parameters").classes("text-lg font-bold mb-4")
 
             with ui.grid(columns=2).classes("w-full gap-6"):
                 # Left column - Basic Investment Settings
@@ -2697,35 +2838,35 @@ class EnhancedSIPStrategy:
                     ).classes("w-full")
 
         # FIXED: Enhanced parameter explanations
-        with ui.card().classes("w-full max-w-4xl mx-auto p-6 mt-6 bg-blue-50"):
-            ui.label("📚 Parameter Explanations").classes("text-lg font-semibold mb-4")
+        with ui.card().classes("w-full max-w-4xl mx-auto p-4 mt-4"):
+            ui.label("📚 Parameter Explanations").classes("text-xl font-bold mb-6 theme-header-text")
 
             with ui.grid(columns=2).classes("w-full gap-4"):
                 with ui.column():
                     ui.label("🔄 Rolling Window").classes("font-medium")
                     ui.label(
                         "Number of days to look back for calculating moving averages and market conditions. Higher values = smoother signals, lower values = more responsive.").classes(
-                        "text-sm text-gray-600 mb-3")
+                        "text-sm theme-text-primary mb-3")
 
                     ui.label("📉 Price Reduction Threshold").classes("font-medium")
                     ui.label(
                         "Minimum price drop (%) required for additional investments within the same month. Prevents over-investing on minor fluctuations.").classes(
-                        "text-sm text-gray-600 mb-3")
+                        "text-sm theme-text-primary mb-3")
 
                 with ui.column():
                     ui.label("📅 Max Monthly Investment").classes("font-medium")
                     ui.label(
                         "Maximum amount to invest per symbol per month. Usually 3-5x the fixed investment amount for drawdown opportunities.").classes(
-                        "text-sm text-gray-600 mb-3")
+                        "text-sm theme-text-primary mb-3")
 
                     ui.label("⏱️ Min Investment Gap").classes("font-medium")
                     ui.label(
                         "Minimum days between investments to avoid frequent trading and allow market movements to develop.").classes(
-                        "text-sm text-gray-600")
+                        "text-sm theme-text-primary")
 
         # Configuration templates section
-        with ui.card().classes("w-full max-w-4xl mx-auto p-6 mt-6"):
-            ui.label("📋 Configuration Templates").classes("text-lg font-semibold mb-4")
+        with ui.card().classes("w-full max-w-4xl mx-auto p-4 mt-4"):
+            ui.label("📋 Configuration Templates").classes("text-xl font-bold mb-6 theme-header-text")
 
             async def apply_conservative_template():
                 fixed_investment.value = 5000
@@ -2743,12 +2884,12 @@ class EnhancedSIPStrategy:
                 min_gap_days.value = 3
                 ui.notify("Aggressive template applied", type="positive")
 
-            with ui.row().classes("gap-4"):
-                ui.button("🛡️ Conservative", on_click=apply_conservative_template).classes("bg-green-600 text-white")
-                ui.button("⚡ Aggressive", on_click=apply_aggressive_template).classes("bg-red-600 text-white")
+            with ui.row().classes("gap-6"):
+                ui.button("🛡️ Conservative", on_click=apply_conservative_template).classes("btn-modern-success text-lg px-6 py-3 font-semibold")
+                ui.button("⚡ Aggressive", on_click=apply_aggressive_template).classes("btn-modern-danger text-lg px-6 py-3 font-semibold")
                 ui.button("⚖️ Balanced",
                           on_click=lambda: ui.notify("Balanced template coming soon", type="info")).classes(
-                    "bg-blue-600 text-white")
+                    "btn-modern-primary text-lg px-6 py-3 font-semibold")
 
         # Save configuration
         async def save_configuration():
@@ -2773,17 +2914,17 @@ class EnhancedSIPStrategy:
             except Exception as e:
                 ui.notify(f"❌ Failed to save configuration: {str(e)}", type="negative")
 
-        ui.button("💾 Save Configuration", on_click=save_configuration).classes("bg-blue-600 text-white mt-6")
+        ui.button("💾 Save Configuration", on_click=save_configuration).classes("btn-modern-primary text-xl px-8 py-4 font-bold mt-8")
 
     async def render_investment_reports_panel(self, fetch_api, user_storage):
         """Render investment reports panel with report generation and history"""
 
-        ui.label("📊 Investment Reports & Analysis").classes("text-2xl font-bold mb-4")
-        ui.label("Generate comprehensive investment reports for multiple symbols").classes("text-gray-600 mb-6")
+        ui.label("📊 Investment Reports & Analysis").classes("text-xl font-bold mb-4")
+        ui.label("Generate comprehensive investment reports for multiple symbols").classes("text-sm text-slate-300 mb-4")
 
         # Report generation section
-        with ui.card().classes("w-full mb-6 p-6"):
-            ui.label("📋 Generate Investment Report").classes("text-lg font-semibold mb-4")
+        with ui.card().classes("w-full mb-4 p-4"):
+            ui.label("📋 Generate Investment Report").classes("text-lg font-bold mb-4")
 
             with ui.row().classes("w-full gap-4"):
                 # Left column - Symbol selection
@@ -2839,7 +2980,7 @@ class EnhancedSIPStrategy:
                         ui.label(f"📊 Report {report['report_id'][:12]}...").classes("text-lg font-bold")
                         ui.label(
                             f"Symbols: {', '.join(report['symbols'][:3])}{'...' if len(report['symbols']) > 3 else ''}").classes(
-                            "text-sm text-gray-600")
+                            "text-sm theme-text-primary")
                         ui.label(f"Generated: {report['generated_at'][:19]}").classes("text-xs text-gray-500")
 
                     with ui.column().classes("text-right"):
@@ -2934,7 +3075,7 @@ class EnhancedSIPStrategy:
                 ui.label("⚡ Quick Investment Report").classes("text-xl font-bold mb-4")
 
                 symbols = report.get('symbols', [])
-                ui.label(f"Symbols Analyzed: {', '.join(symbols)}").classes("text-sm text-gray-600 mb-4")
+                ui.label(f"Symbols Analyzed: {', '.join(symbols)}").classes("text-sm theme-text-primary mb-4")
 
                 # Portfolio recommendations
                 portfolio_rec = report.get('portfolio_recommendations', {})
@@ -3056,8 +3197,8 @@ class EnhancedSIPStrategy:
                     ui.notify(f"❌ Error: {str(e)}", type="negative")
 
             ui.button("📊 Generate Comprehensive Report", on_click=generate_comprehensive_report).classes(
-                "bg-blue-600 text-white px-6 py-2")
-            ui.button("⚡ Quick Report", on_click=generate_quick_report).classes("bg-green-600 text-white px-4 py-2")
+                "bg-blue-500 text-white px-6 py-3 font-semibold")
+            ui.button("⚡ Quick Report", on_click=generate_quick_report).classes("bg-green-500 text-white px-6 py-3 font-semibold")
 
         # Report history section
         reports_container = ui.column().classes("w-full")
@@ -3071,13 +3212,16 @@ class EnhancedSIPStrategy:
 
                 if reports:
                     with reports_container:
-                        ui.label("📋 Recent Reports").classes("text-lg font-semibold mb-4")
+                        ui.label("📋 Recent Reports").classes("text-lg font-bold mb-4")
 
                         for report in reports:
                             await render_report_history_card(report, fetch_api)
                 else:
                     with reports_container:
-                        ui.label("📝 No reports generated yet").classes("text-gray-500 text-center py-4")
+                        with ui.card().classes("w-full p-8 text-center"):
+                            ui.icon("description", size="2rem").classes("text-slate-400 mb-3")
+                            ui.label("📝 No reports generated yet").classes("text-lg font-bold text-slate-300 mb-2")
+                            ui.label("Generate your first report to get started").classes("text-sm text-slate-400")
 
             except Exception as e:
                 logger.error(f"Error loading report history: {e}")
@@ -3088,7 +3232,7 @@ class EnhancedSIPStrategy:
         await load_report_history()
 
         # Refresh button
-        ui.button("🔄 Refresh History", on_click=load_report_history).classes("bg-gray-500 text-white mt-4")
+        ui.button("🔄 Refresh History", on_click=load_report_history).classes("bg-blue-500 text-white px-4 py-2 rounded font-semibold mt-4")
 
     async def show_enhanced_portfolio_performance(self, portfolio_id, fetch_api):
         """Show enhanced portfolio performance with benchmarks"""

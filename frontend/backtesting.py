@@ -429,178 +429,61 @@ async def connect_backtest_websocket(user_id: str, progress_bar, progress_label,
                 break
 
 
-def create_performance_charts(df, metrics, theme_mode="Dark"):
-    """Create performance charts from processed tradebook data"""
-    if df.empty:
-        return None
-
-    font_color = "white" if theme_mode == "Dark" else "black"
-    grid_color = "rgba(128, 128, 128, 0.5)" if theme_mode == "Dark" else "rgba(200, 200, 200, 0.5)"
-
-    fig = make_subplots(
-        rows=3, cols=1, shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.5, 0.3, 0.2],
-        subplot_titles=("Portfolio Value", "Drawdown", "Monthly Returns")
-    )
-
-    # Equity curve
-    x_values = [t.isoformat() if isinstance(t, (pd.Timestamp, datetime)) else t for t in df["timestamp"]]
-
-    fig.add_trace(go.Scatter(
-        x=x_values,
-        y=df["value"],
-        mode="lines",
-        name="Portfolio Value",
-        line=dict(color="#2196f3")
-    ), row=1, col=1)
-
-    # Add baseline for initial capital
-    initial_capital = df["value"].iloc[0] if not df.empty else 100000
-    fig.add_trace(go.Scatter(
-        x=[df["timestamp"].min(), df["timestamp"].max()],
-        y=[initial_capital, initial_capital],
-        mode="lines",
-        name="Initial Capital",
-        line=dict(color="#9e9e9e", dash="dash")
-    ), row=1, col=1)
-
-    # Buy/sell markers with hover info
-    for idx, trade in df.iterrows():
-        action = trade["Action"]
-        if action:
-            marker_color = "#4caf50" if action == "BUY" else "#f44336"
-            fig.add_trace(go.Scatter(
-                x=[trade["timestamp"]],
-                y=[trade["value"]],
-                mode="markers",
-                name=action,
-                marker=dict(color=marker_color, size=10, symbol="triangle-up" if action == "BUY" else "triangle-down"),
-                hovertemplate=f"{action}<br>Date: %{{x}}<br>Price: {trade.get('EntryPrice', 0):.2f}<br>Quantity: {trade.get('Quantity', 0):.0f}<extra></extra>",
-                showlegend=False
-            ), row=1, col=1)
-
-    # Drawdown chart
-    rolling_max = df["value"].expanding().max()
-    drawdowns = (df["value"] / rolling_max - 1) * 100
-    fig.add_trace(go.Scatter(
-        x=df["timestamp"],
-        y=drawdowns,
-        mode="lines",
-        name="Drawdown",
-        line=dict(color="#ff9800"),
-        fill="tozeroy",
-        hovertemplate="Date: %{x}<br>Drawdown: %{y:.2f}%<extra></extra>"
-    ), row=2, col=1)
-
-    # Add max drawdown line
-    max_dd = drawdowns.min()
-    fig.add_trace(go.Scatter(
-        x=[df["timestamp"].min(), df["timestamp"].max()],
-        y=[max_dd, max_dd],
-        mode="lines",
-        name="Max Drawdown",
-        line=dict(color="#f44336", dash="dash"),
-        hovertemplate=f"Max Drawdown: {max_dd:.2f}%<extra></extra>"
-    ), row=2, col=1)
-
-    # Monthly returns
-    monthly_returns = df.groupby(df["timestamp"].dt.to_period("M"))["Profit"].sum()
-    monthly_colors = ["#4caf50" if ret > 0 else "#f44336" for ret in monthly_returns.values]
-
-    fig.add_trace(go.Bar(
-        x=monthly_returns.index.to_timestamp(),
-        y=monthly_returns.values,
-        name="Monthly Returns",
-        marker_color=monthly_colors,
-        hovertemplate="Month: %{x}<br>Return: ₹%{y:.2f}<extra></extra>"
-    ), row=3, col=1)
-
-    # Add annotations for key metrics
-    fig.add_annotation(
-        x=0.02, y=0.98,
-        xref="paper", yref="paper",
-        text=f"Total Profit: ₹{metrics['TotalProfit']:.2f}<br>Win Rate: {metrics['WinRate']:.1f}%<br>Sharpe: {metrics['SharpeRatio']:.2f}",
-        showarrow=False,
-        font=dict(color=font_color),
-        align="left",
-        bgcolor="rgba(0,0,0,0.5)" if theme_mode == "Dark" else "rgba(255,255,255,0.5)",
-        bordercolor="#9e9e9e",
-        borderwidth=1,
-        borderpad=4
-    )
-
-    fig.update_layout(
-        height=1000,
-        title="Backtest Performance Analysis",
-        showlegend=True,
-        font_color=font_color,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=20, r=20, t=40, b=20),
-        hovermode="x unified",
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        )
-    )
-
-    for row in range(1, 4):
-        fig.update_xaxes(gridcolor=grid_color, row=row, col=1)
-        fig.update_yaxes(gridcolor=grid_color, row=row, col=1)
-    fig.update_yaxes(title="Portfolio Value (₹)", row=1, col=1)
-    fig.update_yaxes(title="Drawdown (%)", row=2, col=1)
-    fig.update_yaxes(title="Returns (₹)", row=3, col=1)
-
-    return fig
-
-
 async def render_backtesting_page(fetch_api, user_storage, instruments):
     """Renders the backtesting UI with a modern two-column layout."""
     broker = user_storage.get("default_broker", "Zerodha")
     strategy_options = {}
     partial_exit_rows = []
 
-    with ui.splitter(value=30).classes("w-full h-screen") as splitter:
+    with ui.splitter(value=25, limits=(23, 35)).classes("w-full h-screen") as splitter:
+
         with splitter.before:
             with ui.card().classes("w-full h-full p-4 overflow-auto"):
-                ui.label("Backtest Configuration").classes("text-h6 mb-4")
+                ui.label("Backtest Configuration").classes("text-h6 mb-3")
 
-                with ui.expansion("Instrument & Strategy", icon="tune", value=True):
-                    instrument_select = ui.select(options=sorted(list(instruments.keys())), label="Select Instrument", with_input=True).props("clearable dense").classes("w-full")
-                    strategies_select = ui.select(options=strategy_options, label="Select Strategy").props("dense disabled").classes("w-full")
+                with ui.expansion("Instrument & Strategy", icon="tune", value=True).classes("w-full"):
+                    instrument_select = ui.select(options=sorted(list(instruments.keys())),
+                                                  label="Select Instrument", with_input=True).props(
+                        "clearable dense").classes("w-full")
+                    strategies_select = ui.select(options=strategy_options, label="Select Strategy").props(
+                        "dense").classes("w-full")
 
-                with ui.expansion("Date Range & Capital", icon="date_range", value=True):
-                    with ui.row():
-                        start_date = ui.input("Start Date", value=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")).props("dense type=date").classes("flex-1")
-                        end_date = ui.input("End Date", value=datetime.now().strftime("%Y-%m-%d")).props("dense type=date").classes("flex-1")
-                    initial_capital = ui.number(label="Initial Capital", value=100000, format="%.0f").props("dense").classes("w-full")
+                with ui.expansion("Date Range & Capital", icon="date_range", value=True).classes("w-full"):
+                    with ui.row().classes("w-full gap-2"):
+                        start_date = ui.input("Start Date", value=(datetime.now() - timedelta(days=365)).strftime(
+                            "%Y-%m-%d")).props("dense type=date").classes("flex-1 min-w-0")
+                        end_date = ui.input("End Date", value=datetime.now().strftime("%Y-%m-%d")).props(
+                            "dense type=date").classes("flex-1 min-w-0")
+                    initial_capital = ui.number(label="Initial Capital", value=100000, format="%.0f").props(
+                        "dense").classes("w-full")
 
-                with ui.expansion("Risk Management", icon="shield", value=True):
-                    stop_loss_percent = ui.number("Stop Loss (%)", value=2.0, format="%.1f", min=0).props("dense")
-                    take_profit_percent = ui.number("Take Profit (%)", value=5.0, format="%.1f", min=0).props("dense")
-                    trailing_stop_loss_percent = ui.number("Trailing Stop (%)", value=1.5, format="%.1f", min=0).props("dense")
-                    position_sizing_percent = ui.number("Position Sizing (% of Capital)", value=10.0, format="%.1f").props("dense")
+                with ui.expansion("Risk Management", icon="shield", value=True).classes("w-full"):
+                    stop_loss_percent = ui.number("Stop Loss (%)", value=2.0, format="%.1f", min=0).props(
+                        "dense").classes("w-full")
+                    take_profit_percent = ui.number("Take Profit (%)", value=5.0, format="%.1f", min=0).props(
+                        "dense").classes("w-full")
+
+                    with ui.row().classes("w-full gap-2"):
+                        trailing_stop_loss_percent = ui.number("Trailing Stop (%)", value=1.5, format="%.1f",
+                                                               min=0).props("dense").classes("w-full")
+                        position_sizing_percent = ui.number("Position Sizing (% of Capital)", value=10.0,
+                                                            format="%.1f").props("dense").classes("w-full")
                     ui.separator().classes("my-2")
 
                     ui.label("Advanced Exit Strategies").classes("text-subtitle2 font-bold")
-                    # Partial Exits section remains the same
-                    with ui.expansion("Partial Exits", icon="trending_down"):
+                    with ui.expansion("Partial Exits", icon="trending_down").classes("w-full"):
                         partial_exits_container = ui.column().classes("w-full")
 
                         def add_partial_exit():
                             with partial_exits_container:
-                                with ui.row().classes("items-center gap-2"):
+                                with ui.row().classes("w-full items-center gap-2"):
                                     target = ui.number("Target %", value=5.0, format="%.1f").props("dense").classes(
-                                        "flex-1")
-                                    qty_percent = ui.number("Qty %", value=50.0, format="%.1f").props("dense").classes(
-                                        "flex-1")
+                                        "flex-1 min-w-0")
+                                    qty_percent = ui.number("Qty %", value=50.0, format="%.1f").props(
+                                        "dense").classes("flex-1 min-w-0")
                                     remove_btn = ui.button(icon="delete",
                                                            on_click=lambda: remove_partial_exit(row_data)).props(
-                                        "flat color=negative dense")
+                                        "flat color=negative dense").classes("shrink-0")
 
                                 row_data = {"target": target, "qty_percent": qty_percent, "remove_btn": remove_btn}
                                 partial_exit_rows.append(row_data)
@@ -612,37 +495,45 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
                                 row_data["qty_percent"].delete()
                                 row_data["remove_btn"].delete()
 
-                        ui.button("Add Partial Exit", icon="add", on_click=add_partial_exit).props("outline")
+                        ui.button("Add Partial Exit", icon="add", on_click=add_partial_exit).props(
+                            "outline").classes("w-full")
 
-                with ui.expansion("Parameter Optimization", icon="auto_awesome"):
-                    enable_optimization = ui.switch("Enable Optimization", value=False)
-                    optimization_iterations = ui.number("Iterations", value=10, format="%.0f").props("dense")
+                with ui.expansion("Parameter Optimization", icon="auto_awesome").classes("w-full"):
+                    enable_optimization = ui.switch("Enable Optimization", value=False).classes("w-full")
+                    optimization_iterations = ui.number("Iterations", value=10, format="%.0f").props(
+                        "dense").classes("w-full")
 
                     ui.label("Stop Loss Range").classes("text-subtitle2")
-                    with ui.row():
-                        stop_loss_min = ui.number("SL Min (%)", value=1.0, min=0.1, format="%.1f").props("dense")
-                        stop_loss_max = ui.number("SL Max (%)", value=5.0, min=0.1, format="%.1f").props("dense")
+                    with ui.row().classes("w-full gap-2"):
+                        stop_loss_min = ui.number("SL Min (%)", value=1.0, min=0.1, format="%.1f").props(
+                            "dense").classes("flex-1 min-w-0")
+                        stop_loss_max = ui.number("SL Max (%)", value=5.0, min=0.1, format="%.1f").props(
+                            "dense").classes("flex-1 min-w-0")
 
-                    # NEW: Take Profit Optimization
-                    ui.label("Take Profit Range").classes("text-subtitle2")
-                    with ui.row():
-                        take_profit_min = ui.number("TP Min (%)", value=2.0, min=0.0, format="%.1f").props("dense")
-                        take_profit_max = ui.number("TP Max (%)", value=8.0, min=0.0, format="%.1f").props("dense")
-                        use_take_profit_opt = ui.switch("Optimize TP")
+                    with ui.row().classes("w-full gap-2"):
+                        ui.label("Take Profit Range").classes("text-subtitle2")
+                        use_take_profit_opt = ui.switch("Optimize TP").classes("shrink-0")
+                    with ui.row().classes("w-full gap-2"):
+                        take_profit_min = ui.number("TP Min (%)", value=2.0, min=0.0, format="%.1f").props(
+                            "dense").classes("flex-1 min-w-0")
+                        take_profit_max = ui.number("TP Max (%)", value=8.0, min=0.0, format="%.1f").props(
+                            "dense").classes("flex-1 min-w-0")
 
-                    ui.label("Trailing Stop Range").classes("text-subtitle2")
-                    with ui.row():
-                        trail_stop_loss_min = ui.number("Trail SL Min (%)", value=1.0, min=0.0, format="%.1f").props(
-                            "dense")
-                        trail_stop_loss_max = ui.number("Trail SL Max (%)", value=5.0, min=0.0, format="%.1f").props(
-                            "dense")
-                        use_trail = ui.switch("Optimize Trail SL")
+                    with ui.row().classes("w-full gap-2"):
+                        ui.label("Trail Stop Range").classes("text-subtitle2")
+                        use_trail = ui.switch("Optimize Trail SL").classes("shrink-0")
+                    with ui.row().classes("w-full gap-2"):
+                        trail_stop_loss_min = ui.number("Trail SL Min (%)", value=1.0, min=0.0,
+                                                        format="%.1f").props("dense").classes("flex-1 min-w-0")
+                        trail_stop_loss_max = ui.number("Trail SL Max (%)", value=5.0, min=0.0,
+                                                        format="%.1f").props("dense").classes("flex-1 min-w-0")
 
-                # Your optimization UI code here
+                # Optimization UI
                 optimization_ui = OptimizationUI()
                 optimization_ui.render_optimization_controls()
 
-                run_button = ui.button("Run Backtest", on_click=lambda: run_backtest()).props("color=primary icon=play_arrow").classes("w-full mt-4")
+                run_button = ui.button("Run Backtest", on_click=lambda: run_backtest()).props(
+                    "color=primary icon=play_arrow").classes("w-full mt-4")
 
         with splitter.after:
             with ui.card().classes("w-full h-full p-2"):
@@ -771,22 +662,374 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
             ui.update()
 
 
+def create_enhanced_performance_dashboard(df, metrics, results, theme_mode="Dark"):
+    """Create an enhanced performance dashboard with modern design"""
+
+    # Theme-aware colors
+    if theme_mode == "Dark":
+        colors = {
+            'font': '#ffffff',
+            'bg_primary': 'rgba(26, 32, 44, 0.95)',
+            'bg_secondary': 'rgba(45, 55, 72, 0.8)',
+            'accent_blue': '#3182ce',
+            'accent_green': '#38a169',
+            'accent_red': '#e53e3e',
+            'accent_orange': '#dd6b20',
+            'accent_purple': '#805ad5',
+            'grid': 'rgba(255, 255, 255, 0.1)',
+            'border': 'rgba(255, 255, 255, 0.2)'
+        }
+    else:
+        colors = {
+            'font': '#2d3748',
+            'bg_primary': 'rgba(247, 250, 252, 0.95)',
+            'bg_secondary': 'rgba(237, 242, 247, 0.8)',
+            'accent_blue': '#2b6cb0',
+            'accent_green': '#2f855a',
+            'accent_red': '#c53030',
+            'accent_orange': '#c05621',
+            'accent_purple': '#6b46c1',
+            'grid': 'rgba(0, 0, 0, 0.1)',
+            'border': 'rgba(0, 0, 0, 0.2)'
+        }
+
+    return colors
+
+
+def create_performance_overview_cards(metrics, results, theme_mode="Dark"):
+    """Create enhanced KPI cards with trend indicators"""
+    colors = create_enhanced_performance_dashboard(None, None, None, theme_mode)
+
+    # Calculate additional metrics
+    total_profit = metrics.get('TotalProfit', 0)
+    initial_investment = results.get('InitialInvestment', 100000)
+    roi_percent = (total_profit / initial_investment * 100) if initial_investment > 0 else 0
+    win_rate = metrics.get('WinRate', 0)
+    total_trades = metrics.get('TotalTrades', 0)
+    sharpe_ratio = metrics.get('SharpeRatio', 0)
+    max_drawdown = metrics.get('MaxDrawdown', 0)
+
+    # Performance grade calculation
+    def get_performance_grade(roi, sharpe, win_rate, max_dd):
+        score = 0
+        if roi > 15:
+            score += 25
+        elif roi > 8:
+            score += 15
+        elif roi > 0:
+            score += 10
+
+        if sharpe > 2:
+            score += 25
+        elif sharpe > 1:
+            score += 15
+        elif sharpe > 0:
+            score += 10
+
+        if win_rate > 70:
+            score += 25
+        elif win_rate > 50:
+            score += 15
+        elif win_rate > 30:
+            score += 10
+
+        if max_dd < 5:
+            score += 25
+        elif max_dd < 10:
+            score += 15
+        elif max_dd < 20:
+            score += 10
+
+        if score >= 80:
+            return "A+", colors['accent_green']
+        elif score >= 70:
+            return "A", colors['accent_green']
+        elif score >= 60:
+            return "B+", colors['accent_blue']
+        elif score >= 50:
+            return "B", colors['accent_blue']
+        elif score >= 40:
+            return "C", colors['accent_orange']
+        else:
+            return "D", colors['accent_red']
+
+    grade, grade_color = get_performance_grade(roi_percent, sharpe_ratio, win_rate, max_drawdown)
+
+    return {
+        'total_return': {
+            'value': f"₹{total_profit:,.0f}",
+            'subtitle': f"{roi_percent:.1f}% ROI",
+            'icon': 'trending_up' if total_profit > 0 else 'trending_down',
+            'color': colors['accent_green'] if total_profit > 0 else colors['accent_red'],
+            'trend': 'positive' if total_profit > 0 else 'negative'
+        },
+        'win_rate': {
+            'value': f"{win_rate:.1f}%",
+            'subtitle': f"{int(total_trades * win_rate / 100) if total_trades > 0 else 0}/{total_trades} wins",
+            'icon': 'military_tech',
+            'color': colors['accent_blue'],
+            'trend': 'positive' if win_rate > 50 else 'negative'
+        },
+        'sharpe_ratio': {
+            'value': f"{sharpe_ratio:.2f}",
+            'subtitle': 'Risk-Adjusted Return',
+            'icon': 'analytics',
+            'color': colors['accent_purple'],
+            'trend': 'positive' if sharpe_ratio > 1 else 'negative'
+        },
+        'performance_grade': {
+            'value': grade,
+            'subtitle': 'Overall Performance',
+            'icon': 'grade',
+            'color': grade_color,
+            'trend': 'positive' if grade in ['A+', 'A', 'B+'] else 'negative'
+        }
+    }
+
+
+def create_enhanced_main_chart(df, metrics, theme_mode="Dark"):
+    """Create enhanced main performance chart with multiple visualizations"""
+    if df.empty:
+        return None
+
+    colors = create_enhanced_performance_dashboard(None, None, None, theme_mode)
+
+    # Create 2x2 subplot layout for better organization
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=("📈 Portfolio Value & Signals", "📊 Monthly Performance Heatmap",
+                        "📉 Rolling Drawdown", "🎯 Trade Distribution"),
+        specs=[[{"secondary_y": True}, {"type": "heatmap"}],
+               [{"secondary_y": False}, {"type": "scatter"}]],
+        vertical_spacing=0.12,
+        horizontal_spacing=0.08
+    )
+
+    x_values = [t.isoformat() if isinstance(t, (pd.Timestamp, datetime)) else t for t in df["timestamp"]]
+
+    # 1. Portfolio Value with Volume (Top Left)
+    fig.add_trace(go.Scatter(
+        x=x_values,
+        y=df["value"],
+        mode="lines",
+        name="Portfolio Value",
+        line=dict(color=colors['accent_blue'], width=3),
+        hovertemplate="<b>Portfolio</b><br>Date: %{x}<br>Value: ₹%{y:,.0f}<extra></extra>"
+    ), row=1, col=1)
+
+    # Add trade volume on secondary y-axis
+    trade_volumes = df.groupby(df["timestamp"].dt.date).size().reindex(
+        pd.date_range(df["timestamp"].min().date(), df["timestamp"].max().date(), freq='D'), fill_value=0
+    )
+
+    fig.add_trace(go.Bar(
+        x=[d.isoformat() for d in trade_volumes.index],
+        y=trade_volumes.values,
+        name="Daily Trades",
+        marker_color=colors['accent_orange'],
+        opacity=0.3,
+        yaxis="y2",
+        hovertemplate="<b>Trade Volume</b><br>Date: %{x}<br>Trades: %{y}<extra></extra>"
+    ), row=1, col=1, secondary_y=True)
+
+    # Buy/Sell signals
+    for idx, trade in df.iterrows():
+        action = trade.get("Action")
+        if action in ["BUY", "SELL"]:
+            color = colors['accent_green'] if action == "BUY" else colors['accent_red']
+            symbol = "triangle-up" if action == "BUY" else "triangle-down"
+
+            fig.add_trace(go.Scatter(
+                x=[trade["timestamp"].isoformat()],
+                y=[trade["value"]],
+                mode="markers",
+                name=f"{action}",
+                marker=dict(color=color, size=12, symbol=symbol),
+                showlegend=False,
+                hovertemplate=f"<b>{action}</b><br>Date: %{{x}}<br>Price: ₹{trade.get('EntryPrice', 0):.2f}<extra></extra>"
+            ), row=1, col=1)
+
+    # 2. Monthly Performance Heatmap (Top Right)
+    try:
+        monthly_data = df.groupby([df["timestamp"].dt.year, df["timestamp"].dt.month])["Profit"].sum().unstack(
+            fill_value=0)
+
+        fig.add_trace(go.Heatmap(
+            z=monthly_data.values,
+            x=[f"Month {i}" for i in range(1, 13)],
+            y=monthly_data.index,
+            colorscale=[[0, colors['accent_red']], [0.5, '#ffffff'], [1, colors['accent_green']]],
+            hovertemplate="<b>Monthly Return</b><br>Year: %{y}<br>Month: %{x}<br>Return: ₹%{z:,.0f}<extra></extra>",
+            showscale=False
+        ), row=1, col=2)
+    except:
+        # Fallback if monthly grouping fails
+        fig.add_trace(go.Scatter(
+            x=[1], y=[1], mode="text",
+            text=["Monthly data unavailable"],
+            textfont=dict(color=colors['font'])
+        ), row=1, col=2)
+
+    # 3. Rolling Drawdown (Bottom Left)
+    rolling_max = df["value"].expanding().max()
+    drawdowns = (df["value"] / rolling_max - 1) * 100
+
+    fig.add_trace(go.Scatter(
+        x=x_values,
+        y=drawdowns,
+        mode="lines",
+        name="Drawdown",
+        line=dict(color=colors['accent_red'], width=2),
+        fill="tozeroy",
+        fillcolor=f"rgba({int(colors['accent_red'][1:3], 16)}, {int(colors['accent_red'][3:5], 16)}, {int(colors['accent_red'][5:7], 16)}, 0.3)",
+        hovertemplate="<b>Drawdown</b><br>Date: %{x}<br>DD: %{y:.2f}%<extra></extra>",
+        showlegend=False
+    ), row=2, col=1)
+
+    # 4. Trade Distribution Scatter (Bottom Right)
+    trade_profits = df["Profit"].fillna(0)
+    trade_returns = (trade_profits / df["value"].shift(1) * 100).fillna(0)
+
+    fig.add_trace(go.Scatter(
+        x=trade_returns,
+        y=trade_profits,
+        mode="markers",
+        name="Trades",
+        marker=dict(
+            color=[colors['accent_green'] if p > 0 else colors['accent_red'] for p in trade_profits],
+            size=[abs(p) / 100 + 5 for p in trade_profits],  # Size based on profit magnitude
+            opacity=0.7,
+            line=dict(color=colors['font'], width=1)
+        ),
+        hovertemplate="<b>Trade Analysis</b><br>Return: %{x:.1f}%<br>Profit: ₹%{y:,.0f}<extra></extra>",
+        showlegend=False
+    ), row=2, col=2)
+
+    # Layout updates
+    fig.update_layout(
+        height=700,
+        title=dict(
+            text="📊 Advanced Portfolio Performance Dashboard",
+            font=dict(color=colors['font'], size=20),
+            x=0.5
+        ),
+        font=dict(color=colors['font']),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor=colors['bg_secondary'],
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.1,
+            xanchor="center",
+            x=0.5,
+            font=dict(color=colors['font'])
+        ),
+        hoverlabel=dict(
+            bgcolor=colors['bg_primary'],
+            bordercolor=colors['border'],
+            font_color=colors['font']
+        )
+    )
+
+    # Update axes
+    fig.update_xaxes(gridcolor=colors['grid'], title_font_color=colors['font'], tickfont_color=colors['font'])
+    fig.update_yaxes(gridcolor=colors['grid'], title_font_color=colors['font'], tickfont_color=colors['font'])
+
+    return fig
+
+
+def create_performance_panel(performance_panel, df, metrics, results, theme_mode="Dark"):
+    """Create the enhanced performance panel with modern design"""
+
+    with performance_panel:
+        with ui.scroll_area().classes("w-full h-full"):
+            with ui.column().classes("w-full gap-6 p-2"):
+
+                if not df.empty:
+                    # 1. KPI Cards Section
+                    ui.label("📊 Performance Overview").classes("text-xl font-bold mb-2")
+
+                    kpi_data = create_performance_overview_cards(metrics, results, theme_mode)
+
+                    with ui.grid(columns=4).classes("w-full gap-4 mb-2"):
+                        for key, kpi in kpi_data.items():
+                            with ui.card().classes("p-4 text-center hover:shadow-lg transition-all duration-300"):
+                                # Icon and trend indicator
+                                with ui.row().classes("items-center justify-between mb-2"):
+                                    ui.icon(kpi['icon'], size="1rem").style(f"color: {kpi['color']};")
+                                    trend_icon = "arrow_upward" if kpi['trend'] == 'positive' else "arrow_downward"
+                                    trend_color = "#10b981" if kpi['trend'] == 'positive' else "#ef4444"
+                                    ui.icon(trend_icon, size="1rem").style(f"color: {trend_color};")
+
+                                # Main value
+                                ui.label(kpi['value']).classes("text-2xl font-bold").style(f"color: {kpi['color']};")
+                                ui.label(kpi['subtitle']).classes("text-sm text-gray-500 mt-1")
+
+                    # 2. Advanced Chart Dashboard
+                    with ui.card().classes("w-full p-2 mb-3"):
+                        ui.label("📈 Advanced Performance Analytics").classes("text-xl font-bold mb-2")
+
+                        enhanced_fig = create_enhanced_main_chart(df, metrics, theme_mode)
+                        if enhanced_fig:
+                            ui.plotly(enhanced_fig).classes("w-full")
+
+                    # 3. Quick Insights Section
+                    with ui.card().classes("w-full p-3"):
+                        ui.label("🔍 Quick Insights").classes("text-xl font-bold mb-4")
+
+                        with ui.grid(columns=2).classes("w-full gap-6"):
+                            # Left column - Risk Analysis
+                            with ui.column().classes("gap-3"):
+                                ui.label("⚠️ Risk Analysis").classes("text-lg font-semibold mb-2")
+
+                                max_dd = metrics.get('MaxDrawdown', 0)
+                                if max_dd < 5:
+                                    risk_level = "Low Risk"
+                                    risk_color = "#10b981"
+                                elif max_dd < 15:
+                                    risk_level = "Moderate Risk"
+                                    risk_color = "#f59e0b"
+                                else:
+                                    risk_level = "High Risk"
+                                    risk_color = "#ef4444"
+
+                                ui.chip(f"Risk Level: {risk_level}", color=risk_color).props("outline")
+                                ui.chip(f"Max Drawdown: {max_dd:.1f}%",
+                                        color=risk_color if max_dd > 10 else "#10b981").props("outline")
+
+                                volatility = metrics.get('Volatility', 0)
+                                ui.chip(f"Volatility: {volatility:.1f}%", color="#6366f1").props("outline")
+
+                            # Right column - Performance Summary
+                            with ui.column().classes("gap-3"):
+                                ui.label("📈 Performance Summary").classes("text-lg font-semibold mb-2")
+
+                                total_trades = metrics.get('TotalTrades', 0)
+                                if total_trades > 0:
+                                    avg_trade = metrics.get('TotalProfit', 0) / total_trades
+                                    ui.chip(f"Avg Trade: ₹{avg_trade:,.0f}", color="#3b82f6").props("outline")
+
+                                profit_factor = metrics.get('ProfitFactor', 0)
+                                pf_color = "#10b981" if profit_factor > 1.5 else "#f59e0b" if profit_factor > 1 else "#ef4444"
+                                ui.chip(f"Profit Factor: {profit_factor:.2f}", color=pf_color).props("outline")
+
+                                ui.chip(f"Total Trades: {total_trades}", color="#8b5cf6").props("outline")
+
+                else:
+                    # Empty state with better design
+                    with ui.card().classes("w-full p-12 text-center"):
+                        ui.icon("bar_chart", size="4rem").classes("text-gray-400 mb-4")
+                        ui.label("No Performance Data Available").classes("text-2xl font-bold text-gray-500 mb-2")
+                        ui.label("Run a backtest to see detailed performance analytics").classes("text-gray-400 mb-6")
+                        ui.button("Start Backtesting", icon="play_arrow").props("color=primary size=lg")
+
 def display_backtest_results(performance_panel, trades_panel, metrics_panel, results, user_storage, fetch_api):
     """Displays backtest results with metrics and charts in a tabbed interface."""
-    # 🔥 ADD FRONTEND DEBUG
-    print("=== FRONTEND DEBUG ===")
-    print(f"Results keys: {list(results.keys())}")
-    print(f"Optimization enabled: {results.get('optimization_enabled', False)}")
-    print(f"Optimized parameters: {results.get('OptimizedParameters', {})}")
-
-    tradebook = results.get("Tradebook", [])
-    print(f"Tradebook type: {type(tradebook)}")
-    print(f"Tradebook length: {len(tradebook)}")
-
-    if tradebook:
-        print(f"Sample tradebook entry: {tradebook[0]}")
-    else:
-        print("TRADEBOOK IS EMPTY!")
+    # Clear panels
+    performance_panel.clear()
+    trades_panel.clear()
+    metrics_panel.clear()
 
     theme_mode = "Dark" if user_storage.get("dark_mode", True) else "Light"
     tradebook = results.get("Tradebook", [])
@@ -897,91 +1140,8 @@ def display_backtest_results(performance_panel, trades_panel, metrics_panel, res
             display_metric("Calmar Ratio", metrics.get("CalmarRatio", 0), help_text="CAGR divided by max drawdown")
             display_metric("Annual Volatility (%)", metrics.get("AnnualizedVolatility", 0) * 100, help_text="Annualized standard deviation of returns")
 
-    # 2. Performance Panel - Show charts
-    with performance_panel:
-        if not df.empty:
-            # Container with proper height distribution and optimized spacing
-            with ui.column().classes("w-full h-full gap-2"):
-                # Performance charts with smaller, optimized height
-                fig = create_performance_charts(df, metrics, theme_mode)
-                ui.plotly(convert_plotly_timestamps(fig)).classes("w-full").style("height: 400px; min-height: 400px;")
-
-                # Candlestick chart card with reduced height
-                with ui.card().classes("w-full p-3"):
-                    with ui.row().classes("items-center justify-between"):
-                        ui.label("Price Chart with Signals").classes("text-h6")
-                        ui.button("Refresh", icon="refresh", on_click=lambda: ui.notify("Chart refreshed")).props("outline dense")
-
-                    # Fetch OHLC data if not available in results
-                    ohlc_data = results.get("OHLC", pd.DataFrame())
-
-                    if not isinstance(ohlc_data, pd.DataFrame) and isinstance(ohlc_data, list):
-                        ohlc_data = pd.DataFrame(ohlc_data)
-
-                    # If no OHLC data in results, fetch it
-                    if ohlc_data.empty:
-                        instrument = results.get("Instrument", "")
-                        from_date = results.get("StartDate", "")
-                        to_date = results.get("EndDate", "")
-
-                        # Show loading indicator
-                        chart_loading = ui.spinner("dots", size="lg").classes("self-center")
-
-                        # Create a background task to fetch data
-                        async def fetch_and_update_chart():
-                            nonlocal ohlc_data
-                            if instrument and from_date and to_date:
-                                # Fetch data from API
-                                ohlc_data = await fetch_ohlc_data(
-                                    fetch_api,
-                                    instrument,
-                                    from_date,
-                                    to_date,
-                                    interval=results.get("Timeframe", "1day")
-                                )
-
-                                # Remove loading indicator
-                                chart_loading.delete()
-
-                                if not ohlc_data.empty:
-                                    # Create and display candlestick chart with smaller height
-                                    candlestick_options = create_candlestick_chart(ohlc_data, tradebook, theme_mode)
-                                    ui.echart(candlestick_options).style("height: 280px; min-height: 280px;")
-                                else:
-                                    ui.label("Could not retrieve price chart data.").classes("text-subtitle2")
-                            else:
-                                chart_loading.delete()
-                                ui.label("Missing instrument or date information for chart.").classes("text-subtitle2")
-
-                        # Start background task
-                        ui.timer(0, fetch_and_update_chart, once=True)
-                    else:
-                        # Use existing OHLC data with smaller height
-                        candlestick_options = create_candlestick_chart(ohlc_data, tradebook, theme_mode)
-                        ui.echart(candlestick_options).style("height: 280px; min-height: 280px;")
-
-                # Performance Summary section (Compact design)
-                with ui.card().classes("w-full p-3"):
-                    ui.label("Performance Summary").classes("text-h6 mb-2")
-
-                    # Compact layout with smaller cards
-                    with ui.grid(columns=3).classes("gap-2 w-full"):
-                        # Quick summary metrics with reduced padding
-                        with ui.card().classes("p-2"):
-                            ui.label("Returns").classes("text-caption")
-                            color = "text-positive" if metrics["TotalProfit"] > 0 else "text-negative"
-                            ui.label(f"₹{metrics['TotalProfit']:,.0f} ({metrics['TotalProfit']/results.get('InitialInvestment', 100000)*100:.1f}%)").classes(f"{color} text-subtitle1 font-bold")
-
-                        with ui.card().classes("p-2"):
-                            ui.label("Win Rate").classes("text-caption")
-                            ui.label(f"{metrics['WinRate']:.1f}% ({int(metrics['TotalTrades'] * metrics['WinRate']/100)}/{metrics['TotalTrades']})").classes("text-subtitle1 font-bold")
-
-                        with ui.card().classes("p-2"):
-                            ui.label("Sharpe Ratio").classes("text-caption")
-                            color = "text-positive" if metrics["SharpeRatio"] > 1 else "text-negative"
-                            ui.label(f"{metrics['SharpeRatio']:.2f}").classes(f"{color} text-subtitle1 font-bold")
-        else:
-            ui.label("No trades executed in this backtest.").classes("text-warning")
+    # 2. Performance Panel - Show charts and performance overview
+    create_performance_panel(performance_panel, df, metrics, results, theme_mode)
 
     # 3. Trades Panel - Show detailed trade list
     with trades_panel:
@@ -1018,7 +1178,7 @@ def display_backtest_results(performance_panel, trades_panel, metrics_panel, res
                     "paginationPageSize": 20,
                     "rowHeight": 40,
                     "headerHeight": 50
-                }).classes("w-full").style("height: 400px;")  # Fixed height instead of h-full
+                }).classes("w-full").style("height: 450px;")  # Fixed height instead of h-full
 
                 # Quick stats chips
                 with ui.row().classes("w-full gap-4 flex-wrap"):

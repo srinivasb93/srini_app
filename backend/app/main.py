@@ -620,7 +620,39 @@ async def get_orders(broker: str, user_id: str = Depends(get_current_user), db: 
             WHERE user_id = :user_id AND broker = :broker
         """
         orders = pd.DataFrame(await async_fetch_query(db, text(query), {"user_id": user_id, "broker": broker}))
-        return orders.to_dict(orient="records")
+
+        # Handle NaN, infinity, and negative infinity values for JSON compliance
+        if not orders.empty:
+            # Replace infinite values with None
+            orders = orders.replace([float('inf'), float('-inf')], None)
+
+            # Handle NaN values by converting to None
+            import numpy as np
+            orders = orders.replace([np.nan], None)
+
+            # Additional safety: convert to native Python types and handle any remaining problematic values
+            orders_dict = orders.to_dict(orient="records")
+
+            # Clean the dictionary to ensure JSON compliance
+            cleaned_orders = []
+            for order in orders_dict:
+                cleaned_order = {}
+                for key, value in order.items():
+                    if pd.isna(value) or value is np.nan or value == float('inf') or value == float('-inf'):
+                        cleaned_order[key] = None
+                    elif isinstance(value, (np.integer, np.floating)):
+                        # Convert numpy types to native Python types
+                        if np.isfinite(value):
+                            cleaned_order[key] = value.item()
+                        else:
+                            cleaned_order[key] = None
+                    else:
+                        cleaned_order[key] = value
+                cleaned_orders.append(cleaned_order)
+
+            return cleaned_orders
+        else:
+            return []
     except Exception as e:
         logger.error(f"Error fetching {broker} orders: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
