@@ -427,6 +427,194 @@ class UpstoxAsyncClient:
         data = await self._make_request("GET", url)
         return data.get("data", [])
 
+    async def place_gtt_order(
+        self,
+        instrument_token: str,
+        transaction_type: str,
+        quantity: int,
+        trigger_type: str,
+        trigger_price: float,
+        product: str = "D",
+        second_trigger_price: Optional[float] = None,
+        limit_price: Optional[float] = None,
+        second_limit_price: Optional[float] = None,
+    ) -> Dict:
+        """
+        Place GTT order via Upstox API
+        
+        Args:
+            instrument_token: Instrument token (e.g., "NSE_EQ|INE669E01016")
+            transaction_type: "BUY" or "SELL"
+            quantity: Number of shares
+            trigger_type: "single" or "two_leg" 
+            trigger_price: Trigger price for entry
+            product: "D" for delivery, "I" for intraday, "MTF" for margin
+            second_trigger_price: Optional second trigger for two_leg orders
+            limit_price: Optional limit price (uses trigger_price if not provided)
+        
+        Returns:
+            Dict with GTT order response
+        """
+        url = f"{self.base_url}/v2/gtt"
+        
+        # Use trigger_price as limit_price if not provided
+        if limit_price is None:
+            limit_price = trigger_price
+        
+        # Convert trigger_type to Upstox format
+        # Upstox expects SINGLE for one rule and OCO for two rules (one-cancels-other)
+        gtt_type = "SINGLE" if trigger_type == "single" else "OCO"
+        
+        # Build rules based on trigger type. Upstox expects camelCase keys inside rules
+        rules = [
+            {
+                "triggerType": "ABOVE" if transaction_type == "BUY" else "BELOW",
+                "triggerPrice": trigger_price,
+                "price": limit_price if limit_price is not None else trigger_price,
+            }
+        ]
+        
+        # Add second rule for two_leg orders
+        if trigger_type in ("two_leg", "OCO") and second_trigger_price is not None:
+            rules.append({
+                "triggerType": "ABOVE" if transaction_type == "BUY" else "BELOW",
+                "triggerPrice": second_trigger_price,
+                "price": second_limit_price if second_limit_price is not None else second_trigger_price,
+            })
+        
+        # Map to Upstox expected top-level keys
+        payload = {
+            "type": gtt_type,
+            "quantity": quantity,
+            "product": product,
+            "instrumentKey": instrument_token,  # e.g. "NSE_EQ|INE669E01016"
+            "side": transaction_type,           # "BUY" or "SELL"
+            "rules": rules,
+        }
+        
+        logger.info(f"Placing Upstox GTT order: {payload}")
+        
+        response = await self._make_request("POST", url, json=payload)
+        logger.info(f"Upstox GTT order response: {response}")
+        
+        return response
+
+    async def get_gtt_orders(self) -> List[Dict]:
+        """
+        Get all GTT orders for the user
+        
+        Returns:
+            List of GTT orders
+        """
+        url = f"{self.base_url}/v2/gtt"
+        response = await self._make_request("GET", url)
+        return response.get("data", [])
+
+    async def get_gtt_order(self, gtt_order_id: str) -> Dict:
+        """
+        Get specific GTT order details
+        
+        Args:
+            gtt_order_id: GTT order ID
+            
+        Returns:
+            GTT order details
+        """
+        url = f"{self.base_url}/v2/gtt/{gtt_order_id}"
+        response = await self._make_request("GET", url)
+        return response.get("data", {})
+
+    async def modify_gtt_order(
+        self,
+        gtt_order_id: str,
+        instrument_token: str,
+        transaction_type: str,
+        quantity: int,
+        trigger_type: str,
+        trigger_price: float,
+        product: str = "D",
+        second_trigger_price: Optional[float] = None,
+        limit_price: Optional[float] = None,
+        second_limit_price: Optional[float] = None,
+    ) -> Dict:
+        """
+        Modify existing GTT order
+        
+        Args:
+            gtt_order_id: GTT order ID to modify
+            instrument_token: Instrument token
+            transaction_type: "BUY" or "SELL"
+            quantity: Number of shares
+            trigger_type: "single" or "two_leg"
+            trigger_price: Trigger price for entry
+            product: "D" for delivery, "I" for intraday, "MTF" for margin
+            second_trigger_price: Optional second trigger for two_leg orders
+            limit_price: Optional limit price
+            
+        Returns:
+            Dict with modification response
+        """
+        url = f"{self.base_url}/v2/gtt/{gtt_order_id}"
+        
+        # Use trigger_price as limit_price if not provided
+        if limit_price is None:
+            limit_price = trigger_price
+        
+        # Convert trigger_type to Upstox format
+        gtt_type = "SINGLE" if trigger_type == "single" else "OCO"
+        
+        # Build rules with camelCase keys expected by Upstox
+        rules = [
+            {
+                "triggerType": "ABOVE" if transaction_type == "BUY" else "BELOW",
+                "triggerPrice": trigger_price,
+                "price": limit_price if limit_price is not None else trigger_price,
+            }
+        ]
+        
+        # Add second rule for two_leg orders
+        if trigger_type in ("two_leg", "OCO") and second_trigger_price is not None:
+            rules.append({
+                "triggerType": "ABOVE" if transaction_type == "BUY" else "BELOW",
+                "triggerPrice": second_trigger_price,
+                "price": second_limit_price if second_limit_price is not None else second_trigger_price,
+            })
+        
+        payload = {
+            "type": gtt_type,
+            "quantity": quantity,
+            "product": product,
+            "instrumentKey": instrument_token,
+            "side": transaction_type,
+            "rules": rules,
+        }
+        
+        logger.info(f"Modifying Upstox GTT order {gtt_order_id}: {payload}")
+        
+        response = await self._make_request("PUT", url, json=payload)
+        logger.info(f"Upstox GTT modify response: {response}")
+        
+        return response
+
+    async def cancel_gtt_order(self, gtt_order_id: str) -> Dict:
+        """
+        Cancel GTT order
+        
+        Args:
+            gtt_order_id: GTT order ID to cancel
+            
+        Returns:
+            Dict with cancellation response
+        """
+        url = f"{self.base_url}/v2/gtt/{gtt_order_id}"
+        
+        logger.info(f"Canceling Upstox GTT order: {gtt_order_id}")
+        
+        response = await self._make_request("DELETE", url)
+        logger.info(f"Upstox GTT cancel response: {response}")
+        
+        return response
+
 
 class AsyncRateLimiter:
     """Async rate limiter for API calls"""
@@ -492,17 +680,43 @@ def calculate_pivot_points(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 async def get_symbol_for_instrument(instrument_token: str) -> str:
-    """Fetch instruments and reverse the key value pair to get the symbol for a given instrument token"""
-    async def fetch_instruments():
-        async with UpstoxAsyncClient("") as client:
-            instruments_df = await client.get_instruments()
-            return instruments_df
-
-    instruments_df = asyncio.run(fetch_instruments())
-
-    # Reverse the key-value pair to get symbol for instrument token
-    symbol = instruments_df[instruments_df['instrument_token'] == instrument_token]['trading_symbol'].values
-    return symbol[0] if symbol else None
+    """Extract trading symbol from instrument token by querying the database"""
+    try:
+        # Import here to avoid circular imports
+        from sqlalchemy import select
+        from backend.app.database import get_db
+        from backend.app.models import Instrument
+        
+        # Get database session
+        db_gen = get_db()
+        db = await db_gen.__anext__()
+        
+        try:
+            # Query the database for the instrument
+            query = select(Instrument).where(Instrument.instrument_token == instrument_token)
+            result = await db.execute(query)
+            instrument = result.scalars().first()
+            
+            if instrument:
+                return instrument.trading_symbol
+            else:
+                # If not found in database, try to extract from token format
+                if "|" in instrument_token:
+                    # For Upstox format like "NSE_EQ|INE869I01013", 
+                    # we need to look up the trading symbol from the database
+                    # For now, return the token as fallback
+                    logger.warning(f"Instrument token {instrument_token} not found in database")
+                    return instrument_token
+                else:
+                    # If it's already a trading symbol, return as is
+                    return instrument_token
+        finally:
+            await db.close()
+            
+    except Exception as e:
+        logger.warning(f"Error fetching symbol for instrument token {instrument_token}: {e}")
+        # Fallback: return the token as is
+        return instrument_token
 
 
 # Example usage

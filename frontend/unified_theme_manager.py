@@ -34,6 +34,7 @@ class PageTheme(Enum):
     WATCHLIST = "watchlist"
     LIVE_TRADING = "live_trading"
     ORDER_MANAGEMENT = "order_management"
+    ENHANCED_SCANNER = "enhanced_scanner"
 
 
 @dataclass
@@ -1687,6 +1688,309 @@ class UnifiedThemeManager:
             
             .sip-strategy-page .q-field {
                 margin: var(--spacing-xs) 0 !important;
+            }
+            ''',
+            
+            PageTheme.ENHANCED_SCANNER: '''
+            /* Enhanced Scanner Specific - Professional trading scanner styling */
+            
+            /* Main scanner container */
+            .enhanced-scanner-container {
+                background: var(--background) !important;
+                color: var(--text-primary) !important;
+                min-height: 100vh !important;
+                padding: 0 !important;
+                width: 100% !important;
+            }
+            
+            /* Scanner navigation tabs */
+            .scanner-nav-container {
+                display: flex !important;
+                gap: 0.5rem !important;
+                align-items: center !important;
+                padding: 1rem !important;
+                background: var(--surface-color) !important;
+                border-radius: var(--radius-lg) !important;
+                border: 1px solid var(--border-color) !important;
+                margin-bottom: 1rem !important;
+            }
+            
+            .scanner-nav-btn {
+                background: var(--surface-color) !important;
+                border: 2px solid var(--border-color) !important;
+                color: var(--text-secondary) !important;
+                min-height: 40px !important;
+                padding: 0.5rem 1rem !important;
+                border-radius: var(--radius-md) !important;
+                font-weight: 500 !important;
+                transition: all var(--transition-fast) !important;
+                text-transform: none !important;
+                font-size: 0.875rem !important;
+            }
+            
+            .scanner-nav-btn:hover {
+                background: var(--hover-color) !important;
+                border-color: var(--accent-color) !important;
+                color: var(--text-primary) !important;
+                transform: translateY(-1px) !important;
+            }
+            
+            .scanner-nav-btn.active {
+                border-color: var(--accent-color) !important;
+                background: rgba(34, 197, 252, 0.1) !important;
+                color: var(--accent-color) !important;
+            }
+            
+            /* Enhanced stat cards */
+            .scanner-stat-card {
+                background: linear-gradient(135deg, rgba(31, 41, 55, 0.8) 0%, rgba(17, 24, 39, 0.9) 100%) !important;
+                border: 1px solid rgba(59, 130, 246, 0.2) !important;
+                border-radius: 16px !important;
+                padding: 1rem !important;
+                backdrop-filter: blur(12px) !important;
+                position: relative !important;
+                overflow: hidden !important;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+                min-width: 140px !important;
+            }
+            
+            .scanner-stat-card::before {
+                content: '';
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                height: 2px;
+                background: linear-gradient(90deg, #3b82f6, #06b6d4, #10b981);
+                opacity: 0.6;
+            }
+            
+            .scanner-stat-card:hover {
+                transform: translateY(-2px) !important;
+                box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3) !important;
+                border-color: rgba(59, 130, 246, 0.4) !important;
+            }
+            
+            /* Scanner filter panels */
+            .scanner-filter-panel {
+                background: var(--surface-color) !important;
+                border: 1px solid var(--border-color) !important;
+                border-radius: var(--radius-lg) !important;
+                padding: 1.5rem !important;
+                backdrop-filter: blur(var(--blur-amount)) !important;
+                height: fit-content !important;
+            }
+            
+            .scanner-filter-group {
+                background: rgba(0, 0, 0, 0.1) !important;
+                border: 1px solid var(--border-color) !important;
+                border-radius: var(--radius-md) !important;
+                padding: 1rem !important;
+                margin-bottom: 1rem !important;
+            }
+            
+            .scanner-filter-group:last-child {
+                margin-bottom: 0 !important;
+            }
+            
+            /* Scanner results table */
+            .scanner-results-table {
+                background: var(--surface-color) !important;
+                border: 1px solid var(--border-color) !important;
+                border-radius: var(--radius-lg) !important;
+                overflow: hidden !important;
+            }
+            
+            .scanner-table-header {
+                background: rgba(0, 0, 0, 0.2) !important;
+                padding: 0.75rem !important;
+                border-bottom: 1px solid var(--border-color) !important;
+                font-weight: 600 !important;
+                font-size: 0.875rem !important;
+                color: var(--text-secondary) !important;
+                text-transform: uppercase !important;
+                letter-spacing: 0.5px !important;
+            }
+            
+            .scanner-table-row {
+                padding: 0.75rem !important;
+                border-bottom: 1px solid var(--border-color) !important;
+                transition: all var(--transition-fast) !important;
+                cursor: pointer !important;
+            }
+            
+            .scanner-table-row:hover {
+                background: var(--hover-color) !important;
+                transform: translateX(2px) !important;
+            }
+            
+            .scanner-table-row:last-child {
+                border-bottom: none !important;
+            }
+            
+            /* Signal strength indicators */
+            .signal-strength-high {
+                color: var(--success-color) !important;
+                font-weight: 600 !important;
+            }
+            
+            .signal-strength-medium {
+                color: var(--warning-color) !important;
+                font-weight: 500 !important;
+            }
+            
+            .signal-strength-low {
+                color: var(--text-secondary) !important;
+            }
+            
+            /* Recommendation badges */
+            .recommendation-strong-buy {
+                background: linear-gradient(135deg, var(--success-color) 0%, #15803d 100%) !important;
+                color: white !important;
+                padding: 0.25rem 0.75rem !important;
+                border-radius: var(--radius-full) !important;
+                font-size: 0.75rem !important;
+                font-weight: 600 !important;
+                text-transform: uppercase !important;
+            }
+            
+            .recommendation-buy {
+                background: linear-gradient(135deg, var(--info-color) 0%, #1d4ed8 100%) !important;
+                color: white !important;
+                padding: 0.25rem 0.75rem !important;
+                border-radius: var(--radius-full) !important;
+                font-size: 0.75rem !important;
+                font-weight: 600 !important;
+                text-transform: uppercase !important;
+            }
+            
+            .recommendation-hold {
+                background: linear-gradient(135deg, var(--text-secondary) 0%, #6b7280 100%) !important;
+                color: white !important;
+                padding: 0.25rem 0.75rem !important;
+                border-radius: var(--radius-full) !important;
+                font-size: 0.75rem !important;
+                font-weight: 600 !important;
+                text-transform: uppercase !important;
+            }
+            
+            .recommendation-sell {
+                background: linear-gradient(135deg, var(--warning-color) 0%, #d97706 100%) !important;
+                color: white !important;
+                padding: 0.25rem 0.75rem !important;
+                border-radius: var(--radius-full) !important;
+                font-size: 0.75rem !important;
+                font-weight: 600 !important;
+                text-transform: uppercase !important;
+            }
+            
+            .recommendation-strong-sell {
+                background: linear-gradient(135deg, var(--error-color) 0%, #dc2626 100%) !important;
+                color: white !important;
+                padding: 0.25rem 0.75rem !important;
+                border-radius: var(--radius-full) !important;
+                font-size: 0.75rem !important;
+                font-weight: 600 !important;
+                text-transform: uppercase !important;
+            }
+            
+            /* Scanner action buttons */
+            .scanner-action-btn {
+                background: linear-gradient(135deg, var(--accent-color) 0%, #0284c7 100%) !important;
+                color: white !important;
+                border: none !important;
+                border-radius: var(--radius-md) !important;
+                padding: 0.75rem 1.5rem !important;
+                font-weight: 600 !important;
+                transition: all var(--transition-base) !important;
+                box-shadow: 0 4px 12px rgba(34, 197, 252, 0.3) !important;
+                min-height: 44px !important;
+            }
+            
+            .scanner-action-btn:hover {
+                transform: translateY(-2px) !important;
+                box-shadow: 0 8px 20px rgba(34, 197, 252, 0.4) !important;
+            }
+            
+            /* Data explorer specific */
+            .data-explorer-controls {
+                display: flex !important;
+                gap: 1rem !important;
+                align-items: center !important;
+                padding: 1rem !important;
+                background: var(--surface-color) !important;
+                border: 1px solid var(--border-color) !important;
+                border-radius: var(--radius-lg) !important;
+                margin-bottom: 1rem !important;
+            }
+            
+            .data-explorer-table {
+                background: var(--surface-color) !important;
+                border: 1px solid var(--border-color) !important;
+                border-radius: var(--radius-lg) !important;
+                overflow: hidden !important;
+                max-height: 600px !important;
+                overflow-y: auto !important;
+            }
+            
+            /* Stock analysis specific */
+            .stock-analysis-metrics {
+                display: grid !important;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)) !important;
+                gap: 1rem !important;
+                margin-bottom: 1.5rem !important;
+            }
+            
+            .stock-metric-card {
+                background: linear-gradient(135deg, rgba(31, 41, 55, 0.8) 0%, rgba(17, 24, 39, 0.9) 100%) !important;
+                border: 1px solid rgba(59, 130, 246, 0.2) !important;
+                border-radius: 12px !important;
+                padding: 1.25rem !important;
+                backdrop-filter: blur(12px) !important;
+                text-align: center !important;
+                transition: all 0.3s ease !important;
+            }
+            
+            .stock-metric-card:hover {
+                transform: translateY(-2px) !important;
+                box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3) !important;
+                border-color: rgba(59, 130, 246, 0.4) !important;
+            }
+            
+            /* Responsive design */
+            @media (max-width: 1200px) {
+                .scanner-nav-container {
+                    flex-wrap: wrap !important;
+                }
+                
+                .scanner-filter-panel {
+                    margin-bottom: 1rem !important;
+                }
+                
+                .stock-analysis-metrics {
+                    grid-template-columns: repeat(2, 1fr) !important;
+                }
+            }
+            
+            @media (max-width: 768px) {
+                .scanner-nav-container {
+                    flex-direction: column !important;
+                    gap: 0.5rem !important;
+                }
+                
+                .scanner-nav-btn {
+                    width: 100% !important;
+                    text-align: center !important;
+                }
+                
+                .stock-analysis-metrics {
+                    grid-template-columns: 1fr !important;
+                }
+                
+                .data-explorer-controls {
+                    flex-direction: column !important;
+                    align-items: stretch !important;
+                }
             }
             '''
         }

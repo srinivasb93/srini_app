@@ -1,10 +1,11 @@
-from sqlalchemy import Column, String, Integer, Float, DateTime, Boolean, func, JSON
-from database import Base
+from sqlalchemy import Column, String, Integer, Float, DateTime, Boolean, func, JSON, Text
+from .database import Base
 from datetime import datetime
 from uuid import uuid4
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = {'extend_existing': True}
 
     user_id = Column(String, primary_key=True)
     email = Column(String, unique=True, nullable=False)
@@ -17,10 +18,12 @@ class User(Base):
     zerodha_api_secret = Column(String)
     zerodha_access_token = Column(String)
     zerodha_access_token_expiry = Column(DateTime)
+    preferences = Column(JSON, nullable=True)  # Store user preferences including risk settings
     created_at = Column(DateTime, server_default=func.now())
 
 class Order(Base):
     __tablename__ = "orders"
+    __table_args__ = {'extend_existing': True}
     order_id = Column(String, primary_key=True)
     broker = Column(String)
     trading_symbol = Column(String)
@@ -48,9 +51,39 @@ class Order(Base):
     highest_price_achieved = Column(Float, nullable=True)
     lowest_price_achieved = Column(Float, nullable=True)  # For SELL orders trailing stop
     trailing_stop_price = Column(Float, nullable=True)
+    # Essential tracking columns
+    status_updated_at = Column(DateTime, nullable=True)
+    broker_message = Column(Text, nullable=True)  # All broker responses (success/failure)
+    trailing_activated_at = Column(DateTime, nullable=True)
+    trailing_stop_triggered_at = Column(DateTime, nullable=True)
+    stop_loss_triggered_at = Column(DateTime, nullable=True)
+    exit_triggered_at = Column(DateTime, nullable=True)
+
+class SIPActualTrade(Base):
+    __tablename__ = "sip_actual_trades"
+    __table_args__ = {'extend_existing': True}
+    trade_id = Column(String, primary_key=True)
+    portfolio_id = Column(String, nullable=False)
+    symbol = Column(String, nullable=False)
+    timestamp = Column(DateTime, server_default=func.now())
+    price = Column(Float, nullable=False)
+    units = Column(Float, nullable=False)
+    amount = Column(Float, nullable=False)
+    trade_type = Column(String, default='BUY')
+    execution_status = Column(String, default='PENDING')  # PENDING, EXECUTED, FAILED
+    order_status = Column(String, default='PLACED')  # PLACED, FAILED
+    order_id = Column(String, nullable=True)  # For regular orders
+    gtt_order_id = Column(String, nullable=True)  # For GTT orders
+    order_type = Column(String, nullable=True)
+    broker = Column(String, nullable=True)
+    # Essential tracking columns
+    order_executed_at = Column(DateTime, nullable=True)  # When order was executed (NULL = failed)
+    broker_message = Column(Text, nullable=True)  # All broker responses
+    portfolio_updated_at = Column(DateTime, nullable=True)  # When portfolio was updated
 
 class ScheduledOrder(Base):
     __tablename__ = "scheduled_orders"
+    __table_args__ = {'extend_existing': True}
     scheduled_order_id = Column(String, primary_key=True, index=True)
     broker = Column(String)
     instrument_token = Column(String)
@@ -75,6 +108,7 @@ class ScheduledOrder(Base):
 
 class AutoOrder(Base):
     __tablename__ = "auto_orders"
+    __table_args__ = {'extend_existing': True}
     auto_order_id = Column(String, primary_key=True)
     instrument_token = Column(String)
     trading_symbol = Column(String)
@@ -93,6 +127,7 @@ class AutoOrder(Base):
 
 class GTTOrder(Base):
     __tablename__ = "gtt_orders"
+    __table_args__ = {'extend_existing': True}
     gtt_order_id = Column(String, primary_key=True)
     instrument_token = Column(String)
     trading_symbol = Column(String)
@@ -108,9 +143,13 @@ class GTTOrder(Base):
     broker = Column(String)
     user_id = Column(String)
     created_at = Column(DateTime)
+    # Additional fields for richer GTT context
+    gtt_type = Column(String, nullable=True)  # SINGLE or MULTIPLE
+    rules = Column(JSON, nullable=True)       # Store full rules array when available
 
 class TradeHistory(Base):
     __tablename__ = "trade_history"
+    __table_args__ = {'extend_existing': True}
     trade_id = Column(String, primary_key=True)
     instrument_token = Column(String)
     entry_time = Column(DateTime)
@@ -124,6 +163,7 @@ class TradeHistory(Base):
 
 class QueuedOrder(Base):
     __tablename__ = "queued_orders"
+    __table_args__ = {'extend_existing': True}
     queued_order_id = Column(String, primary_key=True)
     parent_order_id = Column(String)
     instrument_token = Column(String)
@@ -142,6 +182,7 @@ class QueuedOrder(Base):
 
 class MFSIP(Base):
     __tablename__ = "mf_sips"
+    __table_args__ = {'extend_existing': True}
     sip_id = Column(String, primary_key=True)
     scheme_code = Column(String)
     amount = Column(Float)
@@ -153,6 +194,7 @@ class MFSIP(Base):
 
 class Instrument(Base):
     __tablename__ = "instruments"
+    __table_args__ = {'extend_existing': True}
 
     instrument_token = Column(String(50), primary_key=True)
     trading_symbol = Column(String(50), nullable=False, index=True)
@@ -162,6 +204,7 @@ class Instrument(Base):
 
 class Strategy(Base):
     __tablename__ = "strategies"
+    __table_args__ = {'extend_existing': True}
     strategy_id = Column(String, primary_key=True, default=lambda: str(uuid4()))
     user_id = Column(String, nullable=False)
     broker = Column(String, nullable=False)
@@ -171,5 +214,46 @@ class Strategy(Base):
     exit_conditions = Column(JSON, nullable=False)
     parameters = Column(JSON, nullable=False)
     status = Column(String, default="inactive")
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class Position(Base):
+    __tablename__ = "positions"
+    __table_args__ = {'extend_existing': True}
+    position_id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    user_id = Column(String, nullable=False)
+    broker = Column(String, nullable=False)
+    instrument_token = Column(String, nullable=False)
+    trading_symbol = Column(String, nullable=False)
+    quantity = Column(Integer, default=0)
+    average_price = Column(Float, default=0.0)
+    last_price = Column(Float, default=0.0)
+    pnl = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+class StrategyExecution(Base):
+    __tablename__ = "strategy_executions"
+    __table_args__ = {'extend_existing': True}
+    execution_id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    strategy_id = Column(String, nullable=False)  # References strategies table
+    user_id = Column(String, nullable=False)
+    broker = Column(String, nullable=False)
+    instrument_token = Column(String, nullable=False)
+    trading_symbol = Column(String, nullable=False)
+    quantity = Column(Integer, nullable=False)
+    risk_per_trade = Column(Float, default=2.0)  # Percentage
+    stop_loss = Column(Float, nullable=True)
+    take_profit = Column(Float, nullable=True)
+    status = Column(String, default="running")  # running, stopped, completed, failed
+    entry_price = Column(Float, nullable=True)
+    exit_price = Column(Float, nullable=True)
+    pnl = Column(Float, default=0.0)
+    signals_generated = Column(Integer, default=0)
+    trades_executed = Column(Integer, default=0)
+    execution_config = Column(JSON, nullable=True)  # Store execution-specific config
+    started_at = Column(DateTime, default=datetime.now)
+    stopped_at = Column(DateTime, nullable=True)
+    last_signal_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)

@@ -5,6 +5,7 @@ from nicegui import ui
 import logging
 import asyncio
 from datetime import datetime
+from cache_manager import frontend_cache, FrontendCacheConfig
 
 # Import market utilities
 from market_utils import (

@@ -4,6 +4,8 @@
 from nicegui import ui
 import logging
 import asyncio
+from cache_manager import frontend_cache, FrontendCacheConfig
+from cache_invalidation import invalidate_on_settings_change
 
 logger = logging.getLogger(__name__)
 
@@ -32,42 +34,56 @@ async def render_settings_page(fetch_api, user_storage, apply_theme_from_storage
                 ui.button("Export Settings", icon="download").classes("text-cyan-400")
                 ui.button("Reset All", icon="refresh", color="red").classes("text-white")
 
-        # Main content in grid layout
-        with ui.row().classes("settings-layout w-full gap-6 p-4"):
-            # General Settings (left panel)
-            with ui.card().classes("dashboard-card flex-1"):
-                with ui.row().classes("card-header w-full items-center p-4"):
-                    ui.icon("tune", size="1.5rem").classes("text-purple-400")
-                    ui.label("General Preferences").classes("card-title")
+        # Main content in responsive grid layout
+        with ui.row().classes("settings-layout w-full gap-6 p-6"):
+            # Left Column - General Settings
+            with ui.column().classes("flex-1 gap-6 max-w-2xl"):
+                # General Settings
+                with ui.card().classes("dashboard-card w-full"):
+                    with ui.row().classes("card-header w-full items-center p-6"):
+                        ui.icon("tune", size="1.5rem").classes("text-purple-400")
+                        ui.label("General Preferences").classes("card-title")
 
-                ui.separator().classes("card-separator")
+                    ui.separator().classes("card-separator")
 
-                await render_enhanced_general_settings(user_storage, apply_theme_from_storage)
+                    await render_enhanced_general_settings(user_storage, apply_theme_from_storage, fetch_api)
 
-            # Broker Connections (right panel)
-            with ui.card().classes("dashboard-card flex-1"):
-                with ui.row().classes("card-header w-full items-center p-4"):
-                    ui.icon("link", size="1.5rem").classes("text-green-400")
-                    ui.label("Broker Connections").classes("card-title")
+            # Right Column - Broker Connections
+            with ui.column().classes("flex-1 gap-6 max-w-2xl"):
+                # Broker Connections
+                with ui.card().classes("dashboard-card w-full"):
+                    with ui.row().classes("card-header w-full items-center p-6"):
+                        ui.icon("link", size="1.5rem").classes("text-green-400")
+                        ui.label("Broker Connections").classes("card-title")
 
-                ui.separator().classes("card-separator")
+                    ui.separator().classes("card-separator")
 
-                await render_enhanced_broker_settings(fetch_api, user_storage, broker)
+                    await render_enhanced_broker_settings(fetch_api, user_storage, broker)
 
         # Advanced Settings Section
-        await render_enhanced_advanced_settings(user_storage)
+        await render_enhanced_advanced_settings(user_storage, fetch_api)
 
         # Security Settings Section
-        await render_enhanced_security_settings(user_storage)
+        await render_enhanced_security_settings(user_storage, fetch_api)
 
 
-async def render_enhanced_general_settings(user_storage, apply_theme_from_storage):
-    """Render enhanced general settings"""
+async def render_enhanced_general_settings(user_storage, apply_theme_from_storage, fetch_api=None):
+    """Render enhanced general settings with optimal spacing"""
 
-    with ui.column().classes("w-full p-4 gap-4"):
+    # Load user preferences from backend
+    user_preferences = {}
+    if fetch_api:
+        try:
+            prefs_response = await fetch_api("/user/preferences")
+            if prefs_response and prefs_response.get("status") == "success":
+                user_preferences = prefs_response.get("preferences", {})
+        except Exception as e:
+            logger.error(f"Error loading user preferences: {e}")
+
+    with ui.column().classes("w-full p-6 gap-6"):
         # Theme Selection
-        with ui.card().classes("w-full bg-gray-800/50 border border-purple-500/30"):
-            with ui.column().classes("p-4 gap-3"):
+        with ui.card().classes("w-full bg-gray-800/50 border border-purple-500/30 min-h-[120px]"):
+            with ui.column().classes("p-6 gap-4 h-full justify-between"):
                 with ui.row().classes("items-center gap-2 mb-2"):
                     ui.icon("palette", size="1.2rem").classes("text-purple-400")
                     ui.label("Application Theme").classes("text-white font-semibold")
@@ -85,8 +101,8 @@ async def render_enhanced_general_settings(user_storage, apply_theme_from_storag
                 ).classes("w-full")
 
         # Default Broker
-        with ui.card().classes("w-full bg-gray-800/50 border border-green-500/30"):
-            with ui.column().classes("p-4 gap-3"):
+        with ui.card().classes("w-full bg-gray-800/50 border border-green-500/30 min-h-[120px]"):
+            with ui.column().classes("p-6 gap-4 h-full justify-between"):
                 with ui.row().classes("items-center gap-2 mb-2"):
                     ui.icon("account_balance", size="1.2rem").classes("text-green-400")
                     ui.label("Default Trading Broker").classes("text-white font-semibold")
@@ -103,85 +119,108 @@ async def render_enhanced_general_settings(user_storage, apply_theme_from_storag
                 ).classes("w-full")
 
         # Trading Preferences
-        with ui.card().classes("w-full bg-gray-800/50 border border-cyan-500/30"):
-            with ui.column().classes("p-4 gap-3"):
+        with ui.card().classes("w-full bg-gray-800/50 border border-cyan-500/30 min-h-[200px]"):
+            with ui.column().classes("p-6 gap-4 h-full"):
                 with ui.row().classes("items-center gap-2 mb-3"):
                     ui.icon("trending_up", size="1.2rem").classes("text-cyan-400")
                     ui.label("Trading Preferences").classes("text-white font-semibold")
 
+                # Save preferences function
+                async def save_preference(key, value):
+                    """Save a single preference to backend"""
+                    if fetch_api:
+                        try:
+                            update_data = {key: value}
+                            await fetch_api("/user/preferences", method="POST", json=update_data)
+                            # Invalidate preferences cache
+                            user_id = user_storage.get('user_id', 'unknown')
+                            invalidate_on_settings_change(user_id, 'preferences')
+                            ui.notify(f"Setting saved: {key}", type="positive")
+                        except Exception as e:
+                            logger.error(f"Error saving preference {key}: {e}")
+                            ui.notify("Failed to save setting", type="negative")
+                    # Also save to local storage as fallback
+                    user_storage.update({key: value})
+
                 # Default order type
-                default_order_type = user_storage.get('default_order_type', 'MARKET')
+                default_order_type = user_preferences.get('default_order_type', user_storage.get('default_order_type', 'MARKET'))
                 ui.label("Default Order Type").classes("text-sm text-gray-400")
                 order_type_select = ui.select(
                     options=["MARKET", "LIMIT", "SL", "SL-M"],
                     value=default_order_type,
-                    on_change=lambda e: user_storage.update({'default_order_type': e.value})
+                    on_change=lambda e: asyncio.create_task(save_preference('default_order_type', e.value))
                 ).classes("w-full mb-3")
 
                 # Default product type
-                default_product_type = user_storage.get('default_product_type', 'CNC')
+                default_product_type = user_preferences.get('default_product_type', user_storage.get('default_product_type', 'CNC'))
                 ui.label("Default Product Type").classes("text-sm text-gray-400")
                 product_type_select = ui.select(
                     options=["CNC", "MIS", "NRML"],
                     value=default_product_type,
-                    on_change=lambda e: user_storage.update({'default_product_type': e.value})
+                    on_change=lambda e: asyncio.create_task(save_preference('default_product_type', e.value))
                 ).classes("w-full mb-3")
 
                 # Auto-refresh interval
-                refresh_interval = user_storage.get('refresh_interval', 5)
-                ui.label("Auto-refresh Interval (seconds)").classes("text-sm text-gray-400")
+                refresh_interval = user_preferences.get('refresh_interval', user_storage.get('refresh_interval', 5))
+                ui.label(f"Auto-refresh Interval: {refresh_interval} seconds").classes("text-sm text-gray-400")
                 refresh_slider = ui.slider(
                     min=1, max=30, step=1, value=refresh_interval,
-                    on_change=lambda e: user_storage.update({'refresh_interval': e.value})
+                    on_change=lambda e: asyncio.create_task(save_preference('refresh_interval', e.value))
                 ).classes("w-full")
+                
+                # Update label when slider changes
+                def update_refresh_label(e):
+                    ui.label(f"Auto-refresh Interval: {e.value} seconds").classes("text-sm text-gray-400")
+                refresh_slider.on('update:model-value', update_refresh_label)
 
         # Notification Settings
-        with ui.card().classes("w-full bg-gray-800/50 border border-yellow-500/30"):
-            with ui.column().classes("p-4 gap-3"):
+        with ui.card().classes("w-full bg-gray-800/50 border border-yellow-500/30 min-h-[180px]"):
+            with ui.column().classes("p-6 gap-4 h-full"):
                 with ui.row().classes("items-center gap-2 mb-3"):
                     ui.icon("notifications", size="1.2rem").classes("text-yellow-400")
                     ui.label("Notification Preferences").classes("text-white font-semibold")
 
-                # Notification toggles
-                order_alerts = user_storage.get('order_alerts', True)
+                # Notification toggles with backend sync
+                order_alerts = user_preferences.get('order_alerts', user_storage.get('order_alerts', True))
                 ui.switch(
                     "Order Execution Alerts",
                     value=order_alerts,
-                    on_change=lambda e: user_storage.update({'order_alerts': e.value})
+                    on_change=lambda e: asyncio.create_task(save_preference('order_alerts', e.value))
                 ).classes("w-full mb-2")
 
-                pnl_alerts = user_storage.get('pnl_alerts', True)
+                pnl_alerts = user_preferences.get('pnl_alerts', user_storage.get('pnl_alerts', True))
                 ui.switch(
                     "P&L Threshold Alerts",
                     value=pnl_alerts,
-                    on_change=lambda e: user_storage.update({'pnl_alerts': e.value})
+                    on_change=lambda e: asyncio.create_task(save_preference('pnl_alerts', e.value))
                 ).classes("w-full mb-2")
 
-                strategy_alerts = user_storage.get('strategy_alerts', True)
+                strategy_alerts = user_preferences.get('strategy_alerts', user_storage.get('strategy_alerts', True))
                 ui.switch(
                     "Strategy Signal Alerts",
                     value=strategy_alerts,
-                    on_change=lambda e: user_storage.update({'strategy_alerts': e.value})
+                    on_change=lambda e: asyncio.create_task(save_preference('strategy_alerts', e.value))
                 ).classes("w-full")
 
 
 async def render_enhanced_broker_settings(fetch_api, user_storage, broker):
     """Render enhanced broker connection settings with actual implementation"""
 
-    with ui.column().classes("w-full p-4 gap-4"):
+    with ui.column().classes("w-full p-6 gap-6"):
 
         # Real broker connection status check function
         async def check_and_display_status(broker_name, display_container):
             """Check actual broker connection status using existing API"""
             try:
                 profile = await fetch_api(f"/profile/{broker_name}")
+                token_status = await fetch_api(f"/auth/token-status/{broker_name}")
                 display_container.clear()
 
                 with display_container:
                     if profile and profile.get("name"):
                         # Connected state
-                        with ui.card().classes("w-full bg-green-900/20 border border-green-500/30"):
-                            with ui.column().classes("p-4 gap-3"):
+                        with ui.card().classes("w-full bg-green-900/20 border border-green-500/30 min-h-[200px]"):
+                            with ui.column().classes("p-6 gap-4 h-full"):
                                 with ui.row().classes("items-center justify-between"):
                                     with ui.row().classes("items-center gap-2"):
                                         ui.icon("check_circle", size="1.2rem").classes("text-green-400")
@@ -189,14 +228,33 @@ async def render_enhanced_broker_settings(fetch_api, user_storage, broker):
                                     ui.chip("Connected", color="green").classes("text-xs")
 
                                 ui.label(f"Connected as: {profile['name']}").classes("text-green-400 font-semibold")
-                                ui.label("Your account is ready for trading").classes("text-gray-300 text-sm")
+                                
+                                # Token expiry information
+                                if token_status and token_status.get("is_valid"):
+                                    expires_in = token_status.get("expires_in_hours", 0)
+                                    if expires_in > 0:
+                                        if expires_in < 2:
+                                            color_class = "text-red-400"
+                                            ui.label(f"⚠️ Token expires in {expires_in:.1f} hours").classes(color_class + " text-sm font-semibold")
+                                        elif expires_in < 6:
+                                            color_class = "text-yellow-400"
+                                            ui.label(f"⚠️ Token expires in {expires_in:.1f} hours").classes(color_class + " text-sm")
+                                        else:
+                                            color_class = "text-green-400"
+                                            ui.label(f"✅ Token valid for {expires_in:.1f} hours").classes(color_class + " text-sm")
+                                    else:
+                                        ui.label("⚠️ Token expired - please reconnect").classes("text-red-400 text-sm font-semibold")
+                                else:
+                                    ui.label("Unable to check token status").classes("text-gray-400 text-sm")
 
-                                with ui.row().classes("w-full gap-2 mt-3"):
+                                with ui.row().classes("w-full gap-2 mt-4"):
                                     ui.button("Test Connection", icon="wifi",
                                               on_click=lambda: test_broker_connection(broker_name)).classes(
                                         "flex-1 text-cyan-400 border-cyan-400").props("outline")
-                                    ui.button("Disconnect", icon="link_off", color="red",
-                                              on_click=lambda: disconnect_broker_dialog(broker_name)).classes("flex-1")
+                                    ui.button("Refresh Token", icon="refresh", color="blue",
+                                              on_click=lambda: show_renew_token_dialog(broker_name, display_container, fetch_api)).classes("flex-1")
+                                    ui.button("Revoke", icon="link_off", color="red",
+                                              on_click=lambda: revoke_token_dialog(broker_name, display_container, fetch_api)).classes("flex-1")
                     else:
                         # Not connected state - render connection form
                         await render_broker_connection_form(broker_name, display_container, fetch_api)
@@ -214,8 +272,8 @@ async def render_enhanced_broker_settings(fetch_api, user_storage, broker):
             """Render actual broker connection form based on existing implementation"""
 
             with container:
-                with ui.card().classes("w-full bg-gray-800/50 border border-red-500/30"):
-                    with ui.column().classes("p-4 gap-3"):
+                with ui.card().classes("w-full bg-gray-800/50 border border-red-500/30 min-h-[200px]"):
+                    with ui.column().classes("p-6 gap-4 h-full"):
                         with ui.row().classes("items-center gap-2 mb-3"):
                             ui.icon("link_off", size="1.2rem").classes("text-red-400")
                             ui.label(f"{broker_name} Status").classes("text-white font-semibold")
@@ -297,8 +355,8 @@ async def render_enhanced_broker_settings(fetch_api, user_storage, broker):
         upstox_status_container = ui.column().classes("w-full")
 
         # Zerodha Connection Section
-        with ui.card().classes("w-full bg-gray-800/50 border border-green-500/30"):
-            with ui.row().classes("items-center gap-2 p-4 border-b border-white/10"):
+        with ui.card().classes("w-full bg-gray-800/50 border border-green-500/30 min-h-[200px]"):
+            with ui.row().classes("items-center gap-3 p-6 border-b border-white/10"):
                 ui.icon("account_balance", size="1.2rem").classes("text-green-400")
                 ui.label("Zerodha (Kite Connect)").classes("text-white font-semibold text-lg")
 
@@ -306,8 +364,8 @@ async def render_enhanced_broker_settings(fetch_api, user_storage, broker):
             await check_and_display_status("Zerodha", zerodha_status_container)
 
         # Upstox Connection Section
-        with ui.card().classes("w-full bg-gray-800/50 border border-blue-500/30 mt-4"):
-            with ui.row().classes("items-center gap-2 p-4 border-b border-white/10"):
+        with ui.card().classes("w-full bg-gray-800/50 border border-blue-500/30 mt-6 min-h-[200px]"):
+            with ui.row().classes("items-center gap-3 p-6 border-b border-white/10"):
                 ui.icon("trending_up", size="1.2rem").classes("text-blue-400")
                 ui.label("Upstox").classes("text-white font-semibold text-lg")
 
@@ -328,7 +386,7 @@ async def render_enhanced_broker_settings(fetch_api, user_storage, broker):
                 logger.error(f"Error refreshing broker statuses: {e}")
 
         ui.button("Refresh All Connections", icon="refresh", on_click=refresh_all_statuses).classes(
-            "w-full mt-4 text-cyan-400 border-cyan-400").props("outline")
+            "w-full mt-6 py-3 text-cyan-400 border-cyan-400").props("outline")
 
 
 # Broker management functions (using actual implementation)
@@ -370,139 +428,230 @@ def execute_disconnect(dialog, broker_name):
     ui.navigate.to('/settings')
 
 
-async def render_enhanced_advanced_settings(user_storage):
+async def render_enhanced_advanced_settings(user_storage, fetch_api=None):
     """Render enhanced advanced settings"""
 
-    with ui.card().classes("dashboard-card w-full m-4"):
-        with ui.row().classes("card-header w-full items-center p-4"):
+    # Load user preferences from backend
+    user_preferences = {}
+    if fetch_api:
+        try:
+            prefs_response = await fetch_api("/user/preferences")
+            if prefs_response and prefs_response.get("status") == "success":
+                user_preferences = prefs_response.get("preferences", {})
+        except Exception as e:
+            logger.error(f"Error loading user preferences: {e}")
+
+    with ui.card().classes("dashboard-card w-full mx-6 my-6"):
+        with ui.row().classes("card-header w-full items-center p-6"):
             ui.icon("engineering", size="1.5rem").classes("text-orange-400")
             ui.label("Advanced Settings").classes("card-title")
 
         ui.separator().classes("card-separator")
 
-        with ui.column().classes("w-full p-4 gap-4"):
+        with ui.column().classes("w-full p-6 gap-6"):
             # Risk Management
-            with ui.card().classes("w-full bg-gray-800/50 border border-red-500/30"):
-                with ui.column().classes("p-4 gap-3"):
+            with ui.card().classes("w-full bg-gray-800/50 border border-red-500/30 min-h-[250px]"):
+                with ui.column().classes("p-6 gap-4 h-full"):
                     with ui.row().classes("items-center gap-2 mb-3"):
                         ui.icon("security", size="1.2rem").classes("text-red-400")
                         ui.label("Risk Management").classes("text-white font-semibold")
+                        
+                    # Show current risk status
+                    try:
+                        risk_response = await fetch_api("/risk-management/metrics")
+                        if risk_response:
+                            trading_allowed = risk_response.get('trading_allowed', True)
+                            status_color = "text-green-400" if trading_allowed else "text-red-400"
+                            status_text = "Active" if trading_allowed else "Suspended"
+                            status_icon = "check_circle" if trading_allowed else "warning"
+                            
+                            with ui.card().classes("w-full bg-gray-900/50 border border-gray-600/30 mb-4"):
+                                with ui.row().classes("p-3 items-center gap-3"):
+                                    ui.icon(status_icon, size="1rem").classes(status_color)
+                                    ui.label("Trading Status:").classes("text-gray-400 text-sm")
+                                    ui.label(status_text).classes(f"{status_color} font-semibold text-sm")
+                                    if not trading_allowed:
+                                        ui.label(f"• {risk_response.get('trading_status', 'Unknown reason')}").classes("text-red-300 text-xs")
+                    except Exception as e:
+                        logger.error(f"Error fetching risk status: {e}")
+
+                    # Save preference function for advanced settings
+                    async def save_advanced_preference(key, value):
+                        """Save an advanced preference to backend"""
+                        if fetch_api:
+                            try:
+                                update_data = {key: value}
+                                await fetch_api("/user/preferences", method="POST", json=update_data)
+                                # Invalidate preferences cache
+                                user_id = user_storage.get('user_id', 'unknown')
+                                invalidate_on_settings_change(user_id, 'risk_settings')
+                                ui.notify(f"Risk setting saved", type="positive")
+                            except Exception as e:
+                                logger.error(f"Error saving preference {key}: {e}")
+                                ui.notify("Failed to save risk setting", type="negative")
+                        # Also save to local storage as fallback
+                        user_storage.update({key: value})
 
                     # Daily loss limit
-                    daily_loss_limit = user_storage.get('daily_loss_limit', 10000)
+                    daily_loss_limit = user_preferences.get('daily_loss_limit', user_storage.get('daily_loss_limit', 10000))
                     ui.label("Daily Loss Limit (₹)").classes("text-sm text-gray-400")
                     ui.number(
                         value=daily_loss_limit,
                         min=1000, max=100000, step=1000,
-                        on_change=lambda e: user_storage.update({'daily_loss_limit': e.value})
+                        on_change=lambda e: asyncio.create_task(save_advanced_preference('daily_loss_limit', e.value))
                     ).classes("w-full mb-3")
 
                     # Position size limit
-                    position_size_limit = user_storage.get('position_size_limit', 50000)
+                    position_size_limit = user_preferences.get('position_size_limit', user_storage.get('position_size_limit', 50000))
                     ui.label("Maximum Position Size (₹)").classes("text-sm text-gray-400")
                     ui.number(
                         value=position_size_limit,
                         min=5000, max=500000, step=5000,
-                        on_change=lambda e: user_storage.update({'position_size_limit': e.value})
+                        on_change=lambda e: asyncio.create_task(save_advanced_preference('position_size_limit', e.value))
                     ).classes("w-full mb-3")
 
                     # Auto-stop trading on loss
-                    auto_stop_trading = user_storage.get('auto_stop_trading', True)
+                    auto_stop_trading = user_preferences.get('auto_stop_trading', user_storage.get('auto_stop_trading', True))
                     ui.switch(
                         "Auto-stop trading on daily loss limit",
                         value=auto_stop_trading,
-                        on_change=lambda e: user_storage.update({'auto_stop_trading': e.value})
+                        on_change=lambda e: asyncio.create_task(save_advanced_preference('auto_stop_trading', e.value))
+                    ).classes("w-full mb-3")
+                    
+                    # Maximum open positions
+                    max_open_positions = user_preferences.get('max_open_positions', user_storage.get('max_open_positions', 10))
+                    ui.label("Maximum Open Positions").classes("text-sm text-gray-400")
+                    ui.number(
+                        value=max_open_positions,
+                        min=1, max=50, step=1,
+                        on_change=lambda e: asyncio.create_task(save_advanced_preference('max_open_positions', e.value))
+                    ).classes("w-full mb-3")
+                    
+                    # Risk per trade percentage
+                    risk_per_trade = user_preferences.get('risk_per_trade', user_storage.get('risk_per_trade', 2.0))
+                    ui.label("Risk Per Trade (%)").classes("text-sm text-gray-400")
+                    ui.number(
+                        value=risk_per_trade,
+                        min=0.5, max=10.0, step=0.5, format="%.1f",
+                        on_change=lambda e: asyncio.create_task(save_advanced_preference('risk_per_trade', e.value))
                     ).classes("w-full")
 
             # API Settings
-            with ui.card().classes("w-full bg-gray-800/50 border border-cyan-500/30"):
-                with ui.column().classes("p-4 gap-3"):
+            with ui.card().classes("w-full bg-gray-800/50 border border-cyan-500/30 min-h-[200px]"):
+                with ui.column().classes("p-6 gap-4 h-full"):
                     with ui.row().classes("items-center gap-2 mb-3"):
                         ui.icon("api", size="1.2rem").classes("text-cyan-400")
                         ui.label("API Configuration").classes("text-white font-semibold")
 
                     # Request timeout
-                    request_timeout = user_storage.get('request_timeout', 30)
+                    request_timeout = user_preferences.get('request_timeout', user_storage.get('request_timeout', 30))
                     ui.label("API Request Timeout (seconds)").classes("text-sm text-gray-400")
                     ui.number(
                         value=request_timeout,
                         min=5, max=120, step=5,
-                        on_change=lambda e: user_storage.update({'request_timeout': e.value})
+                        on_change=lambda e: asyncio.create_task(save_advanced_preference('request_timeout', e.value))
                     ).classes("w-full mb-3")
 
                     # Rate limiting
-                    enable_rate_limiting = user_storage.get('enable_rate_limiting', True)
+                    enable_rate_limiting = user_preferences.get('enable_rate_limiting', user_storage.get('enable_rate_limiting', True))
                     ui.switch(
                         "Enable API Rate Limiting",
                         value=enable_rate_limiting,
-                        on_change=lambda e: user_storage.update({'enable_rate_limiting': e.value})
+                        on_change=lambda e: asyncio.create_task(save_advanced_preference('enable_rate_limiting', e.value))
                     ).classes("w-full mb-2")
 
                     # Auto-retry failed requests
-                    auto_retry_requests = user_storage.get('auto_retry_requests', True)
+                    auto_retry_requests = user_preferences.get('auto_retry_requests', user_storage.get('auto_retry_requests', True))
                     ui.switch(
                         "Auto-retry Failed Requests",
                         value=auto_retry_requests,
-                        on_change=lambda e: user_storage.update({'auto_retry_requests': e.value})
+                        on_change=lambda e: asyncio.create_task(save_advanced_preference('auto_retry_requests', e.value))
                     ).classes("w-full")
 
 
-async def render_enhanced_security_settings(user_storage):
+async def render_enhanced_security_settings(user_storage, fetch_api=None):
     """Render enhanced security settings"""
 
-    with ui.card().classes("dashboard-card w-full m-4"):
-        with ui.row().classes("card-header w-full items-center p-4"):
+    # Load user preferences from backend
+    user_preferences = {}
+    if fetch_api:
+        try:
+            prefs_response = await fetch_api("/user/preferences")
+            if prefs_response and prefs_response.get("status") == "success":
+                user_preferences = prefs_response.get("preferences", {})
+        except Exception as e:
+            logger.error(f"Error loading user preferences: {e}")
+
+    with ui.card().classes("dashboard-card w-full mx-6 my-6"):
+        with ui.row().classes("card-header w-full items-center p-6"):
             ui.icon("shield", size="1.5rem").classes("text-red-400")
             ui.label("Security Settings").classes("card-title")
 
         ui.separator().classes("card-separator")
 
-        with ui.column().classes("w-full p-4 gap-4"):
+        with ui.column().classes("w-full p-6 gap-6"):
             # Session Management
-            with ui.card().classes("w-full bg-gray-800/50 border border-red-500/30"):
-                with ui.column().classes("p-4 gap-3"):
+            with ui.card().classes("w-full bg-gray-800/50 border border-red-500/30 min-h-[140px]"):
+                with ui.column().classes("p-6 gap-4 h-full justify-between"):
                     with ui.row().classes("items-center gap-2 mb-3"):
                         ui.icon("timer", size="1.2rem").classes("text-red-400")
                         ui.label("Session Management").classes("text-white font-semibold")
 
+                    # Save preference function for security settings
+                    async def save_security_preference(key, value):
+                        """Save a security preference to backend"""
+                        if fetch_api:
+                            try:
+                                update_data = {key: value}
+                                await fetch_api("/user/preferences", method="POST", json=update_data)
+                                # Invalidate preferences cache  
+                                user_id = user_storage.get('user_id', 'unknown')
+                                invalidate_on_settings_change(user_id, 'security_settings')
+                                ui.notify(f"Security setting saved", type="positive")
+                            except Exception as e:
+                                logger.error(f"Error saving preference {key}: {e}")
+                                ui.notify("Failed to save security setting", type="negative")
+                        # Also save to local storage as fallback
+                        user_storage.update({key: value})
+
                     # Session timeout
-                    session_timeout = user_storage.get('session_timeout', 60)
+                    session_timeout = user_preferences.get('session_timeout', user_storage.get('session_timeout', 60))
                     ui.label("Auto Logout After Inactivity (minutes)").classes("text-sm text-gray-400")
                     ui.number(
                         value=session_timeout,
                         min=15, max=480, step=15,
-                        on_change=lambda e: user_storage.update({'session_timeout': e.value})
+                        on_change=lambda e: asyncio.create_task(save_security_preference('session_timeout', e.value))
                     ).classes("w-full mb-3")
 
                     # Remember login
-                    remember_login = user_storage.get('remember_login', False)
+                    remember_login = user_preferences.get('remember_login', user_storage.get('remember_login', False))
                     ui.switch(
                         "Remember Login (Not Recommended)",
                         value=remember_login,
-                        on_change=lambda e: user_storage.update({'remember_login': e.value})
+                        on_change=lambda e: asyncio.create_task(save_security_preference('remember_login', e.value))
                     ).classes("w-full")
 
             # Data Protection
-            with ui.card().classes("w-full bg-gray-800/50 border border-purple-500/30"):
-                with ui.column().classes("p-4 gap-3"):
+            with ui.card().classes("w-full bg-gray-800/50 border border-purple-500/30 min-h-[200px]"):
+                with ui.column().classes("p-6 gap-4 h-full"):
                     with ui.row().classes("items-center gap-2 mb-3"):
                         ui.icon("lock", size="1.2rem").classes("text-purple-400")
                         ui.label("Data Protection").classes("text-white font-semibold")
 
                     # Encrypt local data
-                    encrypt_local_data = user_storage.get('encrypt_local_data', True)
+                    encrypt_local_data = user_preferences.get('encrypt_local_data', user_storage.get('encrypt_local_data', True))
                     ui.switch(
                         "Encrypt Local Data",
                         value=encrypt_local_data,
-                        on_change=lambda e: user_storage.update({'encrypt_local_data': e.value})
+                        on_change=lambda e: asyncio.create_task(save_security_preference('encrypt_local_data', e.value))
                     ).classes("w-full mb-2")
 
                     # Clear data on logout
-                    clear_data_logout = user_storage.get('clear_data_logout', True)
+                    clear_data_logout = user_preferences.get('clear_data_logout', user_storage.get('clear_data_logout', True))
                     ui.switch(
                         "Clear Local Data on Logout",
                         value=clear_data_logout,
-                        on_change=lambda e: user_storage.update({'clear_data_logout': e.value})
+                        on_change=lambda e: asyncio.create_task(save_security_preference('clear_data_logout', e.value))
                     ).classes("w-full mb-3")
 
                     # Data backup
@@ -513,8 +662,8 @@ async def render_enhanced_security_settings(user_storage):
                                   on_click=clear_all_data).classes("flex-1")
 
             # Security Actions
-            with ui.card().classes("w-full bg-gray-800/50 border border-yellow-500/30"):
-                with ui.column().classes("p-4 gap-3"):
+            with ui.card().classes("w-full bg-gray-800/50 border border-yellow-500/30 min-h-[140px]"):
+                with ui.column().classes("p-6 gap-4 h-full justify-between"):
                     with ui.row().classes("items-center gap-2 mb-3"):
                         ui.icon("admin_panel_settings", size="1.2rem").classes("text-yellow-400")
                         ui.label("Security Actions").classes("text-white font-semibold")
@@ -667,3 +816,106 @@ def execute_clear_data(dialog):
     dialog.close()
     # This would clear all local storage and redirect to login
     ui.navigate.to('/')
+
+
+# Token Management Functions for Broker Authentication
+
+async def show_renew_token_dialog(broker_name, display_container, fetch_api):
+    """Show dialog to renew broker token"""
+    with ui.dialog() as dialog, ui.card().classes("dashboard-card min-w-[500px]"):
+        with ui.column().classes("p-6 gap-4"):
+            ui.label(f"Refresh {broker_name} Token").classes("text-xl font-bold text-white")
+            ui.label(f"Your {broker_name} access token needs to be refreshed for continued trading").classes("text-gray-300")
+
+            with ui.card().classes("w-full bg-blue-900/20 border border-blue-500/30"):
+                with ui.row().classes("p-4 items-center gap-3"):
+                    ui.icon("info", size="1.2rem").classes("text-blue-400")
+                    ui.label("You'll need to get a new authentication token from your broker's login page").classes("text-sm text-blue-300")
+
+            if broker_name == "Zerodha":
+                ui.label("Request Token").classes("text-sm text-gray-400 mt-3")
+                ui.label("Get your new request token from Zerodha Kite login").classes("text-xs text-gray-500")
+                token_input = ui.input(placeholder="Enter new Zerodha Request Token").classes("w-full")
+                
+                async def renew_zerodha():
+                    if token_input.value:
+                        try:
+                            resp = await fetch_api(f"/auth/zerodha/?request_token={token_input.value}", method="POST")
+                            if resp and resp.get("status") == "success":
+                                ui.notify("Zerodha token renewed successfully!", type="positive")
+                                dialog.close()
+                                await asyncio.sleep(0.5)
+                                ui.navigate.reload()
+                            else:
+                                ui.notify("Failed to renew Zerodha token. Please check your request token.", type="negative")
+                        except Exception as e:
+                            ui.notify(f"Error renewing token: {str(e)}", type="negative")
+                    else:
+                        ui.notify("Request token is required", type="warning")
+
+                renew_action = renew_zerodha
+
+            else:  # Upstox
+                ui.label("Auth Code").classes("text-sm text-gray-400 mt-3")
+                ui.label("Get your new auth code from Upstox login flow").classes("text-xs text-gray-500")
+                token_input = ui.input(placeholder="Enter new Upstox Auth Code").classes("w-full")
+                
+                async def renew_upstox():
+                    if token_input.value:
+                        try:
+                            resp = await fetch_api(f"/auth/upstox/?auth_code={token_input.value}", method="POST")
+                            if resp and resp.get("status") == "success":
+                                ui.notify("Upstox token renewed successfully!", type="positive")
+                                dialog.close()
+                                await asyncio.sleep(0.5)
+                                ui.navigate.reload()
+                            else:
+                                ui.notify("Failed to renew Upstox token. Please check your auth code.", type="negative")
+                        except Exception as e:
+                            ui.notify(f"Error renewing token: {str(e)}", type="negative")
+                    else:
+                        ui.notify("Auth code is required", type="warning")
+
+                renew_action = renew_upstox
+
+            with ui.row().classes("gap-2 justify-end w-full mt-4"):
+                ui.button("Cancel", on_click=dialog.close).classes("text-gray-400")
+                ui.button(f"Refresh {broker_name} Token", color="blue", on_click=renew_action).classes("text-white")
+
+    dialog.open()
+
+
+async def revoke_token_dialog(broker_name, display_container, fetch_api):
+    """Show dialog to revoke broker token"""
+    with ui.dialog() as dialog, ui.card().classes("dashboard-card min-w-[450px]"):
+        with ui.column().classes("p-6 gap-4"):
+            ui.label(f"Revoke {broker_name} Token").classes("text-xl font-bold text-white")
+            ui.label(f"This will permanently revoke your {broker_name} access token").classes("text-gray-300")
+
+            with ui.card().classes("w-full bg-red-900/20 border border-red-500/30"):
+                with ui.column().classes("p-4 gap-2"):
+                    with ui.row().classes("items-center gap-2"):
+                        ui.icon("warning", size="1.2rem").classes("text-red-400")
+                        ui.label("Warning: This action cannot be undone").classes("text-sm text-red-300 font-semibold")
+                    ui.label("• You won't be able to place trades until you reconnect").classes("text-sm text-red-300")
+                    ui.label("• All active orders and positions will remain unaffected").classes("text-sm text-red-300")
+                    ui.label("• You'll need to re-authenticate to resume trading").classes("text-sm text-red-300")
+
+            async def execute_revoke():
+                try:
+                    resp = await fetch_api(f"/auth/revoke-token/{broker_name}", method="DELETE")
+                    if resp and resp.get("status") == "success":
+                        ui.notify(f"{broker_name} token revoked successfully", type="positive")
+                        dialog.close()
+                        await asyncio.sleep(0.5)
+                        ui.navigate.reload()
+                    else:
+                        ui.notify(f"Failed to revoke {broker_name} token", type="negative")
+                except Exception as e:
+                    ui.notify(f"Error revoking token: {str(e)}", type="negative")
+
+            with ui.row().classes("gap-2 justify-end w-full mt-4"):
+                ui.button("Cancel", on_click=dialog.close).classes("text-gray-400")
+                ui.button(f"Revoke {broker_name} Token", color="red", on_click=execute_revoke).classes("text-white")
+
+    dialog.open()

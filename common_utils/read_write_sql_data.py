@@ -3,8 +3,9 @@ import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import text
 
-logging.basicConfig(level=logging.INFO)
+# Removed basicConfig to not interfere with main app logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 async def load_sql_data(df: pd.DataFrame, table_name: str, load_type: str, index_required: bool, db: AsyncSession) -> None:

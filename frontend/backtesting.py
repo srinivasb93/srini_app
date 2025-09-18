@@ -154,7 +154,8 @@ async def fetch_ohlc_data(fetch_api, instrument, from_date, to_date, interval="1
             "from_date": from_date,
             "to_date": to_date,
             "interval": interval.split("day")[0] if "day" in interval else interval,
-            "unit": "days" if "day" in interval else "minutes"
+            "unit": "days" if "day" in interval else "minutes",
+            "source": "default"  # Can be "default", "db", "upstox", or "openchart"
         }
 
         # Make API request
@@ -447,6 +448,11 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
                         "clearable dense").classes("w-full")
                     strategies_select = ui.select(options=strategy_options, label="Select Strategy").props(
                         "dense").classes("w-full")
+                    timeframe_select = ui.select(
+                        options=["1min", "5min", "15min", "30min", "60min", "day", "week"],
+                        label="Data Timeframe",
+                        value="day"
+                    ).props("dense hint='Timeframe for backtesting data'").classes("w-full")
 
                 with ui.expansion("Date Range & Capital", icon="date_range", value=True).classes("w-full"):
                     with ui.row().classes("w-full gap-2"):
@@ -627,7 +633,7 @@ async def render_backtesting_page(fetch_api, user_storage, instruments):
             backtest_payload = {
                 "trading_symbol": instrument_select.value,
                 "instrument_token": instruments[instrument_select.value],
-                "timeframe": "day",
+                "timeframe": timeframe_select.value,
                 "strategy": strategy_value,
                 "params": params,
                 "start_date": start_date.value,

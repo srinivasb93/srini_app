@@ -1,0 +1,916 @@
+{
+  "main_py_endpoints": {
+    "auth": {
+      "POST /auth/register": {
+        "description": "Register new user",
+        "payload": {
+          "email": "test@example.com",
+          "password": "securepassword123",
+          "upstox_api_key": "your_upstox_api_key",
+          "upstox_api_secret": "your_upstox_api_secret",
+          "zerodha_api_key": "your_zerodha_api_key",
+          "zerodha_api_secret": "your_zerodha_api_secret"
+        }
+      },
+      "POST /auth/login": {
+        "description": "User login (uses form data)",
+        "payload": {
+          "username": "test@example.com",
+          "password": "securepassword123"
+        },
+        "note": "This endpoint uses OAuth2PasswordRequestForm, not JSON"
+      },
+      "POST /auth/upstox": {
+        "description": "Authenticate Upstox",
+        "payload": {
+          "auth_code": "your_upstox_auth_code"
+        }
+      },
+      "POST /auth/zerodha/": {
+        "description": "Authenticate Zerodha",
+        "payload": {
+          "request_token": "your_zerodha_request_token"
+        }
+      },
+      "DELETE /auth/revoke-token/{broker}": {
+        "description": "Revoke broker access token",
+        "path_params": {
+          "broker": "Upstox"
+        },
+        "note": "No payload required, uses path parameter"
+      }
+    },
+    "orders": {
+      "POST /orders/": {
+        "description": "Place new order",
+        "payload": {
+          "trading_symbol": "RELIANCE-EQ",
+          "instrument_token": "2885",
+          "quantity": 10,
+          "order_type": "MARKET",
+          "transaction_type": "BUY",
+          "product_type": "CNC",
+          "is_amo": false,
+          "price": 0.0,
+          "trigger_price": 0.0,
+          "stop_loss": null,
+          "target": null,
+          "validity": "DAY",
+          "broker": "Zerodha",
+          "schedule_datetime": null,
+          "is_trailing_stop_loss": false,
+          "trailing_stop_loss_percent": null,
+          "trail_start_target_percent": null
+        }
+      },
+      "DELETE /orders/{order_id}": {
+        "description": "Cancel order",
+        "path_params": {
+          "order_id": "your_order_id"
+        },
+        "note": "No payload required, uses path parameter"
+      },
+      "PUT /orders/{order_id}/modify": {
+        "description": "Modify existing order",
+        "path_params": {
+          "order_id": "your_order_id"
+        },
+        "payload": {
+          "quantity": 15,
+          "order_type": "LIMIT",
+          "price": 2500.50,
+          "trigger_price": 2450.00,
+          "validity": "DAY"
+        }
+      },
+      "POST /scheduled-orders/": {
+        "description": "Create scheduled order",
+        "payload": {
+          "broker": "Zerodha",
+          "instrument_token": "2885",
+          "trading_symbol": "RELIANCE-EQ",
+          "transaction_type": "BUY",
+          "quantity": 10,
+          "order_type": "LIMIT",
+          "price": 2500.00,
+          "trigger_price": null,
+          "product_type": "CNC",
+          "schedule_datetime": "2024-01-15T09:30:00",
+          "stop_loss": 2400.00,
+          "target": 2600.00,
+          "is_amo": false
+        }
+      },
+      "DELETE /scheduled-orders/{scheduled_order_id}": {
+        "description": "Delete scheduled order",
+        "path_params": {
+          "scheduled_order_id": "your_scheduled_order_id",
+          "broker": "Zerodha"
+        },
+        "note": "No payload required, uses path parameters"
+      },
+      "PUT /scheduled-orders/{scheduled_order_id}": {
+        "description": "Modify scheduled order",
+        "path_params": {
+          "scheduled_order_id": "your_scheduled_order_id"
+        },
+        "payload": {
+          "broker": "Zerodha",
+          "instrument_token": "2885",
+          "trading_symbol": "RELIANCE-EQ",
+          "transaction_type": "BUY",
+          "quantity": 15,
+          "order_type": "LIMIT",
+          "price": 2500.00,
+          "trigger_price": null,
+          "product_type": "CNC",
+          "schedule_datetime": "2024-01-15T09:30:00",
+          "stop_loss": 2400.00,
+          "target": 2600.00,
+          "is_amo": false
+        }
+      },
+      "POST /auto-orders/": {
+        "description": "Create auto order",
+        "payload": {
+          "trading_symbol": "RELIANCE-EQ",
+          "instrument_token": "2885",
+          "transaction_type": "BUY",
+          "risk_per_trade": 2.0,
+          "stop_loss_type": "PERCENTAGE",
+          "stop_loss_value": 5.0,
+          "target_value": 10.0,
+          "atr_period": 14,
+          "product_type": "CNC",
+          "order_type": "MARKET",
+          "limit_price": null,
+          "broker": "Zerodha"
+        }
+      }
+    },
+    "gtt_orders": {
+      "POST /gtt-orders/": {
+        "description": "Create GTT order",
+        "payload": {
+          "instrument_token": "2885",
+          "trading_symbol": "RELIANCE-EQ",
+          "transaction_type": "BUY",
+          "quantity": 10,
+          "trigger_type": "single",
+          "trigger_price": 2450.00,
+          "limit_price": 2440.00,
+          "last_price": 2500.00,
+          "second_trigger_price": null,
+          "second_limit_price": null,
+          "broker": "Zerodha"
+        }
+      },
+      "PUT /gtt-orders/{broker}/{gtt_id}": {
+        "description": "Modify GTT order",
+        "path_params": {
+          "broker": "Zerodha",
+          "gtt_id": "your_gtt_id"
+        },
+        "payload": {
+          "instrument_token": "2885",
+          "trading_symbol": "RELIANCE-EQ",
+          "transaction_type": "BUY",
+          "quantity": 15,
+          "trigger_type": "single",
+          "trigger_price": 2400.00,
+          "limit_price": 2390.00,
+          "last_price": 2500.00,
+          "second_trigger_price": null,
+          "second_limit_price": null,
+          "broker": "Zerodha"
+        }
+      },
+      "DELETE /gtt-orders/{broker}/{gtt_id}": {
+        "description": "Delete GTT order",
+        "path_params": {
+          "broker": "Zerodha",
+          "gtt_id": "your_gtt_id"
+        },
+        "note": "No payload required, uses path parameters"
+      }
+    },
+    "algo_trading": {
+      "POST /algo-trading/execute": {
+        "description": "Execute strategy",
+        "payload": {
+          "broker": "Zerodha",
+          "strategy": "moving_average_crossover",
+          "instrument_token": "2885",
+          "quantity": 10,
+          "stop_loss": 2400.00,
+          "take_profit": 2600.00
+        }
+      },
+      "POST /algo-trading/backtest": {
+        "description": "Backtest strategy",
+        "payload": {
+          "trading_symbol": "RELIANCE-EQ",
+          "instrument_token": "2885",
+          "timeframe": "day",
+          "strategy": "moving_average_crossover",
+          "params": {
+            "short_period": 10,
+            "long_period": 20,
+            "initial_investment": 100000,
+            "stop_loss_range": [2, 5],
+            "target_range": [5, 10]
+          },
+          "start_date": "2023-01-01",
+          "end_date": "2023-12-31"
+        }
+      },
+      "POST /strategies/": {
+        "description": "Create strategy",
+        "payload": {
+          "broker": "Zerodha",
+          "name": "My Custom Strategy",
+          "description": "A custom trading strategy",
+          "entry_conditions": [
+            {
+              "condition": "price_above_ma",
+              "parameters": {
+                "ma_period": 20
+              }
+            }
+          ],
+          "exit_conditions": [
+            {
+              "condition": "stop_loss",
+              "parameters": {
+                "percentage": 5
+              }
+            }
+          ],
+          "parameters": {
+            "risk_per_trade": 2.0,
+            "position_size": 10
+          }
+        }
+      },
+      "POST /algo-trading/schedule": {
+        "description": "Schedule strategy execution",
+        "payload": {
+          "broker": "Zerodha",
+          "strategy": "moving_average_crossover",
+          "instrument_token": "2885",
+          "quantity": 10,
+          "stop_loss": 2400.00,
+          "take_profit": 2600.00
+        },
+        "query_params": {
+          "interval_minutes": 5
+        }
+      },
+      "POST /algo-trading/stop": {
+        "description": "Stop strategy execution",
+        "payload": {
+          "strategy": "moving_average_crossover",
+          "instrument_token": "2885"
+        }
+      },
+      "POST /strategies/{strategy_id}/execute": {
+        "description": "Execute specific strategy",
+        "path_params": {
+          "strategy_id": "your_strategy_id"
+        },
+        "payload": {
+          "instrument_token": "2885",
+          "trading_symbol": "RELIANCE-EQ",
+          "quantity": 10,
+          "risk_per_trade": 2.0,
+          "stop_loss": 2400.00,
+          "take_profit": 2600.00,
+          "position_sizing_percent": 10.0,
+          "position_sizing_mode": "Auto Calculate",
+          "total_capital": 100000.0,
+          "timeframe": "day",
+          "trailing_stop_enabled": false,
+          "trailing_stop_percent": null,
+          "trailing_stop_min": null,
+          "partial_exits": [
+            {
+              "target": 2600.00,
+              "qty_percent": 50.0
+            }
+          ]
+        }
+      },
+      "POST /strategies/{strategy_id}/{action}": {
+        "description": "Activate/deactivate strategy",
+        "path_params": {
+          "strategy_id": "your_strategy_id",
+          "action": "activate"
+        },
+        "note": "No payload required, uses path parameters. Action can be 'activate' or 'deactivate'"
+      },
+      "DELETE /strategies/{strategy_id}": {
+        "description": "Delete strategy",
+        "path_params": {
+          "strategy_id": "your_strategy_id"
+        },
+        "note": "No payload required, uses path parameter"
+      },
+      "PUT /strategies/{strategy_id}": {
+        "description": "Update strategy",
+        "path_params": {
+          "strategy_id": "your_strategy_id"
+        },
+        "payload": {
+          "broker": "Zerodha",
+          "name": "Updated Strategy Name",
+          "description": "Updated strategy description",
+          "entry_conditions": [
+            {
+              "condition": "price_above_ma",
+              "parameters": {
+                "ma_period": 25
+              }
+            }
+          ],
+          "exit_conditions": [
+            {
+              "condition": "stop_loss",
+              "parameters": {
+                "percentage": 3
+              }
+            }
+          ],
+          "parameters": {
+            "risk_per_trade": 1.5,
+            "position_size": 8
+          }
+        }
+      },
+      "POST /strategies/{strategy_id}/duplicate": {
+        "description": "Duplicate strategy",
+        "path_params": {
+          "strategy_id": "your_strategy_id"
+        },
+        "note": "No payload required, uses path parameter"
+      }
+    },
+    "risk_management": {
+      "POST /risk-management/emergency-stop": {
+        "description": "Activate emergency stop",
+        "payload": {
+          "reason": "Manual activation via API"
+        }
+      },
+      "POST /risk-management/emergency-stop/deactivate": {
+        "description": "Deactivate emergency stop",
+        "note": "No payload required"
+      }
+    },
+    "user": {
+      "POST /user/preferences": {
+        "description": "Update user preferences",
+        "payload": {
+          "risk_tolerance": "moderate",
+          "default_broker": "Zerodha",
+          "notification_settings": {
+            "email_notifications": true,
+            "sms_notifications": false,
+            "trade_alerts": true
+          }
+        }
+      }
+    },
+    "executions": {
+      "POST /executions/emergency-stop": {
+        "description": "Emergency stop all executions",
+        "note": "No payload required"
+      },
+      "POST /strategies/pause-all": {
+        "description": "Pause all strategies",
+        "note": "No payload required"
+      },
+      "POST /strategies/start-all": {
+        "description": "Start all strategies",
+        "note": "No payload required"
+      },
+      "POST /executions/{execution_id}/stop": {
+        "description": "Stop specific execution",
+        "path_params": {
+          "execution_id": "your_execution_id"
+        },
+        "note": "No payload required, uses path parameter"
+      },
+      "POST /executions/cleanup": {
+        "description": "Cleanup executions",
+        "note": "No payload required"
+      }
+    }
+  },
+  "sip_routes_endpoints": {
+    "backtesting": {
+      "POST /sip/backtest": {
+        "description": "Run SIP backtest",
+        "payload": {
+          "symbols": ["RELIANCE", "TCS", "INFY"],
+          "start_date": "2023-01-01",
+          "end_date": "2023-12-31",
+          "config": {
+            "fixed_investment": 5000,
+            "major_drawdown_threshold": -10.0,
+            "minor_drawdown_threshold": -4.0,
+            "extreme_drawdown_threshold": -15.0,
+            "minor_drawdown_inv_multiplier": 1.75,
+            "major_drawdown_inv_multiplier": 3.0,
+            "extreme_drawdown_inv_multiplier": 4.0,
+            "rolling_window": 100,
+            "fallback_day": 28,
+            "min_investment_gap_days": 5,
+            "max_amount_in_a_month": 20000,
+            "price_reduction_threshold": 4.0,
+            "force_remaining_investment": true
+          },
+          "enable_monthly_limits": true
+        }
+      },
+      "POST /sip/optimize-config": {
+        "description": "Optimize SIP configuration",
+        "payload": {
+          "symbol": "RELIANCE",
+          "target_monthly_utilization": 80.0,
+          "risk_tolerance": "moderate"
+        }
+      },
+      "POST /sip/batch-backtest/multi-configs": {
+        "description": "Run batch backtest with multiple configurations",
+        "payload": {
+          "symbols": ["RELIANCE", "TCS"],
+          "configs": [
+            {
+              "fixed_investment": 5000,
+              "major_drawdown_threshold": -10.0,
+              "minor_drawdown_threshold": -4.0,
+              "extreme_drawdown_threshold": -15.0,
+              "minor_drawdown_inv_multiplier": 1.75,
+              "major_drawdown_inv_multiplier": 3.0,
+              "extreme_drawdown_inv_multiplier": 4.0,
+              "rolling_window": 100,
+              "fallback_day": 28,
+              "min_investment_gap_days": 5,
+              "max_amount_in_a_month": 20000,
+              "price_reduction_threshold": 4.0,
+              "force_remaining_investment": true
+            },
+            {
+              "fixed_investment": 10000,
+              "major_drawdown_threshold": -8.0,
+              "minor_drawdown_threshold": -3.0,
+              "extreme_drawdown_threshold": -12.0,
+              "minor_drawdown_inv_multiplier": 2.0,
+              "major_drawdown_inv_multiplier": 4.0,
+              "extreme_drawdown_inv_multiplier": 5.0,
+              "rolling_window": 120,
+              "fallback_day": 25,
+              "min_investment_gap_days": 3,
+              "max_amount_in_a_month": 40000,
+              "price_reduction_threshold": 3.0,
+              "force_remaining_investment": true
+            }
+          ],
+          "start_date": "2023-01-01",
+          "end_date": "2023-12-31"
+        }
+      }
+    },
+    "portfolios": {
+      "POST /sip/portfolio/multi": {
+        "description": "Create multi-symbol portfolio",
+        "payload": {
+          "portfolio_name": "My Multi Portfolio",
+          "symbols": [
+            {
+              "symbol": "RELIANCE",
+              "allocation_percentage": 40.0,
+              "config": {
+                "fixed_investment": 2000,
+                "major_drawdown_threshold": -10.0,
+                "minor_drawdown_threshold": -4.0,
+                "extreme_drawdown_threshold": -15.0,
+                "minor_drawdown_inv_multiplier": 1.75,
+                "major_drawdown_inv_multiplier": 3.0,
+                "extreme_drawdown_inv_multiplier": 4.0,
+                "rolling_window": 100,
+                "fallback_day": 28,
+                "min_investment_gap_days": 5,
+                "max_amount_in_a_month": 8000,
+                "price_reduction_threshold": 4.0,
+                "force_remaining_investment": true
+              }
+            },
+            {
+              "symbol": "TCS",
+              "allocation_percentage": 30.0,
+              "config": {
+                "fixed_investment": 1500,
+                "major_drawdown_threshold": -8.0,
+                "minor_drawdown_threshold": -3.0,
+                "extreme_drawdown_threshold": -12.0,
+                "minor_drawdown_inv_multiplier": 2.0,
+                "major_drawdown_inv_multiplier": 4.0,
+                "extreme_drawdown_inv_multiplier": 5.0,
+                "rolling_window": 120,
+                "fallback_day": 25,
+                "min_investment_gap_days": 3,
+                "max_amount_in_a_month": 6000,
+                "price_reduction_threshold": 3.0,
+                "force_remaining_investment": true
+              }
+            },
+            {
+              "symbol": "INFY",
+              "allocation_percentage": 30.0,
+              "config": {
+                "fixed_investment": 1500,
+                "major_drawdown_threshold": -8.0,
+                "minor_drawdown_threshold": -3.0,
+                "extreme_drawdown_threshold": -12.0,
+                "minor_drawdown_inv_multiplier": 2.0,
+                "major_drawdown_inv_multiplier": 4.0,
+                "extreme_drawdown_inv_multiplier": 5.0,
+                "rolling_window": 120,
+                "fallback_day": 25,
+                "min_investment_gap_days": 3,
+                "max_amount_in_a_month": 6000,
+                "price_reduction_threshold": 3.0,
+                "force_remaining_investment": true
+              }
+            }
+          ],
+          "default_config": {
+            "fixed_investment": 5000,
+            "major_drawdown_threshold": -10.0,
+            "minor_drawdown_threshold": -4.0,
+            "extreme_drawdown_threshold": -15.0,
+            "minor_drawdown_inv_multiplier": 1.75,
+            "major_drawdown_inv_multiplier": 3.0,
+            "extreme_drawdown_inv_multiplier": 4.0,
+            "rolling_window": 100,
+            "fallback_day": 28,
+            "min_investment_gap_days": 5,
+            "max_amount_in_a_month": 20000,
+            "price_reduction_threshold": 4.0,
+            "force_remaining_investment": true
+          },
+          "auto_rebalance": true,
+          "rebalance_frequency_days": 30
+        }
+      },
+      "POST /sip/portfolio": {
+        "description": "Create single symbol portfolio",
+        "payload": {
+          "symbol": "RELIANCE",
+          "portfolio_name": "My Reliance Portfolio",
+          "config": {
+            "fixed_investment": 5000,
+            "major_drawdown_threshold": -10.0,
+            "minor_drawdown_threshold": -4.0,
+            "extreme_drawdown_threshold": -15.0,
+            "minor_drawdown_inv_multiplier": 1.75,
+            "major_drawdown_inv_multiplier": 3.0,
+            "extreme_drawdown_inv_multiplier": 4.0,
+            "rolling_window": 100,
+            "fallback_day": 28,
+            "min_investment_gap_days": 5,
+            "max_amount_in_a_month": 20000,
+            "price_reduction_threshold": 4.0,
+            "force_remaining_investment": true
+          }
+        }
+      },
+      "PUT /sip/portfolio/{portfolio_id}/cancel": {
+        "description": "Cancel portfolio",
+        "path_params": {
+          "portfolio_id": "your_portfolio_id"
+        },
+        "note": "No payload required, uses path parameter"
+      },
+      "DELETE /sip/portfolio/{portfolio_id}": {
+        "description": "Delete portfolio",
+        "path_params": {
+          "portfolio_id": "your_portfolio_id"
+        },
+        "note": "No payload required, uses path parameter"
+      },
+      "PUT /sip/portfolio/{portfolio_id}": {
+        "description": "Update portfolio",
+        "path_params": {
+          "portfolio_id": "your_portfolio_id"
+        },
+        "payload": {
+          "portfolio_name": "Updated Portfolio Name",
+          "config": {
+            "fixed_investment": 7500,
+            "major_drawdown_threshold": -8.0,
+            "minor_drawdown_threshold": -3.0,
+            "extreme_drawdown_threshold": -12.0,
+            "minor_drawdown_inv_multiplier": 2.0,
+            "major_drawdown_inv_multiplier": 4.0,
+            "extreme_drawdown_inv_multiplier": 5.0,
+            "rolling_window": 120,
+            "fallback_day": 25,
+            "min_investment_gap_days": 3,
+            "max_amount_in_a_month": 30000,
+            "price_reduction_threshold": 3.0,
+            "force_remaining_investment": true
+          },
+          "status": "active",
+          "auto_rebalance": true
+        }
+      },
+      "PUT /sip/portfolio/{portfolio_id}/pause": {
+        "description": "Pause portfolio",
+        "path_params": {
+          "portfolio_id": "your_portfolio_id"
+        },
+        "note": "No payload required, uses path parameter"
+      },
+      "PUT /sip/portfolio/{portfolio_id}/resume": {
+        "description": "Resume portfolio",
+        "path_params": {
+          "portfolio_id": "your_portfolio_id"
+        },
+        "note": "No payload required, uses path parameter"
+      },
+      "PUT /sip/portfolio/{portfolio_id}/multi": {
+        "description": "Update multi-portfolio",
+        "path_params": {
+          "portfolio_id": "your_portfolio_id"
+        },
+        "payload": {
+          "portfolio_name": "Updated Multi Portfolio",
+          "symbols": [
+            {
+              "symbol": "RELIANCE",
+              "allocation_percentage": 50.0,
+              "config": {
+                "fixed_investment": 2500,
+                "major_drawdown_threshold": -10.0,
+                "minor_drawdown_threshold": -4.0,
+                "extreme_drawdown_threshold": -15.0,
+                "minor_drawdown_inv_multiplier": 1.75,
+                "major_drawdown_inv_multiplier": 3.0,
+                "extreme_drawdown_inv_multiplier": 4.0,
+                "rolling_window": 100,
+                "fallback_day": 28,
+                "min_investment_gap_days": 5,
+                "max_amount_in_a_month": 10000,
+                "price_reduction_threshold": 4.0,
+                "force_remaining_investment": true
+              }
+            },
+            {
+              "symbol": "TCS",
+              "allocation_percentage": 50.0,
+              "config": {
+                "fixed_investment": 2500,
+                "major_drawdown_threshold": -8.0,
+                "minor_drawdown_threshold": -3.0,
+                "extreme_drawdown_threshold": -12.0,
+                "minor_drawdown_inv_multiplier": 2.0,
+                "major_drawdown_inv_multiplier": 4.0,
+                "extreme_drawdown_inv_multiplier": 5.0,
+                "rolling_window": 120,
+                "fallback_day": 25,
+                "min_investment_gap_days": 3,
+                "max_amount_in_a_month": 10000,
+                "price_reduction_threshold": 3.0,
+                "force_remaining_investment": true
+              }
+            }
+          ],
+          "default_config": {
+            "fixed_investment": 5000,
+            "major_drawdown_threshold": -10.0,
+            "minor_drawdown_threshold": -4.0,
+            "extreme_drawdown_threshold": -15.0,
+            "minor_drawdown_inv_multiplier": 1.75,
+            "major_drawdown_inv_multiplier": 3.0,
+            "extreme_drawdown_inv_multiplier": 4.0,
+            "rolling_window": 100,
+            "fallback_day": 28,
+            "min_investment_gap_days": 5,
+            "max_amount_in_a_month": 20000,
+            "price_reduction_threshold": 4.0,
+            "force_remaining_investment": true
+          },
+          "status": "active",
+          "auto_rebalance": true,
+          "rebalance_frequency_days": 30
+        }
+      }
+    },
+    "execution": {
+      "POST /sip/execute/{portfolio_id}": {
+        "description": "Execute SIP investment",
+        "path_params": {
+          "portfolio_id": "your_portfolio_id"
+        },
+        "payload": {
+          "amount": 5000,
+          "order_type": "MARKET",
+          "limit_price": null,
+          "gtt_trigger_price": null,
+          "gtt_limit_price": null
+        }
+      }
+    },
+    "testing": {
+      "POST /sip/quick-test": {
+        "description": "Quick test endpoint",
+        "payload": {
+          "symbol": "RELIANCE",
+          "test_type": "signal_generation",
+          "config": {
+            "fixed_investment": 5000,
+            "major_drawdown_threshold": -10.0,
+            "minor_drawdown_threshold": -4.0,
+            "extreme_drawdown_threshold": -15.0,
+            "minor_drawdown_inv_multiplier": 1.75,
+            "major_drawdown_inv_multiplier": 3.0,
+            "extreme_drawdown_inv_multiplier": 4.0,
+            "rolling_window": 100,
+            "fallback_day": 28,
+            "min_investment_gap_days": 5,
+            "max_amount_in_a_month": 20000,
+            "price_reduction_threshold": 4.0,
+            "force_remaining_investment": true
+          }
+        }
+      }
+    },
+    "reports": {
+      "POST /sip/reports/investment": {
+        "description": "Generate investment report",
+        "payload": {
+          "symbols": ["RELIANCE", "TCS", "INFY"],
+          "config": {
+            "fixed_investment": 5000,
+            "major_drawdown_threshold": -10.0,
+            "minor_drawdown_threshold": -4.0,
+            "extreme_drawdown_threshold": -15.0,
+            "minor_drawdown_inv_multiplier": 1.75,
+            "major_drawdown_inv_multiplier": 3.0,
+            "extreme_drawdown_inv_multiplier": 4.0,
+            "rolling_window": 100,
+            "fallback_day": 28,
+            "min_investment_gap_days": 5,
+            "max_amount_in_a_month": 20000,
+            "price_reduction_threshold": 4.0,
+            "force_remaining_investment": true
+          },
+          "report_type": "comprehensive",
+          "include_risk_assessment": true,
+          "include_allocation_suggestions": true
+        }
+      }
+    },
+    "scheduler": {
+      "POST /sip/scheduler/start": {
+        "description": "Start scheduler",
+        "note": "No payload required"
+      },
+      "POST /sip/scheduler/pause": {
+        "description": "Pause scheduler",
+        "note": "No payload required"
+      },
+      "POST /sip/scheduler/resume": {
+        "description": "Resume scheduler",
+        "note": "No payload required"
+      },
+      "POST /sip/scheduler/shutdown": {
+        "description": "Shutdown scheduler",
+        "note": "No payload required"
+      },
+      "DELETE /sip/scheduler/jobs/{job_id}": {
+        "description": "Delete scheduler job",
+        "path_params": {
+          "job_id": "your_job_id"
+        },
+        "note": "No payload required, uses path parameter"
+      },
+      "POST /sip/scheduler/jobs/{job_id}/run": {
+        "description": "Run scheduler job",
+        "path_params": {
+          "job_id": "your_job_id"
+        },
+        "note": "No payload required, uses path parameter"
+      },
+      "POST /sip/scheduler/jobs/{job_id}/pause": {
+        "description": "Pause scheduler job",
+        "path_params": {
+          "job_id": "your_job_id"
+        },
+        "note": "No payload required, uses path parameter"
+      },
+      "POST /sip/scheduler/jobs/{job_id}/resume": {
+        "description": "Resume scheduler job",
+        "path_params": {
+          "job_id": "your_job_id"
+        },
+        "note": "No payload required, uses path parameter"
+      },
+      "PUT /sip/scheduler/jobs/{job_id}/configure": {
+        "description": "Configure scheduler job",
+        "path_params": {
+          "job_id": "your_job_id"
+        },
+        "payload": {
+          "trigger_type": "cron",
+          "cron_expression": "0 9 * * 1-5",
+          "timezone": "Asia/Kolkata",
+          "max_instances": 1,
+          "coalesce": true,
+          "misfire_grace_time": 300,
+          "replace_existing": true
+        }
+      },
+      "POST /sip/scheduler/jobs/daily-signal-check/configure": {
+        "description": "Configure daily signal check job",
+        "payload": {
+          "trigger_type": "cron",
+          "cron_expression": "0 9 * * 1-5",
+          "timezone": "Asia/Kolkata",
+          "max_instances": 1,
+          "coalesce": true,
+          "misfire_grace_time": 300,
+          "replace_existing": true
+        }
+      },
+      "POST /sip/scheduler/apply-preset/{preset_name}": {
+        "description": "Apply scheduler preset",
+        "path_params": {
+          "preset_name": "daily_trading"
+        },
+        "note": "No payload required, uses path parameter"
+      },
+      "POST /sip/scheduler/emergency-stop": {
+        "description": "Emergency stop scheduler",
+        "note": "No payload required"
+      },
+      "POST /sip/scheduler/resume-from-emergency": {
+        "description": "Resume from emergency stop",
+        "note": "No payload required"
+      },
+      "POST /sip/scheduler/trigger/daily-signal-check": {
+        "description": "Trigger daily signal check manually",
+        "note": "No payload required"
+      },
+      "POST /sip/scheduler/dev/create-test-job": {
+        "description": "Create test job (development)",
+        "payload": {
+          "job_name": "test_job",
+          "trigger_type": "interval",
+          "interval_seconds": 60,
+          "timezone": "Asia/Kolkata"
+        }
+      },
+      "DELETE /sip/scheduler/dev/remove-test-job": {
+        "description": "Remove test job (development)",
+        "path_params": {
+          "job_id": "test_job"
+        },
+        "note": "No payload required, uses path parameter"
+      }
+    }
+  },
+  "testing_notes": {
+    "authentication": "Most endpoints require authentication. Use the /auth/login endpoint to get a token, then include it in the Authorization header as 'Bearer <token>'",
+    "path_parameters": "Replace path parameters like {portfolio_id}, {strategy_id}, etc. with actual values from your database",
+    "broker_apis": "Some endpoints require broker APIs to be initialized. Make sure you've authenticated with Upstox or Zerodha first",
+    "database_setup": "Ensure your databases are properly set up and contain the required tables and data",
+    "rate_limiting": "Some endpoints have rate limiting. Check the response headers for rate limit information",
+    "error_handling": "All endpoints return proper HTTP status codes and error messages. Check the response body for detailed error information"
+  },
+  "better_testing_approaches": {
+    "automated_testing": {
+      "pytest": "Use pytest with pytest-asyncio for async endpoint testing",
+      "test_database": "Use a separate test database with fixtures for clean state",
+      "mocking": "Mock external dependencies like broker APIs and market data",
+      "coverage": "Use pytest-cov to measure test coverage"
+    },
+    "integration_testing": {
+      "postman_collection": "Create a Postman collection with all endpoints and environment variables",
+      "newman": "Use Newman for CI/CD integration testing",
+      "test_scripts": "Create Python scripts using requests or httpx for automated testing"
+    },
+    "load_testing": {
+      "locust": "Use Locust for load testing critical endpoints",
+      "artillery": "Use Artillery for API performance testing",
+      "monitoring": "Monitor response times and error rates during testing"
+    },
+    "api_documentation": {
+      "swagger_ui": "Use the built-in Swagger UI at /docs for interactive testing",
+      "openapi_spec": "Export the OpenAPI specification for external tools",
+      "examples": "Add example requests and responses to the API documentation"
+    }
+  }
+}

@@ -79,10 +79,17 @@ class EnhancedSIPStrategy:
     def show_error(self, error: str, details: Optional[str] = None) -> None:
         """Show error message to user"""
         self.last_error = error
-        error_message = f"❌ {error}"
-        if details:
-            error_message += f"\nDetails: {details}"
-        ui.notify(error_message, type="negative", timeout=5000)
+        # Debug logging to see what parameters are received
+        logger.error(f"show_error called with - error: '{error}', details: '{details}'")
+        
+        # Create error message
+        if details and details != "Unknown API error":
+            error_message = f"❌ {error}\nDetails: {details}"
+        else:
+            error_message = f"❌ {error}"
+            
+        # Show notification
+        ui.notify(error_message, type="negative", timeout=8000)
         logger.error(f"{self.strategy_name} Error: {error} - {details}")
 
     def show_success(self, message: str) -> None:
@@ -108,6 +115,40 @@ class EnhancedSIPStrategy:
                 response = await fetch_api(endpoint, method=method, data=data)
 
             self.hide_loading()
+            
+            # Check if response contains an error
+            if isinstance(response, dict) and response.get("error"):
+                # Debug logging to understand the response structure
+                logger.error(f"API Error Response: {response}")
+                
+                # Extract error message from the response
+                error_obj = response["error"]
+                
+                # Try to get the error message from different possible structures
+                if isinstance(error_obj, dict):
+                    error_detail = error_obj.get("message") or error_obj.get("detail") or error_obj.get("error")
+                    logger.error(f"Error object keys: {list(error_obj.keys())}")
+                    logger.error(f"Message value: {error_obj.get('message')}")
+                    logger.error(f"Detail value: {error_obj.get('detail')}")
+                elif isinstance(error_obj, str):
+                    error_detail = error_obj
+                else:
+                    error_detail = None
+                
+                # If no error detail found in error object, try the response itself
+                if not error_detail:
+                    error_detail = response.get("detail") or response.get("message")
+                
+                logger.error(f"Final extracted error detail: '{error_detail}'")
+                
+                # Use the extracted error detail or a generic message
+                if error_detail and error_detail != "Unknown API error":
+                    self.show_error(error_message, error_detail)
+                else:
+                    self.show_error(error_message, "Backend returned an error")
+                
+                return None
+            
             return response
 
         except Exception as e:
@@ -181,7 +222,7 @@ class EnhancedSIPStrategy:
         """Scheduler management panel with job trades view"""
 
         ui.label("⏰ Scheduler Management").classes("text-2xl font-bold mb-4")
-        ui.label("Control and monitor the automated signal processing scheduler").classes("theme-text-primary mb-6")
+        ui.label("Control and monitor the automated signal processing scheduler").classes("text-gray-600 mb-6")
 
         scheduler_container = ui.column().classes("w-full")
 
@@ -363,6 +404,7 @@ class EnhancedSIPStrategy:
 
     async def render_enhanced_backtest_panel(self, fetch_api, user_storage):
         """Enhanced backtest panel with side menu navigation and modern styling"""
+        
         # Side menu layout for backtesting options
         with ui.row().classes("w-full gap-4"):
             # Left sidebar menu
@@ -446,11 +488,11 @@ class EnhancedSIPStrategy:
         with ui.row().classes("w-full items-center mb-4"):
             ui.icon("settings", size="1.5rem").classes("text-cyan-400")
             ui.label("📋 Backtest Configuration").classes("text-lg font-bold ml-3")
-
+            ui.separator().classes("flex-1 ml-4")
             ui.chip("Main Backtest", icon="analytics", color="primary").classes("text-sm px-3 py-1").props("outline")
 
             with ui.row().classes("w-full gap-6"):
-                with ui.column().classes("flex: 0 0 30%; max-width: 30%; min-width: 30%;"):
+                with ui.column().classes("flex-1"):
                     with ui.card().classes("w-full p-4 mb-4"):
                         with ui.row().classes("items-center mb-4"):
                             ui.icon("tune", size="1.5rem").classes("text-blue-400")
@@ -469,13 +511,7 @@ class EnhancedSIPStrategy:
                             self.end_date = ui.input("End Date", value=datetime.now().strftime("%Y-%m-%d")).props(
                                 "outlined dense type=date").classes("flex-1 min-w-0")
 
-                        with ui.row().classes("w-full gap-3"):
-                            self.enable_monthly_limits = ui.checkbox("Enable Monthly Limits", value=True).classes("flex-1")
-                            self.max_monthly = ui.number(
-                                label="Max Amount in a Month (₹)",
-                                value=self.default_config["max_amount_in_a_month"] or 4 * self.default_config["fixed_investment"],
-                                min=1000, step=500
-                            ).classes("flex-1").props("outlined dense")
+                        self.enable_monthly_limits = ui.checkbox("Enable Monthly Limits", value=True).classes("mt-3")
 
                 with ui.column().classes("flex-1"):
                     with ui.card().classes("w-full p-4 mb-4"):
@@ -483,24 +519,11 @@ class EnhancedSIPStrategy:
                             ui.icon("psychology", size="1.5rem").classes("text-green-400")
                             ui.label("Strategy Parameters").classes("font-bold text-lg ml-3 text-green-300")
 
-                        with ui.row().classes("w-full gap-3"):
-                            self.fixed_investment = ui.number(
-                                label="💰 Monthly Investment (₹)",
-                                value=self.default_config["fixed_investment"],
-                                min=1000, step=500
-                            ).classes("flex-1").props("outlined dense")
-
-                            self.fallback_day = ui.number(
-                                label="📅 Investment Day",
-                                value=self.default_config["fallback_day"],
-                                min=1, max=28, step=1
-                            ).classes("flex-1").props("outlined dense")
-
-                            self.min_gap_days = ui.number(
-                                label="⏰ Min Gap (days)",
-                                value=self.default_config["min_investment_gap_days"],
-                                min=1, max=30, step=1
-                            ).classes("flex-1").props("outlined dense")
+                        self.fixed_investment = ui.number(
+                            label="💰 Monthly Investment (₹)",
+                            value=self.default_config["fixed_investment"],
+                            min=1000, step=500
+                        ).classes("w-full").props("outlined dense")
 
                         with ui.row().classes("w-full gap-3"):
                             self.major_dd = ui.number(
@@ -542,46 +565,51 @@ class EnhancedSIPStrategy:
                             ).classes("flex-1").props("outlined dense")
 
                         with ui.row().classes("w-full gap-3"):
-                            self.rolling_window = ui.number(
-                                label="🔄 Rolling Window (days)",
-                                value=self.default_config["rolling_window"],
-                                min=20, max=365, step=5
+                            self.fallback_day = ui.number(
+                                label="📅 Investment Day",
+                                value=self.default_config["fallback_day"],
+                                min=1, max=28, step=1
                             ).classes("flex-1").props("outlined dense")
 
-                            self.price_reduction_threshold = ui.number(
-                                label="📉 Price Reduction Threshold (%)",
-                                value=self.default_config["price_reduction_threshold"],
-                                min=1, max=10, step=0.5
+                            self.min_gap_days = ui.number(
+                                label="⏰ Min Gap (days)",
+                                value=self.default_config["min_investment_gap_days"],
+                                min=1, max=30, step=1
                             ).classes("flex-1").props("outlined dense")
 
-        with ui.row().classes("w-full gap-4 mt-3 justify-center"):
-                    ui.button("🚀 RUN BACKTEST", icon="analytics", on_click=self.run_enhanced_backtest).classes(
-                        "bg-blue-500 text-white px-6 py-3 font-bold")
-                    ui.button("📈 COMPARE STRATEGIES", icon="compare_arrows", on_click=self.run_strategy_comparison).classes(
-                        "bg-green-500 text-white px-6 py-3 font-bold")
-                    ui.button("🗑️ CLEAR RESULTS", on_click=self.clear_results).classes(
-                        "bg-red-500 text-white px-4 py-2 rounded").props("outline")
-        # ui.button("🚀 RUN BACKTEST", icon="analytics", on_click=self.run_enhanced_backtest).classes(
-        #     "bg-blue-500 text-white px-6 py-3 font-bold")
-        # ui.button("📈 COMPARE STRATEGIES", icon="compare_arrows", on_click=self.run_strategy_comparison).classes(
-        #     "bg-green-500 text-white px-6 py-3 font-bold")
-        # ui.button("🗑️ CLEAR RESULTS", on_click=self.clear_results).classes(
-        #     "bg-red-500 text-white px-4 py-2 rounded").props("outline")
-        # # Action buttons
-        # with ui.card().classes("w-full p-4 mt-4"):
-        #     with ui.row().classes("w-full items-center justify-between mb-4"):
-        #         with ui.row().classes("items-center gap-3"):
-        #             ui.icon("rocket_launch", size="1.5rem").classes("text-orange-400")
-        #             ui.label("Backtest Actions").classes("font-bold text-lg text-orange-300")
-        #
-        #         ui.button("🗑️ Clear Results", on_click=self.clear_results).classes(
-        #             "bg-red-500 text-white px-4 py-2 rounded").props("outline")
-        #
-        #     with ui.row().classes("gap-4 w-full justify-center"):
-        #         ui.button("🚀 RUN BACKTEST", icon="analytics", on_click=self.run_enhanced_backtest).classes(
-        #             "bg-blue-500 text-white px-6 py-3 font-bold")
-        #         ui.button("📈 COMPARE STRATEGIES", icon="compare_arrows", on_click=self.run_strategy_comparison).classes(
-        #             "bg-green-500 text-white px-6 py-3 font-bold")
+                        self.rolling_window = ui.number(
+                            label="🔄 Rolling Window (days)",
+                            value=self.default_config["rolling_window"],
+                            min=20, max=365, step=5
+                        ).classes("w-full").props("outlined dense")
+
+                        self.price_reduction_threshold = ui.number(
+                            label="📉 Price Reduction Threshold (%)",
+                            value=self.default_config["price_reduction_threshold"],
+                            min=1, max=10, step=0.5
+                        ).classes("w-full").props("outlined dense")
+
+                        self.max_monthly = ui.number(
+                            label="📅 Max Monthly Amount (₹)",
+                            value=self.default_config["fixed_investment"] * 4,
+                            min=1000, step=1000
+                        ).classes("w-full").props("outlined dense")
+
+        # Action buttons
+        with ui.card().classes("w-full p-4 mt-4"):
+            with ui.row().classes("w-full items-center justify-between mb-4"):
+                with ui.row().classes("items-center gap-3"):
+                    ui.icon("rocket_launch", size="1.5rem").classes("text-orange-400")
+                    ui.label("Backtest Actions").classes("font-bold text-lg text-orange-300")
+                
+                ui.button("🗑️ Clear Results", on_click=self.clear_results).classes(
+                    "bg-red-500 text-white px-4 py-2 rounded").props("outline")
+            
+            with ui.row().classes("gap-4 w-full justify-center"):
+                ui.button("🚀 RUN BACKTEST", icon="analytics", on_click=self.run_enhanced_backtest).classes(
+                    "bg-blue-500 text-white px-6 py-3 font-bold")
+                ui.button("📈 COMPARE STRATEGIES", icon="compare_arrows", on_click=self.run_strategy_comparison).classes(
+                    "bg-green-500 text-white px-6 py-3 font-bold")
 
         # Results container
         self.results_container = ui.column().classes("w-full mt-4")
@@ -686,7 +714,7 @@ class EnhancedSIPStrategy:
         """Multi-symbol portfolio creation interface with enhanced config"""
 
         ui.label("🎯 Multi-Symbol Portfolio Creation").classes("text-2xl font-bold mb-4")
-        ui.label("Create portfolios with multiple symbols, automatic allocation, and monthly limits").classes("theme-text-primary mb-6")
+        ui.label("Create portfolios with multiple symbols, automatic allocation, and monthly limits").classes("text-gray-600 mb-6")
 
         with ui.card().classes("w-full mb-6 p-6"):
             ui.label("Portfolio Configuration").classes("text-lg font-semibold mb-4")
@@ -789,6 +817,57 @@ class EnhancedSIPStrategy:
                         value=True
                     )
 
+                # Advanced Configuration Section
+                with ui.expansion("⚙️ Advanced Configuration").classes("w-full mt-4"):
+                    with ui.column().classes("gap-4"):
+                        # Investment Multipliers
+                        with ui.row().classes("w-full gap-4"):
+                            default_minor_mult = ui.number(
+                                label="📈 Minor Multiplier",
+                                value=1.75,
+                                min=1.0, max=5.0, step=0.25
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            default_major_mult = ui.number(
+                                label="📈 Major Multiplier",
+                                value=3.0,
+                                min=1.0, max=10.0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            default_extreme_mult = ui.number(
+                                label="📈 Extreme Multiplier",
+                                value=4.0,
+                                min=1.0, max=15.0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+
+                        # Technical Parameters
+                        with ui.row().classes("w-full gap-4"):
+                            default_rolling_window = ui.number(
+                                label="📊 Rolling Window",
+                                value=100,
+                                min=20, max=500, step=10
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            default_price_threshold = ui.number(
+                                label="💰 Price Reduction Threshold (%)",
+                                value=4.0,
+                                min=1.0, max=20.0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+
+                        # Additional parameters
+                        with ui.row().classes("w-full gap-4"):
+                            default_fallback_day = ui.number(
+                                label="📅 Fallback Day",
+                                value=22,
+                                min=1, max=31, step=1
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            default_min_gap = ui.number(
+                                label="⏱️ Min Investment Gap (days)",
+                                value=5,
+                                min=1, max=30, step=1
+                            ).classes("flex-1").props("outlined dense")
+
         async def create_multi_portfolio():
             try:
                 # Validate inputs
@@ -825,14 +904,14 @@ class EnhancedSIPStrategy:
                         "major_drawdown_threshold": default_major_dd.value,
                         "minor_drawdown_threshold": default_minor_dd.value,
                         "extreme_drawdown_threshold": default_extreme_dd.value,
-                        "minor_drawdown_inv_multiplier": 1.75,
-                        "major_drawdown_inv_multiplier": 3.0,
-                        "extreme_drawdown_inv_multiplier": 4.0,
-                        "rolling_window": 100,
-                        "fallback_day": 22,
-                        "min_investment_gap_days": 5,
+                        "minor_drawdown_inv_multiplier": default_minor_mult.value,
+                        "major_drawdown_inv_multiplier": default_major_mult.value,
+                        "extreme_drawdown_inv_multiplier": default_extreme_mult.value,
+                        "rolling_window": int(default_rolling_window.value),
+                        "fallback_day": int(default_fallback_day.value),
+                        "min_investment_gap_days": int(default_min_gap.value),
                         "max_amount_in_a_month": max_monthly.value,
-                        "price_reduction_threshold": 4.0,
+                        "price_reduction_threshold": default_price_threshold.value,
                         "force_remaining_investment": force_invest.value
                     },
                     "auto_rebalance": auto_rebalance.value,
@@ -858,6 +937,59 @@ class EnhancedSIPStrategy:
         ui.button("🎯 Create Multi-Portfolio", on_click=create_multi_portfolio).classes(
             "bg-purple-600 text-white px-6 py-2 mt-4")
 
+        # Existing multi-portfolios
+        with ui.card().classes("w-full mt-6"):
+            with ui.row().classes("w-full items-center p-4 border-b border-slate-600/30"):
+                ui.icon("dashboard", size="1.5rem").classes("text-purple-400")
+                ui.label("Your Multi-Portfolios").classes("text-lg ml-3 font-bold")
+                ui.separator().classes("flex-1 ml-4")
+                ui.chip("Multi-Symbol", icon="trending_up", color="purple").classes("text-sm px-3 py-1").props("outline")
+            
+            multi_portfolios_container = ui.column().classes("w-full p-4 gap-4")
+
+        async def refresh_multi_portfolios():
+            """Refresh multi-portfolio list with enhanced display"""
+            try:
+                portfolios = await self.safe_api_call(fetch_api, "/sip/portfolio")
+
+                multi_portfolios_container.clear()
+
+                if portfolios:
+                    # Filter only multi-portfolios
+                    multi_portfolios = [p for p in portfolios if p.get('portfolio_type') == 'multi']
+                    
+                    if multi_portfolios:
+                        with multi_portfolios_container:
+                            for portfolio in multi_portfolios:
+                                await self.render_enhanced_portfolio_card(portfolio, fetch_api, refresh_multi_portfolios)
+                    else:
+                        with multi_portfolios_container:
+                            with ui.column().classes("w-full items-center py-12 gap-4"):
+                                ui.icon("dashboard", size="3rem").classes("text-slate-400")
+                                ui.label("No multi-portfolios found").classes("text-lg font-medium text-slate-300")
+                                ui.label("Create your first multi-portfolio above to get started!").classes(
+                                    "text-sm text-slate-400 text-center")
+                else:
+                    with multi_portfolios_container:
+                        with ui.column().classes("w-full items-center py-8 gap-3"):
+                            ui.icon("error", size="2rem").classes("text-red-400")
+                            ui.label("❌ Error loading portfolios").classes("text-lg font-medium text-red-400")
+                            ui.label("Please try refreshing the page").classes("text-sm text-slate-400")
+
+            except Exception as e:
+                logger.error(f"Error fetching multi-portfolios: {e}")
+                with multi_portfolios_container:
+                    with ui.column().classes("w-full items-center py-8 gap-3"):
+                        ui.icon("error", size="2rem").classes("text-red-400")
+                        ui.label("❌ Error loading multi-portfolios").classes("text-lg font-medium text-red-400")
+                        ui.label("Please try refreshing the page").classes("text-sm text-slate-400")
+
+        # Load multi-portfolios on page load
+        await refresh_multi_portfolios()
+
+        # Refresh button
+        ui.button("🔄 Refresh Multi-Portfolios", on_click=refresh_multi_portfolios).classes("bg-gray-500 text-white mt-4 px-4 py-2 rounded")
+
     async def render_enhanced_portfolio_panel(self, fetch_api, user_storage):
         """Enhanced portfolio management interface with modern styling and GTT status"""
 
@@ -874,7 +1006,7 @@ class EnhancedSIPStrategy:
             with ui.row().classes("w-full items-center p-4 border-b border-slate-600/30"):
                 ui.icon("add_circle", size="1.5rem").classes("text-cyan-400")
                 ui.label("Create Single-Symbol Portfolio").classes("text-lg ml-3 font-bold")
-
+                ui.separator().classes("flex-1 ml-4")
                 ui.chip("Quick Setup", icon="speed", color="positive").classes("text-sm px-3 py-1").props("outline")
             
             with ui.column().classes("p-4 gap-4"):
@@ -915,6 +1047,63 @@ class EnhancedSIPStrategy:
                     min=1000, step=1000
                 ).classes("w-full mt-4").props("outlined dense")
 
+                # Advanced Configuration Section
+                with ui.expansion("⚙️ Advanced Configuration").classes("w-full mt-4"):
+                    with ui.column().classes("gap-4"):
+                        # Drawdown Thresholds
+                        with ui.row().classes("w-full gap-4"):
+                            minor_dd = ui.number(
+                                label="📉 Minor Drawdown (%)",
+                                value=-4.0,
+                                min=-20, max=0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            major_dd = ui.number(
+                                label="📉 Major Drawdown (%)",
+                                value=-10.0,
+                                min=-30, max=0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            extreme_dd = ui.number(
+                                label="📉 Extreme Drawdown (%)",
+                                value=-15.0,
+                                min=-50, max=0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+
+                        # Investment Multipliers
+                        with ui.row().classes("w-full gap-4"):
+                            minor_mult = ui.number(
+                                label="📈 Minor Multiplier",
+                                value=1.75,
+                                min=1.0, max=5.0, step=0.25
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            major_mult = ui.number(
+                                label="📈 Major Multiplier",
+                                value=3.0,
+                                min=1.0, max=10.0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            extreme_mult = ui.number(
+                                label="📈 Extreme Multiplier",
+                                value=4.0,
+                                min=1.0, max=15.0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+
+                        # Technical Parameters
+                        with ui.row().classes("w-full gap-4"):
+                            rolling_window = ui.number(
+                                label="📊 Rolling Window",
+                                value=100,
+                                min=20, max=500, step=10
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            price_threshold = ui.number(
+                                label="💰 Price Reduction Threshold (%)",
+                                value=4.0,
+                                min=1.0, max=20.0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+
             async def create_single_portfolio():
                 try:
                     if not symbol_input.value.strip():
@@ -923,17 +1112,17 @@ class EnhancedSIPStrategy:
 
                     config = {
                         "fixed_investment": investment_amount.value,
-                        "major_drawdown_threshold": -10.0,
-                        "minor_drawdown_threshold": -4.0,
-                        "extreme_drawdown_threshold": -15.0,
-                        "minor_drawdown_inv_multiplier": 1.75,
-                        "major_drawdown_inv_multiplier": 3.0,
-                        "extreme_drawdown_inv_multiplier": 4.0,
-                        "rolling_window": 100,
+                        "major_drawdown_threshold": major_dd.value,
+                        "minor_drawdown_threshold": minor_dd.value,
+                        "extreme_drawdown_threshold": extreme_dd.value,
+                        "minor_drawdown_inv_multiplier": minor_mult.value,
+                        "major_drawdown_inv_multiplier": major_mult.value,
+                        "extreme_drawdown_inv_multiplier": extreme_mult.value,
+                        "rolling_window": int(rolling_window.value),
                         "fallback_day": fallback_day.value,
                         "min_investment_gap_days": min_gap.value,
                         "max_amount_in_a_month": max_monthly.value,
-                        "price_reduction_threshold": 4.0,
+                        "price_reduction_threshold": price_threshold.value,
                         "force_remaining_investment": True
                     }
 
@@ -956,16 +1145,17 @@ class EnhancedSIPStrategy:
                 except Exception as e:
                     ui.notify(f"❌ Error creating portfolio: {str(e)}", type="negative")
 
-                with ui.row().classes("w-full justify-center mt-4"):
-                    ui.button("✨ Create Portfolio", icon="add_circle", on_click=create_single_portfolio).classes(
-                        "bg-blue-500 text-white px-6 py-3 font-bold")
+            # Create Portfolio Button - placed outside the function
+            with ui.row().classes("w-full justify-center mt-4"):
+                ui.button("✨ Create Portfolio", icon="add_circle", on_click=create_single_portfolio).classes(
+                    "bg-blue-500 text-white px-6 py-3 font-bold")
 
         # Existing portfolios
         with ui.card().classes("w-full mt-4"):
             with ui.row().classes("w-full items-center p-4 border-b border-slate-600/30"):
                 ui.icon("folder", size="1.5rem").classes("text-green-400")
                 ui.label("Your SIP Portfolios").classes("text-lg ml-3 font-bold")
-
+                ui.separator().classes("flex-1 ml-4")
                 ui.chip("Active", icon="trending_up", color="positive").classes("text-sm px-3 py-1").props("outline")
             
             portfolios_container = ui.column().classes("w-full p-4 gap-4")
@@ -1039,9 +1229,9 @@ class EnhancedSIPStrategy:
                             [f"{s['symbol']} ({s['allocation_percentage']}%)" for s in symbols[:3]])
                         if len(symbols) > 3:
                             symbols_text += f" +{len(symbols) - 3} more"
-                        ui.label(f"Symbols: {symbols_text}").classes("text-sm theme-text-primary")
+                        ui.label(f"Symbols: {symbols_text}").classes("text-sm text-gray-600")
                     elif symbols:
-                        ui.label(f"Symbol: {symbols[0]['symbol']}").classes("text-sm theme-text-primary")
+                        ui.label(f"Symbol: {symbols[0]['symbol']}").classes("text-sm text-gray-600")
 
                 # Performance metrics
                 with ui.column().classes("text-right"):
@@ -1082,6 +1272,11 @@ class EnhancedSIPStrategy:
 
                 ui.button("📡 Signals & GTT", on_click=get_signals).classes("bg-purple-500 text-white text-xs px-3 py-1")
 
+                async def edit_portfolio():
+                    await self.show_portfolio_update_dialog(portfolio['portfolio_id'], fetch_api, refresh_callback)
+
+                ui.button("✏️ Edit", on_click=edit_portfolio).classes("bg-orange-500 text-white text-xs px-3 py-1")
+
                 if status == 'active':
                     async def invest_now():
                         await self.show_enhanced_investment_dialog(portfolio['portfolio_id'], fetch_api,
@@ -1090,11 +1285,24 @@ class EnhancedSIPStrategy:
                     ui.button("💰 Invest", on_click=invest_now).classes("bg-green-500 text-white text-xs px-3 py-1")
 
                 if status == 'active':
+                    async def pause_portfolio():
+                        await self.pause_portfolio(portfolio['portfolio_id'], fetch_api, refresh_callback)
+
+                    ui.button("⏸️ Pause", on_click=pause_portfolio).classes(
+                        "bg-yellow-500 text-white text-xs px-3 py-1")
+
                     async def cancel_portfolio():
                         await self.cancel_portfolio(portfolio['portfolio_id'], fetch_api, refresh_callback)
 
-                    ui.button("⏸️ Cancel", on_click=cancel_portfolio).classes(
-                        "bg-yellow-500 text-white text-xs px-3 py-1")
+                    ui.button("🚫 Cancel", on_click=cancel_portfolio).classes(
+                        "bg-red-600 text-white text-xs px-3 py-1")
+
+                elif status == 'paused':
+                    async def resume_portfolio():
+                        await self.resume_portfolio(portfolio['portfolio_id'], fetch_api, refresh_callback)
+
+                    ui.button("▶️ Resume", on_click=resume_portfolio).classes(
+                        "bg-green-500 text-white text-xs px-3 py-1")
 
                 async def delete_portfolio():
                     await self.delete_portfolio(portfolio['portfolio_id'], fetch_api, refresh_callback)
@@ -1107,7 +1315,7 @@ class EnhancedSIPStrategy:
             with ui.dialog() as dialog, ui.card():
                 ui.label("⏸️ Cancel SIP Portfolio").classes("text-lg font-bold mb-4")
                 ui.label("This will stop future automated investments but keep the portfolio data.").classes(
-                    "theme-text-primary mb-4")
+                    "text-gray-600 mb-4")
                 ui.label("You can still manually invest or reactivate later.").classes("text-blue-600 mb-4")
 
                 with ui.row().classes("gap-2"):
@@ -1156,6 +1364,515 @@ class EnhancedSIPStrategy:
 
         except Exception as e:
             ui.notify(f"❌ Error deleting portfolio: {str(e)}", type="negative")
+
+    async def show_portfolio_update_dialog(self, portfolio_id, fetch_api, refresh_callback):
+        """Show dialog to update portfolio parameters"""
+        try:
+            # Get current portfolio details
+            portfolio_details = await self.safe_api_call(fetch_api, f"/sip/portfolio/{portfolio_id}")
+            
+            if not portfolio_details:
+                ui.notify("❌ Failed to load portfolio details", type="negative")
+                return
+
+            # Check if it's a multi-portfolio
+            portfolio_type = portfolio_details.get('portfolio_type', 'single')
+            
+            if portfolio_type == 'multi':
+                await self.show_multi_portfolio_update_dialog(portfolio_id, portfolio_details, fetch_api, refresh_callback)
+            else:
+                await self.show_single_portfolio_update_dialog(portfolio_id, portfolio_details, fetch_api, refresh_callback)
+        except Exception as e:
+            ui.notify(f"❌ Error loading portfolio details: {str(e)}", type="negative")
+
+    async def show_single_portfolio_update_dialog(self, portfolio_id, portfolio_details, fetch_api, refresh_callback):
+        """Show dialog to update single portfolio parameters"""
+        try:
+            with ui.dialog() as dialog, ui.card().classes("w-[800px] max-h-[90vh] overflow-y-auto"):
+                ui.label("✏️ Update Single Portfolio").classes("text-xl font-bold mb-4")
+                
+                # Portfolio name
+                portfolio_name = ui.input(
+                    label="Portfolio Name",
+                    value=portfolio_details.get('portfolio_name', ''),
+                    placeholder="Enter portfolio name"
+                ).classes("w-full mb-4").props("outlined dense")
+
+                # Status selection
+                current_status = portfolio_details.get('status', 'active')
+                status_options = ['active', 'paused', 'cancelled']
+                status_select = ui.select(
+                    label="Status",
+                    options=status_options,
+                    value=current_status
+                ).classes("w-full mb-4").props("outlined dense")
+
+                # Configuration section
+                ui.label("⚙️ Configuration Parameters").classes("text-lg font-bold mt-6 mb-4")
+                
+                config = portfolio_details.get('config', {})
+                
+                # Basic parameters
+                with ui.row().classes("w-full gap-4"):
+                    fixed_investment = ui.number(
+                        label="💰 Fixed Investment (₹)",
+                        value=config.get('fixed_investment', 5000),
+                        min=1000, step=1000
+                    ).classes("flex-1").props("outlined dense")
+                    
+                    max_monthly = ui.number(
+                        label="📅 Max Monthly Amount (₹)",
+                        value=config.get('max_amount_in_a_month', 20000),
+                        min=1000, step=1000
+                    ).classes("flex-1").props("outlined dense")
+
+                # Advanced Configuration Section
+                with ui.expansion("⚙️ Advanced Configuration").classes("w-full mt-4"):
+                    with ui.column().classes("gap-4"):
+                        # Drawdown Thresholds
+                        with ui.row().classes("w-full gap-4"):
+                            minor_dd = ui.number(
+                                label="📉 Minor Drawdown (%)",
+                                value=config.get('minor_drawdown_threshold', -4.0),
+                                min=-20, max=0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            major_dd = ui.number(
+                                label="📉 Major Drawdown (%)",
+                                value=config.get('major_drawdown_threshold', -10.0),
+                                min=-30, max=0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            extreme_dd = ui.number(
+                                label="📉 Extreme Drawdown (%)",
+                                value=config.get('extreme_drawdown_threshold', -15.0),
+                                min=-50, max=0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+
+                        # Investment Multipliers
+                        with ui.row().classes("w-full gap-4"):
+                            minor_mult = ui.number(
+                                label="📈 Minor Multiplier",
+                                value=config.get('minor_drawdown_inv_multiplier', 1.75),
+                                min=1.0, max=5.0, step=0.25
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            major_mult = ui.number(
+                                label="📈 Major Multiplier",
+                                value=config.get('major_drawdown_inv_multiplier', 3.0),
+                                min=1.0, max=10.0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            extreme_mult = ui.number(
+                                label="📈 Extreme Multiplier",
+                                value=config.get('extreme_drawdown_inv_multiplier', 4.0),
+                                min=1.0, max=15.0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+
+                        # Technical Parameters
+                        with ui.row().classes("w-full gap-4"):
+                            rolling_window = ui.number(
+                                label="📊 Rolling Window",
+                                value=config.get('rolling_window', 100),
+                                min=20, max=500, step=10
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            price_threshold = ui.number(
+                                label="💰 Price Reduction Threshold (%)",
+                                value=config.get('price_reduction_threshold', 4.0),
+                                min=1.0, max=20.0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+
+                        # Additional parameters
+                        with ui.row().classes("w-full gap-4"):
+                            fallback_day = ui.number(
+                                label="📅 Fallback Day",
+                                value=config.get('fallback_day', 28),
+                                min=1, max=31, step=1
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            min_gap = ui.number(
+                                label="⏱️ Min Investment Gap (days)",
+                                value=config.get('min_investment_gap_days', 5),
+                                min=1, max=30, step=1
+                            ).classes("flex-1").props("outlined dense")
+
+                # Action buttons
+                with ui.row().classes("gap-2 mt-6"):
+                    ui.button("Cancel", on_click=dialog.close).classes("bg-gray-500 text-white")
+
+                    async def confirm_update():
+                        try:
+                            # Prepare update data
+                            update_data = {
+                                "portfolio_name": portfolio_name.value,
+                                "status": status_select.value,
+                                "config": {
+                                    "fixed_investment": fixed_investment.value,
+                                    "major_drawdown_threshold": major_dd.value,
+                                    "minor_drawdown_threshold": minor_dd.value,
+                                    "extreme_drawdown_threshold": extreme_dd.value,
+                                    "minor_drawdown_inv_multiplier": minor_mult.value,
+                                    "major_drawdown_inv_multiplier": major_mult.value,
+                                    "extreme_drawdown_inv_multiplier": extreme_mult.value,
+                                    "rolling_window": int(rolling_window.value),
+                                    "fallback_day": int(fallback_day.value),
+                                    "min_investment_gap_days": int(min_gap.value),
+                                    "max_amount_in_a_month": max_monthly.value,
+                                    "price_reduction_threshold": price_threshold.value,
+                                    "force_remaining_investment": True
+                                }
+                            }
+
+                            response = await self.safe_api_call(
+                                fetch_api, 
+                                f"/sip/portfolio/{portfolio_id}", 
+                                method="PUT", 
+                                data=update_data
+                            )
+                            
+                            if response:
+                                ui.notify("✅ Portfolio updated successfully", type="positive")
+                                await refresh_callback()
+                                dialog.close()
+                            else:
+                                ui.notify("❌ Failed to update portfolio", type="negative")
+                                
+                        except Exception as e:
+                            ui.notify(f"❌ Error updating portfolio: {str(e)}", type="negative")
+
+                    ui.button("💾 Save Changes", on_click=confirm_update).classes("bg-blue-500 text-white")
+
+            dialog.open()
+
+        except Exception as e:
+            ui.notify(f"❌ Error loading portfolio details: {str(e)}", type="negative")
+
+    async def show_multi_portfolio_update_dialog(self, portfolio_id, portfolio_details, fetch_api, refresh_callback):
+        """Show dialog to update multi-portfolio parameters"""
+        try:
+            with ui.dialog() as dialog, ui.card().classes("w-[900px] max-h-[90vh] overflow-y-auto"):
+                ui.label("✏️ Update Multi-Portfolio").classes("text-xl font-bold mb-4")
+                
+                # Portfolio name
+                portfolio_name = ui.input(
+                    label="Portfolio Name",
+                    value=portfolio_details.get('portfolio_name', ''),
+                    placeholder="Enter portfolio name"
+                ).classes("w-full mb-4").props("outlined dense")
+
+                # Status selection
+                current_status = portfolio_details.get('status', 'active')
+                status_options = ['active', 'paused', 'cancelled']
+                status_select = ui.select(
+                    label="Status",
+                    options=status_options,
+                    value=current_status
+                ).classes("w-full mb-4").props("outlined dense")
+
+                # Symbols section
+                ui.label("📈 Symbols & Allocation").classes("text-lg font-bold mt-6 mb-4")
+                
+                symbols = portfolio_details.get('symbols', [])
+                symbols_data = []
+                
+                # Create symbols container
+                symbols_container = ui.column().classes("gap-4")
+                
+                def add_symbol_row():
+                    with symbols_container:
+                        with ui.row().classes("w-full gap-4 items-center"):
+                            symbol_input = ui.input(
+                                label="Symbol",
+                                placeholder="ICICIB22"
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            allocation_input = ui.number(
+                                label="Allocation %",
+                                value=25.0,
+                                min=0.1, max=100, step=0.1
+                            ).classes("w-32").props("outlined dense")
+
+                            def remove_symbol():
+                                parent_card = symbol_input.parent_slot.parent
+                                symbols_container.remove(parent_card)
+                                symbols_data[:] = [s for s in symbols_data if s != (symbol_input, allocation_input)]
+
+                            ui.button("🗑️", on_click=remove_symbol).classes("bg-red-500 text-white")
+
+                        symbols_data.append((symbol_input, allocation_input))
+
+                # Add existing symbols
+                for symbol_data in symbols:
+                    symbol_name = symbol_data.get('symbol', '')
+                    allocation = symbol_data.get('allocation_percentage', 25.0)
+                    
+                    with symbols_container:
+                        with ui.row().classes("w-full gap-4 items-center"):
+                            symbol_input = ui.input(
+                                label="Symbol",
+                                value=symbol_name,
+                                placeholder="ICICIB22"
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            allocation_input = ui.number(
+                                label="Allocation %",
+                                value=allocation,
+                                min=0.1, max=100, step=0.1
+                            ).classes("w-32").props("outlined dense")
+
+                            def remove_symbol():
+                                parent_card = symbol_input.parent_slot.parent
+                                symbols_container.remove(parent_card)
+                                symbols_data[:] = [s for s in symbols_data if s != (symbol_input, allocation_input)]
+
+                            ui.button("🗑️", on_click=remove_symbol).classes("bg-red-500 text-white")
+
+                        symbols_data.append((symbol_input, allocation_input))
+
+                # Add symbol button
+                with ui.row().classes("w-full justify-between items-center mb-4"):
+                    ui.label("Symbols & Allocation").classes("font-medium")
+                    ui.button("➕ Add Symbol", on_click=add_symbol_row).classes("bg-green-500 text-white")
+
+                # Portfolio settings
+                ui.label("⚙️ Portfolio Settings").classes("text-lg font-bold mt-6 mb-4")
+                
+                config = portfolio_details.get('config', {})
+                
+                with ui.row().classes("w-full gap-4"):
+                    auto_rebalance = ui.checkbox(
+                        "Auto Rebalance",
+                        value=portfolio_details.get('auto_rebalance', False)
+                    )
+
+                    rebalance_frequency = ui.number(
+                        label="Rebalance Frequency (days)",
+                        value=portfolio_details.get('rebalance_frequency_days', 30),
+                        min=7, max=365
+                    ).classes("flex-1").props("outlined dense")
+
+                # Default configuration
+                ui.label("⚙️ Default Strategy Config").classes("text-lg font-bold mt-6 mb-4")
+                
+                with ui.row().classes("w-full gap-4"):
+                    with ui.column().classes("flex-1"):
+                        default_investment = ui.number(
+                            label="Monthly Investment (₹)",
+                            value=config.get('fixed_investment', 10000),
+                            min=1000, step=1000
+                        ).classes("w-full").props("outlined dense")
+
+                        default_major_dd = ui.number(
+                            label="Major Drawdown (%)",
+                            value=config.get('major_drawdown_threshold', -10.0),
+                            min=-50, max=0
+                        ).classes("w-full").props("outlined dense")
+
+                        default_minor_dd = ui.number(
+                            label="Minor Drawdown (%)",
+                            value=config.get('minor_drawdown_threshold', -4.0),
+                            min=-20, max=0
+                        ).classes("w-full").props("outlined dense")
+
+                        default_extreme_dd = ui.number(
+                            label="Extreme Drawdown (%)",
+                            value=config.get('extreme_drawdown_threshold', -15.0),
+                            min=-50, max=0
+                        ).classes("w-full").props("outlined dense")
+
+                    with ui.column().classes("flex-1"):
+                        max_monthly = ui.number(
+                            label="Max Monthly Amount (₹)",
+                            value=config.get('max_amount_in_a_month', 40000),
+                            min=1000, step=1000
+                        ).classes("w-full").props("outlined dense")
+
+                        force_invest = ui.checkbox(
+                            "Force Remaining Investment",
+                            value=config.get('force_remaining_investment', True)
+                        )
+
+                # Advanced Configuration Section
+                with ui.expansion("⚙️ Advanced Configuration").classes("w-full mt-4"):
+                    with ui.column().classes("gap-4"):
+                        # Investment Multipliers
+                        with ui.row().classes("w-full gap-4"):
+                            default_minor_mult = ui.number(
+                                label="📈 Minor Multiplier",
+                                value=config.get('minor_drawdown_inv_multiplier', 1.75),
+                                min=1.0, max=5.0, step=0.25
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            default_major_mult = ui.number(
+                                label="📈 Major Multiplier",
+                                value=config.get('major_drawdown_inv_multiplier', 3.0),
+                                min=1.0, max=10.0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            default_extreme_mult = ui.number(
+                                label="📈 Extreme Multiplier",
+                                value=config.get('extreme_drawdown_inv_multiplier', 4.0),
+                                min=1.0, max=15.0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+
+                        # Technical Parameters
+                        with ui.row().classes("w-full gap-4"):
+                            default_rolling_window = ui.number(
+                                label="📊 Rolling Window",
+                                value=config.get('rolling_window', 100),
+                                min=20, max=500, step=10
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            default_price_threshold = ui.number(
+                                label="💰 Price Reduction Threshold (%)",
+                                value=config.get('price_reduction_threshold', 4.0),
+                                min=1.0, max=20.0, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+
+                        # Additional parameters
+                        with ui.row().classes("w-full gap-4"):
+                            default_fallback_day = ui.number(
+                                label="📅 Fallback Day",
+                                value=config.get('fallback_day', 22),
+                                min=1, max=31, step=1
+                            ).classes("flex-1").props("outlined dense")
+                            
+                            default_min_gap = ui.number(
+                                label="⏱️ Min Investment Gap (days)",
+                                value=config.get('min_investment_gap_days', 5),
+                                min=1, max=30, step=1
+                            ).classes("flex-1").props("outlined dense")
+
+                # Action buttons
+                with ui.row().classes("gap-2 mt-6"):
+                    ui.button("Cancel", on_click=dialog.close).classes("bg-gray-500 text-white")
+
+                    async def confirm_update():
+                        try:
+                            # Collect symbols data
+                            portfolio_symbols = []
+                            total_allocation = 0
+
+                            for symbol_input, allocation_input in symbols_data:
+                                if symbol_input.value.strip() and allocation_input.value > 0:
+                                    portfolio_symbols.append({
+                                        "symbol": symbol_input.value.strip().upper(),
+                                        "allocation_percentage": allocation_input.value
+                                    })
+                                    total_allocation += allocation_input.value
+
+                            if not portfolio_symbols:
+                                ui.notify("❌ Please add at least one symbol", type="negative")
+                                return
+
+                            if abs(total_allocation - 100.0) > 0.01:
+                                ui.notify(f"❌ Total allocation must equal 100% (current: {total_allocation}%)", type="negative")
+                                return
+
+                            # Prepare update data
+                            update_data = {
+                                "portfolio_name": portfolio_name.value,
+                                "status": status_select.value,
+                                "symbols": portfolio_symbols,
+                                "default_config": {
+                                    "fixed_investment": default_investment.value,
+                                    "major_drawdown_threshold": default_major_dd.value,
+                                    "minor_drawdown_threshold": default_minor_dd.value,
+                                    "extreme_drawdown_threshold": default_extreme_dd.value,
+                                    "minor_drawdown_inv_multiplier": default_minor_mult.value,
+                                    "major_drawdown_inv_multiplier": default_major_mult.value,
+                                    "extreme_drawdown_inv_multiplier": default_extreme_mult.value,
+                                    "rolling_window": int(default_rolling_window.value),
+                                    "fallback_day": int(default_fallback_day.value),
+                                    "min_investment_gap_days": int(default_min_gap.value),
+                                    "max_amount_in_a_month": max_monthly.value,
+                                    "price_reduction_threshold": default_price_threshold.value,
+                                    "force_remaining_investment": force_invest.value
+                                },
+                                "auto_rebalance": auto_rebalance.value,
+                                "rebalance_frequency_days": rebalance_frequency.value
+                            }
+
+                            response = await self.safe_api_call(
+                                fetch_api, 
+                                f"/sip/portfolio/{portfolio_id}/multi", 
+                                method="PUT", 
+                                data=update_data
+                            )
+                            
+                            if response:
+                                ui.notify("✅ Multi-portfolio updated successfully", type="positive")
+                                await refresh_callback()
+                                dialog.close()
+                            else:
+                                ui.notify("❌ Failed to update multi-portfolio", type="negative")
+                                
+                        except Exception as e:
+                            ui.notify(f"❌ Error updating multi-portfolio: {str(e)}", type="negative")
+
+                    ui.button("💾 Save Changes", on_click=confirm_update).classes("bg-blue-500 text-white")
+
+            dialog.open()
+
+        except Exception as e:
+            ui.notify(f"❌ Error loading multi-portfolio details: {str(e)}", type="negative")
+
+    async def pause_portfolio(self, portfolio_id, fetch_api, refresh_callback):
+        """Pause SIP portfolio (temporarily stop automated investments)"""
+        try:
+            with ui.dialog() as dialog, ui.card():
+                ui.label("⏸️ Pause SIP Portfolio").classes("text-lg font-bold mb-4")
+                ui.label("This will temporarily stop automated investments but keep the portfolio active.").classes(
+                    "text-gray-600 mb-4")
+                ui.label("You can resume automated investments later.").classes("text-blue-600 mb-4")
+
+                with ui.row().classes("gap-2"):
+                    ui.button("Cancel", on_click=dialog.close).classes("bg-gray-500 text-white")
+
+                    async def confirm_pause():
+                        response = await self.safe_api_call(fetch_api, f"/sip/portfolio/{portfolio_id}/pause", method="PUT")
+                        if response:
+                            ui.notify("✅ Portfolio paused successfully", type="positive")
+                            await refresh_callback()
+                        else:
+                            ui.notify("❌ Failed to pause portfolio", type="negative")
+                        dialog.close()
+
+                    ui.button("⏸️ Confirm Pause", on_click=confirm_pause).classes("bg-yellow-500 text-white")
+
+            dialog.open()
+
+        except Exception as e:
+            ui.notify(f"❌ Error pausing portfolio: {str(e)}", type="negative")
+
+    async def resume_portfolio(self, portfolio_id, fetch_api, refresh_callback):
+        """Resume SIP portfolio (restart automated investments)"""
+        try:
+            with ui.dialog() as dialog, ui.card():
+                ui.label("▶️ Resume SIP Portfolio").classes("text-lg font-bold mb-4")
+                ui.label("This will restart automated investments for this portfolio.").classes(
+                    "text-gray-600 mb-4")
+                ui.label("The portfolio will begin processing signals again.").classes("text-blue-600 mb-4")
+
+                with ui.row().classes("gap-2"):
+                    ui.button("Cancel", on_click=dialog.close).classes("bg-gray-500 text-white")
+
+                    async def confirm_resume():
+                        response = await self.safe_api_call(fetch_api, f"/sip/portfolio/{portfolio_id}/resume", method="PUT")
+                        if response:
+                            ui.notify("✅ Portfolio resumed successfully", type="positive")
+                            await refresh_callback()
+                        else:
+                            ui.notify("❌ Failed to resume portfolio", type="negative")
+                        dialog.close()
+
+                    ui.button("▶️ Confirm Resume", on_click=confirm_resume).classes("bg-green-500 text-white")
+
+            dialog.open()
+
+        except Exception as e:
+            ui.notify(f"❌ Error resuming portfolio: {str(e)}", type="negative")
 
     async def show_enhanced_portfolio_signals(self, portfolio_id, fetch_api):
         """Show enhanced portfolio signals with GTT status and monthly tracking"""
@@ -1241,7 +1958,7 @@ class EnhancedSIPStrategy:
                         ui.label(f"📅 Next Fallback Date: {next_fallback}").classes("text-sm text-blue-600 mt-4")
 
                 else:
-                    ui.label("📊 No immediate signals detected").classes("theme-text-primary")
+                    ui.label("📊 No immediate signals detected").classes("text-gray-600")
                     ui.label("Market conditions appear normal for regular SIP investment").classes(
                         "text-sm text-gray-500")
 
@@ -1265,37 +1982,179 @@ class EnhancedSIPStrategy:
                     step=100
                 ).classes("w-full")
 
+                # Order type selection
+                ui.label("📋 Order Type").classes("font-bold mt-4 mb-2")
+                
+                order_type_select = ui.select(
+                    label="Select Order Type",
+                    options=[
+                        "🔄 Market Order",
+                        "🎯 Limit Order", 
+                        "⏰ GTT Order"
+                    ],
+                    value="🔄 Market Order"
+                ).classes("w-full")
+
+                # Create a container for order type specific inputs (after the select)
+                order_inputs_container = ui.column().classes("w-full gap-4")
+
+                # Store references to dynamically created inputs
+                limit_price_input = None
+                gtt_trigger_input = None
+                gtt_limit_input = None
+                
+                # Show/hide inputs based on order type
+                def on_order_type_change():
+                    nonlocal limit_price_input, gtt_trigger_input, gtt_limit_input
+                    try:
+                        selected_text = order_type_select.value
+                        
+                        # Clear the container first
+                        order_inputs_container.clear()
+                        
+                        # Reset references
+                        limit_price_input = None
+                        gtt_trigger_input = None
+                        gtt_limit_input = None
+                        
+                        # Market Order: No price inputs needed
+                        if "Market Order" in selected_text:
+                            # No inputs to show for market orders
+                            pass
+                            
+                        # Limit Order: Show only limit price
+                        elif "Limit Order" in selected_text:
+                            with order_inputs_container:
+                                limit_price_input = ui.number(
+                                    label="Limit Price (₹)",
+                                    value=0,
+                                    min=0,
+                                    step=0.01
+                                ).classes("w-full")
+                                
+                        # GTT Order: Show GTT trigger and limit prices
+                        elif "GTT Order" in selected_text:
+                            with order_inputs_container:
+                                gtt_trigger_input = ui.number(
+                                    label="GTT Trigger Price (₹)",
+                                    value=0,
+                                    min=0,
+                                    step=0.01
+                                ).classes("w-full")
+                                
+                                gtt_limit_input = ui.number(
+                                    label="GTT Limit Price (₹)",
+                                    value=0,
+                                    min=0,
+                                    step=0.01
+                                ).classes("w-full")
+                        else:
+                            logger.warning(f"Unknown order type: '{selected_text}'")
+                    except Exception as e:
+                        logger.error(f"Error in on_order_type_change: {e}")
+
+                # Bind the change event
+                order_type_select.on_value_change(on_order_type_change)
+                
+                # Set initial visibility based on default selection
+                on_order_type_change()
+
                 ui.label("⚠️ Note: System will check minimum 5-day gap and monthly limits").classes(
                     "text-xs text-yellow-600 mt-2")
-                ui.label("💡 This will execute immediately regardless of market conditions").classes(
+                ui.label("💡 Market orders only work during market hours (9:15 AM - 3:30 PM)").classes(
                     "text-xs text-blue-600")
+                ui.label("📋 Market: Immediate execution, Limit: At specified price, GTT: Good Till Triggered").classes(
+                    "text-xs text-purple-600")
+                ui.label("⏰ GTT orders are recommended when markets are closed").classes(
+                    "text-xs text-green-600")
 
                 async def execute_investment():
                     try:
+                        # Map display text to order type values
+                        selected_text = order_type_select.value
+                        if "Market Order" in selected_text:
+                            order_type = "MARKET"
+                        elif "Limit Order" in selected_text:
+                            order_type = "LIMIT"
+                        elif "GTT Order" in selected_text:
+                            order_type = "GTT"
+                        else:
+                            ui.notify("❌ Invalid order type selected", type="negative")
+                            return
+                        
+                        # Prepare execution request based on order type
+                        execution_data = {
+                            "amount": amount_input.value,
+                            "order_type": order_type
+                        }
+                        
+                        # Add order type specific parameters
+                        if order_type == "LIMIT":
+                            # Use direct reference to limit price input
+                            if not limit_price_input or not limit_price_input.value:
+                                ui.notify("❌ Limit price is required for LIMIT orders", type="negative")
+                                return
+                            execution_data["limit_price"] = limit_price_input.value
+                        elif order_type == "GTT":
+                            # Use direct references to GTT inputs
+                            if not gtt_trigger_input or not gtt_limit_input or not gtt_trigger_input.value or not gtt_limit_input.value:
+                                ui.notify("❌ GTT trigger price and limit price are required for GTT orders", type="negative")
+                                return
+                            execution_data["gtt_trigger_price"] = gtt_trigger_input.value
+                            execution_data["gtt_limit_price"] = gtt_limit_input.value
+
                         response = await self.safe_api_call(
                             fetch_api,
                             f"/sip/execute/{portfolio_id}",
                             method="POST",
-                            data={"amount": amount_input.value}
+                            data=execution_data
                         )
 
                         if response:
-                            ui.notify(
-                                f"✅ Investment successful! ₹{response.get('total_investment_amount', 0):,.0f} invested",
-                                type="positive")
+                            order_type_used = response.get('order_type_used', 'MARKET')
+                            executed_trades = response.get('executed_trades', [])
+                            failed_trades = response.get('failed_trades', [])
+                            
+                            # Build notification message
+                            message_parts = []
+                            
+                            if executed_trades:
+                                total_invested = response.get('total_investment_amount', 0)
+                                message_parts.append(f"✅ ₹{total_invested:,.0f} invested using {order_type_used} orders")
+                                message_parts.append(f"Successfully placed {len(executed_trades)} orders")
+                            
+                            if failed_trades:
+                                message_parts.append(f"❌ Failed to place {len(failed_trades)} orders")
+                                # Show details of failed trades with error messages
+                                for trade in failed_trades:
+                                    symbol = trade.get('symbol', 'Unknown')
+                                    error = trade.get('error', 'Unknown error')
+                                    message_parts.append(f"• {symbol}: {error}")
+                            
+                            if not executed_trades and failed_trades:
+                                # All orders failed
+                                error_message = " ".join(message_parts)
+                                
+                                # Add helpful suggestion for market closed error
+                                if "Markets are closed" in error_message:
+                                    error_message += "\n💡 Tip: Use GTT orders when markets are closed for automatic execution when markets open."
+                                
+                                ui.notify(error_message, type="negative")
+                            elif executed_trades and failed_trades:
+                                # Mixed success/failure
+                                ui.notify(" ".join(message_parts), type="warning")
+                            else:
+                                # All orders succeeded
+                                ui.notify(" ".join(message_parts), type="positive")
+                            
                             await refresh_callback()
                             dialog.close()
                         else:
-                            ui.notify("❌ Investment failed", type="negative")
-
+                            # safe_api_call already handled the error display
+                            pass
                     except Exception as e:
-                        error_msg = str(e)
-                        if "Minimum" in error_msg and "days gap" in error_msg:
-                            ui.notify(f"⏰ {error_msg}", type="warning")
-                        elif "monthly limit" in error_msg.lower():
-                            ui.notify(f"📅 {error_msg}", type="warning")
-                        else:
-                            ui.notify(f"❌ Investment failed: {error_msg}", type="negative")
+                        # Handle any unexpected errors not caught by safe_api_call
+                        ui.notify(f"❌ Unexpected error: {str(e)}", type="negative")
 
                 with ui.row().classes("gap-4 mt-6 justify-center"):
                     ui.button("Cancel", on_click=dialog.close).classes("btn-modern-danger").props("outline")
@@ -1343,7 +2202,7 @@ class EnhancedSIPStrategy:
                             with ui.row().classes("w-full items-center gap-3"):
                                 ui.icon("signal_cellular_alt", size="1.5rem").classes("text-green-400")
                                 ui.label(f"📊 Found {len(signals['signals'])} Active Signals").classes("text-lg font-bold")
-
+                                ui.separator().classes("flex-1 ml-4")
                                 ui.chip(f"{len(signals['signals'])}", color="positive").classes("text-sm px-3 py-1").props("outline")
 
                         for signal in signals['signals']:
@@ -1398,24 +2257,22 @@ class EnhancedSIPStrategy:
         """Enhanced batch multi-configs backtest UI aligned with endpoint response"""
 
         ui.label("🔄 Batch Backtest with Multiple Configurations").classes("text-lg font-bold mb-4")
-        ui.label("Test multiple strategy configurations in batch and find the best one").classes("theme-text-primary mb-4")
+        ui.label("Test multiple strategy configurations in batch and find the best one").classes("text-gray-600 mb-4")
+
+        symbols_input = ui.textarea(
+            label="Symbols (one per line)",
+            value="ICICIB22\nCPSEETF",
+            placeholder="Enter symbols separated by new lines"
+        ).classes("w-full mb-4")
 
         with ui.row().classes("gap-4 mb-4"):
-            symbols_input = ui.textarea(
-                label="Symbols (one per line)",
-                value="ICICIB22\nCPSEETF",
-                placeholder="Enter symbols separated by new lines"
-            ).classes("flex-1 mb-4")
-
             start_date = ui.input("Start Date", value="2020-01-01").props("dense type=date").classes("flex-1 min-w-0")
             end_date = ui.input("End Date", value=datetime.now().strftime("%Y-%m-%d")).props(
                 "dense type=date").classes("flex-1 min-w-0")
 
-        with ui.row().classes("gap-4 mb-4"):
-            with ui.column().classes("flex-1"):
-                # FIXED: Use individual input fields instead of editable table for better UX
-                ui.label("⚙️ Configuration Management").classes("text-lg font-bold mb-.5")
-                ui.label("Add and customize multiple configurations to test").classes("theme-text-primary mb-1")
+            # FIXED: Use individual input fields instead of editable table for better UX
+            ui.label("⚙️ Configuration Management").classes("text-lg font-bold mb-2")
+            ui.label("Add and customize multiple configurations to test").classes("text-gray-600 mb-4")
 
             # Configuration storage
             configs_data = []
@@ -1719,7 +2576,7 @@ class EnhancedSIPStrategy:
             except Exception as e:
                 self.show_error("Batch backtest failed", str(e))
 
-        ui.button("🚀 Run Batch Backtest", on_click=run_batch_multi).classes("bg-blue-600 text-white px-1 py-2")
+        ui.button("🚀 Run Batch Backtest", on_click=run_batch_multi).classes("bg-blue-600 text-white px-6 py-2")
 
         # Configuration summary
         with ui.card().classes("w-full mt-4 p-4 bg-gray-50"):
@@ -1734,7 +2591,7 @@ class EnhancedSIPStrategy:
                         summary_text += f"DD: {config['minor_drawdown_threshold']:.1f}%/{config['major_drawdown_threshold']:.1f}%/{config['extreme_drawdown_threshold']:.1f}%, "
                         summary_text += f"Mult: {config['minor_drawdown_inv_multiplier']:.1f}x/{config['major_drawdown_inv_multiplier']:.1f}x/{config['extreme_drawdown_inv_multiplier']:.1f}x\n"
 
-                    ui.label(summary_text.strip()).classes("text-xs theme-text-primary whitespace-pre-line")
+                    ui.label(summary_text.strip()).classes("text-xs text-gray-600 whitespace-pre-line")
                 else:
                     ui.label("No configurations added").classes("text-gray-500")
 
@@ -1958,7 +2815,7 @@ class EnhancedSIPStrategy:
         """Render config optimization section"""
 
         ui.label("⚙️ Optimize Configuration").classes("text-lg font-bold mb-1")
-        ui.label("Find the optimal strategy parameters based on historical data").classes("theme-text-primary mb-4")
+        ui.label("Find the optimal strategy parameters based on historical data").classes("text-gray-600 mb-4")
 
         with ui.row().classes("gap-2 mb-2"):
             with ui.column().classes("w-full"):
@@ -2030,7 +2887,7 @@ class EnhancedSIPStrategy:
         """Render quick test section"""
 
         ui.label("⚡ Quick SIP Test").classes("text-lg font-bold mb-4")
-        ui.label("Rapid analysis with benchmark comparison").classes("theme-text-primary mb-4")
+        ui.label("Rapid analysis with benchmark comparison").classes("text-gray-600 mb-4")
 
         symbols_input = ui.textarea(
             label="Symbols (one per line)",
@@ -2082,7 +2939,7 @@ class EnhancedSIPStrategy:
         """Render benchmark test section with full metrics"""
 
         ui.label("📊 Benchmark Test").classes("text-lg font-bold mb-4")
-        ui.label("Test fixed SIP benchmark performance").classes("theme-text-primary mb-4")
+        ui.label("Test fixed SIP benchmark performance").classes("text-gray-600 mb-4")
 
         symbol_input = ui.input(label="ICICI Bank Symbol", placeholder="ICICIB22").classes("w-full mb-4")
 
@@ -2129,7 +2986,7 @@ class EnhancedSIPStrategy:
         """Render symbols search section"""
 
         ui.label("🔍 Search Available Symbols").classes("text-lg font-bold mb-4")
-        ui.label("Search and view available symbols for backtesting").classes("theme-text-primary mb-4")
+        ui.label("Search and view available symbols for backtesting").classes("text-gray-600 mb-4")
 
         symbol_search_input = ui.input(
             label="Search Symbols",
@@ -2225,19 +3082,19 @@ class EnhancedSIPStrategy:
 
                 with ui.grid(columns=4).classes("w-full gap-4"):
                     with ui.card().classes("p-4 text-center"):
-                        ui.label("📈 Symbols").classes("text-sm theme-text-primary")
+                        ui.label("📈 Symbols").classes("text-sm text-gray-600")
                         ui.label(str(total_symbols)).classes("text-2xl font-bold text-blue-600")
 
                     with ui.card().classes("p-4 text-center"):
-                        ui.label("💰 Total Investment").classes("text-sm theme-text-primary")
+                        ui.label("💰 Total Investment").classes("text-sm text-gray-600")
                         ui.label(f"₹{total_investment:,.0f}").classes("text-2xl font-bold text-green-600")
 
                     with ui.card().classes("p-4 text-center"):
-                        ui.label("💎 Final Value").classes("text-sm theme-text-primary")
+                        ui.label("💎 Final Value").classes("text-sm text-gray-600")
                         ui.label(f"₹{total_final_value:,.0f}").classes("text-2xl font-bold text-purple-600")
 
                     with ui.card().classes("p-4 text-center"):
-                        ui.label("📈 Avg CAGR").classes("text-sm theme-text-primary")
+                        ui.label("📈 Avg CAGR").classes("text-sm text-gray-600")
                         cagr_color = "text-green-600" if avg_cagr >= 0 else "text-red-600"
                         ui.label(f"{avg_cagr:.2f}%").classes(f"text-2xl font-bold {cagr_color}")
 
@@ -2281,33 +3138,33 @@ class EnhancedSIPStrategy:
 
                     with ui.grid(columns=4).classes("w-full gap-4 mb-4"):
                         with ui.column():
-                            ui.label("💰 Investment").classes("text-xs theme-text-primary")
+                            ui.label("💰 Investment").classes("text-xs text-gray-600")
                             ui.label(f"₹{total_investment:,.0f}").classes("text-sm font-bold")
 
-                            ui.label("💎 Final Value").classes("text-xs theme-text-primary mt-2")
+                            ui.label("💎 Final Value").classes("text-xs text-gray-600 mt-2")
                             ui.label(f"₹{final_value:,.0f}").classes("text-sm font-bold")
 
                         with ui.column():
-                            ui.label("📊 Total Return").classes("text-xs theme-text-primary")
+                            ui.label("📊 Total Return").classes("text-xs text-gray-600")
                             return_color = "text-green-600" if total_return >= 0 else "text-red-600"
                             ui.label(f"{total_return:+.2f}%").classes(f"text-sm font-bold {return_color}")
 
-                            ui.label("📈 CAGR").classes("text-xs theme-text-primary mt-2")
+                            ui.label("📈 CAGR").classes("text-xs text-gray-600 mt-2")
                             cagr_color = "text-green-600" if cagr >= 8 else "text-red-600"
                             ui.label(f"{cagr:.2f}%").classes(f"text-sm font-bold {cagr_color}")
 
                         with ui.column():
-                            ui.label("🔄 Total Trades").classes("text-xs theme-text-primary")
+                            ui.label("🔄 Total Trades").classes("text-xs text-gray-600")
                             ui.label(str(num_trades)).classes("text-sm font-bold")
 
-                            ui.label("Trade Breakdown").classes("text-xs theme-text-primary mt-2")
+                            ui.label("Trade Breakdown").classes("text-xs text-gray-600 mt-2")
                             ui.label(f"Regular: {trade_breakdown.get('regular_trades', 0)} | Extreme: {trade_breakdown.get('extreme_trades', 0)}").classes("text-xs")
 
                         with ui.column():
-                            ui.label("📅 Monthly Limit Exceeded").classes("text-xs theme-text-primary")
+                            ui.label("📅 Monthly Limit Exceeded").classes("text-xs text-gray-600")
                             ui.label(str(monthly_limit_exceeded)).classes("text-sm font-bold")
 
-                            ui.label("🚫 Price Threshold Skipped").classes("text-xs theme-text-primary mt-2")
+                            ui.label("🚫 Price Threshold Skipped").classes("text-xs text-gray-600 mt-2")
                             ui.label(str(price_threshold_skipped)).classes("text-sm font-bold")
 
                     ui.label(f"📅 Period: {period}").classes("text-sm")
@@ -2336,48 +3193,63 @@ class EnhancedSIPStrategy:
                         ui.button("📊 vs Benchmark", on_click=show_comparison_chart).classes("bg-purple-500 text-white text-xs")
 
     async def display_trade_chart(self, symbol: str, strategy_trades: List[Dict], benchmark_trades: List[Dict]):
-        """Display candlestick chart with strategy and benchmark trade markers - FIXED VERSION"""
+        """Display candlestick chart with strategy and benchmark trade markers (fixed endpoint + parsing)."""
 
         try:
-            # Parse period from trades if available
+            # Determine date range from trades (supports 'date' or 'timestamp')
+            def extract_trade_date(t: Dict) -> Optional[str]:
+                d = t.get('date') or t.get('timestamp')
+                if not d:
+                    return None
+                try:
+                    return pd.to_datetime(d).date().strftime('%Y-%m-%d')
+                except Exception:
+                    return None
+
             all_trades = strategy_trades + benchmark_trades
-            if all_trades:
-                min_date = min(t.get('date') for t in all_trades if t.get('date'))
-                max_date = max(t.get('date') for t in all_trades if t.get('date'))
-                endpoint = f"/sip/market-data/{symbol}?start_date={min_date}&end_date={max_date}"
+            trade_dates = [extract_trade_date(t) for t in all_trades]
+            trade_dates = [d for d in trade_dates if d]
+
+            if trade_dates:
+                start_date = min(trade_dates)
+                end_date = max(trade_dates)
             else:
-                # Fallback to recent data if no trades
-                endpoint = f"/sip/market-data/{symbol}"
+                # Fallback to recent 365 days if no trades/dates
+                end_date = datetime.now().date().strftime('%Y-%m-%d')
+                start_date = (datetime.now().date() - timedelta(days=365)).strftime('%Y-%m-%d')
+
+            # Use the backend market-data endpoint that exists
+            # GET /historical-data/Upstox?trading_symbol=SYMBOL&from_date=YYYY-MM-DD&to_date=YYYY-MM-DD&unit=day&interval=1
+            endpoint = (
+                f"/historical-data/Upstox?trading_symbol={symbol}"
+                f"&from_date={start_date}&to_date={end_date}&unit=day&interval=1"
+            )
 
             data = await self.safe_api_call(self.fetch_api, endpoint)
-            if not data or not data.get('historical_data', data.get('recent_data', [])):
+            points = (data or {}).get('data', [])
+            if not points:
                 ui.notify("No market data available for chart", type="warning")
                 return
 
-            historical_data = data.get('historical_data', data.get('recent_data', []))
-
-            # FIXED: Proper dataframe preparation with error handling
+            # Prepare OHLC dataframe
             try:
-                df = pd.DataFrame(historical_data)
+                df = pd.DataFrame(points)
                 if df.empty:
                     ui.notify("No historical data available", type="warning")
                     return
-
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 df = df.sort_values('timestamp')
-
-                # Extract OHLC data properly
-                df_ohlc = pd.json_normalize(df['ohlc'].tolist())
-                df = pd.concat([df[['timestamp']], df_ohlc], axis=1)
-
+                # Ensure required OHLC columns exist (service returns open/high/low/close at top-level)
+                required_cols = {'open', 'high', 'low', 'close'}
+                if not required_cols.issubset(df.columns):
+                    ui.notify("Market data missing OHLC columns", type="negative")
+                    return
             except Exception as e:
                 ui.notify(f"Error processing market data: {str(e)}", type="negative")
                 return
 
-            # Create enhanced candlestick chart
+            # Create candlestick chart
             fig = go.Figure()
-
-            # Add candlestick chart
             fig.add_trace(go.Candlestick(
                 x=df['timestamp'],
                 open=df['open'],
@@ -2388,108 +3260,75 @@ class EnhancedSIPStrategy:
                 showlegend=True
             ))
 
-            # FIXED: Enhanced strategy trade markers with better visibility
+            # Strategy trade markers (support 'date' or 'timestamp')
             if strategy_trades:
-                strategy_dates = []
-                strategy_prices = []
-                strategy_amounts = []
-                strategy_units = []
+                s_dates, s_prices, s_amounts = [], [], []
+                for t in strategy_trades:
+                    d = extract_trade_date(t)
+                    p = t.get('price')
+                    if d and p is not None:
+                        s_dates.append(pd.to_datetime(d))
+                        s_prices.append(float(p))
+                        s_amounts.append(t.get('amount', 0))
 
-                for trade in strategy_trades:
-                    if trade.get('date') and trade.get('price'):
-                        strategy_dates.append(pd.to_datetime(trade['date']))
-                        strategy_prices.append(float(trade['price']))
-                        strategy_amounts.append(trade.get('amount', 0))
-                        strategy_units.append(trade.get('units', 0))
-
-                if strategy_dates:
-                    # Add strategy trades as scatter plot with enhanced markers
+                if s_dates:
                     fig.add_trace(go.Scatter(
-                        x=strategy_dates,
-                        y=strategy_prices,
+                        x=s_dates,
+                        y=s_prices,
                         mode='markers+text',
-                        marker=dict(
-                            symbol='star',
-                            size=15,
-                            color='red',
-                            line=dict(width=2, color='darkred')
-                        ),
-                        text=[f"₹{amt:,.0f}" for amt in strategy_amounts],
+                        marker=dict(symbol='star', size=14, color='red', line=dict(width=2, color='darkred')),
+                        text=[f"₹{amt:,.0f}" for amt in s_amounts],
                         textposition="top center",
                         textfont=dict(size=10, color='red'),
                         name=f'Strategy Trades ({len(strategy_trades)})',
-                        hovertemplate="<b>Strategy Trade</b><br>" +
-                                      "Date: %{x}<br>" +
-                                      "Price: ₹%{y:.2f}<br>" +
-                                      "Amount: ₹%{text}<br>" +
-                                      "<extra></extra>",
+                        hovertemplate="<b>Strategy Trade</b><br>Date: %{x}<br>Price: ₹%{y:.2f}<br>Amount: %{text}<extra></extra>",
                         showlegend=True
                     ))
 
-            # FIXED: Enhanced benchmark trade markers
+            # Benchmark trade markers
             if benchmark_trades:
-                benchmark_dates = []
-                benchmark_prices = []
-                benchmark_amounts = []
+                b_dates, b_prices, b_amounts = [], [], []
+                for t in benchmark_trades:
+                    d = extract_trade_date(t)
+                    p = t.get('price')
+                    if d and p is not None:
+                        b_dates.append(pd.to_datetime(d))
+                        b_prices.append(float(p))
+                        b_amounts.append(t.get('amount', 0))
 
-                for trade in benchmark_trades:
-                    if trade.get('date') and trade.get('price'):
-                        benchmark_dates.append(pd.to_datetime(trade['date']))
-                        benchmark_prices.append(float(trade['price']))
-                        benchmark_amounts.append(trade.get('amount', 0))
-
-                if benchmark_dates:
+                if b_dates:
                     fig.add_trace(go.Scatter(
-                        x=benchmark_dates,
-                        y=benchmark_prices,
+                        x=b_dates,
+                        y=b_prices,
                         mode='markers+text',
-                        marker=dict(
-                            symbol='circle',
-                            size=12,
-                            color='blue',
-                            line=dict(width=2, color='darkblue')
-                        ),
-                        text=[f"₹{amt:,.0f}" for amt in benchmark_amounts],
+                        marker=dict(symbol='circle', size=12, color='blue', line=dict(width=2, color='darkblue')),
+                        text=[f"₹{amt:,.0f}" for amt in b_amounts],
                         textposition="bottom center",
                         textfont=dict(size=9, color='blue'),
                         name=f'Benchmark Trades ({len(benchmark_trades)})',
-                        hovertemplate="<b>Benchmark Trade</b><br>" +
-                                      "Date: %{x}<br>" +
-                                      "Price: ₹%{y:.2f}<br>" +
-                                      "Amount: ₹%{text}<br>" +
-                                      "<extra></extra>",
+                        hovertemplate="<b>Benchmark Trade</b><br>Date: %{x}<br>Price: ₹%{y:.2f}<br>Amount: %{text}<extra></extra>",
                         showlegend=True
                     ))
 
-            # Enhanced layout with better styling
+            # Layout
             fig.update_layout(
                 title=f"{symbol} - Price Chart with Trade Overlays",
                 xaxis_title="Date",
                 yaxis_title="Price (₹)",
                 template="plotly_white",
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="right",
-                    x=1
-                ),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                 height=600,
                 hovermode='x unified'
             )
 
-            # Enhanced dialog with full-screen option
             with ui.dialog() as dialog, ui.card().classes("w-[90vw] h-[80vh] max-w-none"):
                 with ui.row().classes("w-full justify-between items-center mb-4"):
                     ui.label(f"{symbol} Trade Analysis Chart").classes("text-xl font-bold")
                     with ui.row().classes("gap-2"):
                         ui.button("📊 Download Chart",
-                                  on_click=lambda: ui.download(fig.to_html(),
-                                                               f"{symbol}_trade_chart.html")).classes("text-xs")
+                                  on_click=lambda: ui.download(fig.to_html(), f"{symbol}_trade_chart.html")).classes("text-xs")
                         ui.button("❌ Close", on_click=dialog.close).classes("text-xs")
-
                 ui.plotly(fig).classes("w-full h-full")
-
             dialog.open()
 
         except Exception as e:
@@ -2600,22 +3439,22 @@ class EnhancedSIPStrategy:
                     ui.label("📊 Performance Summary").classes("text-lg font-semibold mb-2")
                     with ui.grid(columns=4).classes("w-full gap-4"):
                         with ui.card().classes("p-3 text-center"):
-                            ui.label("Strategy Return").classes("text-sm theme-text-primary")
+                            ui.label("Strategy Return").classes("text-sm text-gray-600")
                             color = "text-green-600" if strategy_return >= 0 else "text-red-600"
                             ui.label(f"{strategy_return:+.2f}%").classes(f"text-lg font-bold {color}")
 
                         with ui.card().classes("p-3 text-center"):
-                            ui.label("Benchmark Return").classes("text-sm theme-text-primary")
+                            ui.label("Benchmark Return").classes("text-sm text-gray-600")
                             color = "text-green-600" if benchmark_return >= 0 else "text-red-600"
                             ui.label(f"{benchmark_return:+.2f}%").classes(f"text-lg font-bold {color}")
 
                         with ui.card().classes("p-3 text-center"):
-                            ui.label("Outperformance").classes("text-sm theme-text-primary")
+                            ui.label("Outperformance").classes("text-sm text-gray-600")
                             color = "text-green-600" if outperformance >= 0 else "text-red-600"
                             ui.label(f"{outperformance:+.2f}%").classes(f"text-lg font-bold {color}")
 
                         with ui.card().classes("p-3 text-center"):
-                            ui.label("Final Portfolio").classes("text-sm theme-text-primary")
+                            ui.label("Final Portfolio").classes("text-sm text-gray-600")
                             ui.label(f"₹{strategy_final:,.0f}").classes("text-lg font-bold text-blue-600")
 
                 ui.plotly(fig).classes("w-full flex-1")
@@ -2625,6 +3464,149 @@ class EnhancedSIPStrategy:
         except Exception as e:
             logger.error(f"Error creating ROI comparison chart: {e}")
             ui.notify(f"Failed to create ROI comparison: {str(e)}", type="negative")
+
+    async def _display_historical_comparison_chart(self, symbol: str, strategy: Dict, benchmark: Dict):
+        """Fallback comparison chart by reconstructing portfolio values from trades and daily prices."""
+
+        try:
+            strategy_trades = strategy.get('trades', []) or []
+            benchmark_trades = benchmark.get('trades', []) or []
+
+            if not strategy_trades and not benchmark_trades:
+                ui.notify("No trade history available for comparison", type="warning")
+                return
+
+            # Helper to extract date string from trade
+            def trade_date_str(t: Dict) -> Optional[str]:
+                d = t.get('date') or t.get('timestamp')
+                if not d:
+                    return None
+                try:
+                    return pd.to_datetime(d).date().strftime('%Y-%m-%d')
+                except Exception:
+                    return None
+
+            # Determine date range
+            dates = [d for d in [trade_date_str(t) for t in (strategy_trades + benchmark_trades)] if d]
+            if dates:
+                start_date, end_date = min(dates), max(dates)
+            else:
+                # Try parse from period field like "YYYY-MM-DD to YYYY-MM-DD"
+                period = strategy.get('period') or benchmark.get('period') or ''
+                if 'to' in period:
+                    parts = [p.strip() for p in period.split('to')]
+                    start_date = parts[0]
+                    end_date = parts[1] if len(parts) > 1 else datetime.now().date().strftime('%Y-%m-%d')
+                else:
+                    end_date = datetime.now().date().strftime('%Y-%m-%d')
+                    start_date = (datetime.now().date() - timedelta(days=365)).strftime('%Y-%m-%d')
+
+            # Fetch daily prices for the full range
+            endpoint = (
+                f"/historical-data/Upstox?trading_symbol={symbol}"
+                f"&from_date={start_date}&to_date={end_date}&unit=day&interval=1"
+            )
+            data = await self.safe_api_call(self.fetch_api, endpoint)
+            points = (data or {}).get('data', [])
+            if not points:
+                ui.notify("No market data available for comparison", type="warning")
+                return
+
+            price_df = pd.DataFrame(points)
+            price_df['timestamp'] = pd.to_datetime(price_df['timestamp'])
+            price_df = price_df.sort_values('timestamp')
+
+            # Index trades by date for quick accumulation
+            def normalize_trades(trades: List[Dict]) -> Dict[str, Dict[str, float]]:
+                acc: Dict[str, Dict[str, float]] = {}
+                for t in trades:
+                    d = trade_date_str(t)
+                    if not d:
+                        continue
+                    amt = float(t.get('amount', 0) or 0)
+                    units = float(t.get('units', 0) or 0)
+                    if d not in acc:
+                        acc[d] = {'amount': 0.0, 'units': 0.0}
+                    acc[d]['amount'] += amt
+                    acc[d]['units'] += units
+                return acc
+
+            strat_by_date = normalize_trades(strategy_trades)
+            bench_by_date = normalize_trades(benchmark_trades)
+
+            # Build daily portfolio values by accumulating units
+            s_units = 0.0
+            b_units = 0.0
+            s_values = []
+            b_values = []
+            dates = []
+
+            for _, row in price_df.iterrows():
+                d = row['timestamp'].date().strftime('%Y-%m-%d')
+                close = float(row['close'])
+
+                if d in strat_by_date:
+                    s_units += strat_by_date[d]['units']
+                if d in bench_by_date:
+                    b_units += bench_by_date[d]['units']
+
+                dates.append(row['timestamp'])
+                s_values.append(s_units * close)
+                b_values.append(b_units * close)
+
+            # Create comparison chart
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=dates, y=s_values, name='Strategy Portfolio', line=dict(color='#1f77b4', width=3)))
+            fig.add_trace(go.Scatter(x=dates, y=b_values, name='Benchmark Portfolio', line=dict(color='#ff7f0e', width=3, dash='dash')))
+
+            # Metrics
+            if b_values and b_values[-1] != 0:
+                outperformance = ((s_values[-1] / b_values[-1]) - 1) * 100
+            else:
+                outperformance = 0.0
+
+            fig.update_layout(
+                title=f"{symbol} - Strategy vs Benchmark (Reconstructed)",
+                xaxis_title="Date",
+                yaxis_title="Portfolio Value (₹)",
+                template="plotly_white",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                height=500
+            )
+
+            s_return = strategy.get('total_return_percent', 0)
+            b_return = benchmark.get('total_return_percent', 0)
+
+            with ui.dialog() as dialog, ui.card().classes("w-[90vw] h-[85vh] max-w-none"):
+                with ui.row().classes("w-full justify-between items-center mb-4"):
+                    ui.label(f"{symbol} Performance Comparison").classes("text-xl font-bold")
+                    ui.button("❌ Close", on_click=dialog.close)
+
+                with ui.card().classes("w-full p-4 mb-4 bg-gray-50"):
+                    ui.label("📊 Performance Summary").classes("text-lg font-semibold mb-2")
+                    with ui.grid(columns=4).classes("w-full gap-4"):
+                        with ui.card().classes("p-3 text-center"):
+                            ui.label("Strategy Return").classes("text-sm text-gray-600")
+                            color = "text-green-600" if s_return >= 0 else "text-red-600"
+                            ui.label(f"{s_return:+.2f}%").classes(f"text-lg font-bold {color}")
+                        with ui.card().classes("p-3 text-center"):
+                            ui.label("Benchmark Return").classes("text-sm text-gray-600")
+                            color = "text-green-600" if b_return >= 0 else "text-red-600"
+                            ui.label(f"{b_return:+.2f}%").classes(f"text-lg font-bold {color}")
+                        with ui.card().classes("p-3 text-center"):
+                            ui.label("Outperformance").classes("text-sm text-gray-600")
+                            color = "text-green-600" if outperformance >= 0 else "text-red-600"
+                            ui.label(f"{outperformance:+.2f}%").classes(f"text-lg font-bold {color}")
+                        with ui.card().classes("p-3 text-center"):
+                            ui.label("Final Portfolio").classes("text-sm text-gray-600")
+                            ui.label(f"₹{s_values[-1]:,.0f}").classes("text-lg font-bold text-blue-600")
+
+                ui.plotly(fig).classes("w-full flex-1")
+            dialog.open()
+
+        except Exception as e:
+            logger.error(f"Error creating historical comparison chart: {e}")
+            ui.notify(f"Failed to create comparison chart: {str(e)}", type="negative")
 
     async def render_enhanced_analytics_panel(self, fetch_api, user_storage):
         """Enhanced analytics panel with comprehensive portfolio insights and benchmarks"""
@@ -2846,23 +3828,23 @@ class EnhancedSIPStrategy:
                     ui.label("🔄 Rolling Window").classes("font-medium")
                     ui.label(
                         "Number of days to look back for calculating moving averages and market conditions. Higher values = smoother signals, lower values = more responsive.").classes(
-                        "text-sm theme-text-primary mb-3")
+                        "text-sm text-gray-600 mb-3")
 
                     ui.label("📉 Price Reduction Threshold").classes("font-medium")
                     ui.label(
                         "Minimum price drop (%) required for additional investments within the same month. Prevents over-investing on minor fluctuations.").classes(
-                        "text-sm theme-text-primary mb-3")
+                        "text-sm text-gray-600 mb-3")
 
                 with ui.column():
                     ui.label("📅 Max Monthly Investment").classes("font-medium")
                     ui.label(
                         "Maximum amount to invest per symbol per month. Usually 3-5x the fixed investment amount for drawdown opportunities.").classes(
-                        "text-sm theme-text-primary mb-3")
+                        "text-sm text-gray-600 mb-3")
 
                     ui.label("⏱️ Min Investment Gap").classes("font-medium")
                     ui.label(
                         "Minimum days between investments to avoid frequent trading and allow market movements to develop.").classes(
-                        "text-sm theme-text-primary")
+                        "text-sm text-gray-600")
 
         # Configuration templates section
         with ui.card().classes("w-full max-w-4xl mx-auto p-4 mt-4"):
@@ -2980,7 +3962,7 @@ class EnhancedSIPStrategy:
                         ui.label(f"📊 Report {report['report_id'][:12]}...").classes("text-lg font-bold")
                         ui.label(
                             f"Symbols: {', '.join(report['symbols'][:3])}{'...' if len(report['symbols']) > 3 else ''}").classes(
-                            "text-sm theme-text-primary")
+                            "text-sm text-gray-600")
                         ui.label(f"Generated: {report['generated_at'][:19]}").classes("text-xs text-gray-500")
 
                     with ui.column().classes("text-right"):
@@ -3075,7 +4057,7 @@ class EnhancedSIPStrategy:
                 ui.label("⚡ Quick Investment Report").classes("text-xl font-bold mb-4")
 
                 symbols = report.get('symbols', [])
-                ui.label(f"Symbols Analyzed: {', '.join(symbols)}").classes("text-sm theme-text-primary mb-4")
+                ui.label(f"Symbols Analyzed: {', '.join(symbols)}").classes("text-sm text-gray-600 mb-4")
 
                 # Portfolio recommendations
                 portfolio_rec = report.get('portfolio_recommendations', {})

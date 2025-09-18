@@ -6,7 +6,7 @@ from fastapi import HTTPException
 
 from backend.app.services import init_upstox_api, init_zerodha_api
 from backend.app.services import TokenExpiredError
-from models import User
+from .models import User
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,7 @@
-from pydantic import BaseModel, EmailStr, validator, field_validator
+from pydantic import BaseModel, EmailStr, validator, field_validator, Field
 from datetime import datetime
 from typing import Optional, List, Dict, Any
+from enum import Enum
 
 class UserBase(BaseModel):
     email: EmailStr
@@ -134,6 +135,9 @@ class GTTOrder(BaseModel):
     broker: Optional[str] = None
     created_at: Optional[datetime] = None
     user_id: Optional[str] = None
+    # Upstox-specific enrichments
+    gtt_type: Optional[str] = None  # "SINGLE" or "MULTIPLE" (Upstox)
+    rules: Optional[List[Dict[str, Any]]] = None  # Preserve full rule list for Upstox
 
     class Config:
         from_attributes = True
@@ -144,11 +148,13 @@ class GTTOrderRequest(BaseModel):
     transaction_type: str
     quantity: int
     trigger_type: str
-    trigger_price: float
-    limit_price: float
+    trigger_price: Optional[float] = None
+    limit_price: Optional[float] = None
     last_price: float
     second_trigger_price: Optional[float] = None
     second_limit_price: Optional[float] = None
+    # Optional Upstox-specific: allow full rules list (ENTRY, STOP_LOSS, TARGET)
+    rules: Optional[List[Dict[str, Any]]] = None
     broker: str
 
 class TradeHistory(BaseModel):
@@ -300,6 +306,26 @@ class StrategyResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class PartialExit(BaseModel):
+    target: float
+    qty_percent: float
+
+class StrategyExecutionRequest(BaseModel):
+    instrument_token: str
+    trading_symbol: str
+    quantity: int
+    risk_per_trade: float = 2.0
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    position_sizing_percent: float = 10.0
+    position_sizing_mode: str = "Auto Calculate"
+    total_capital: float = 100000.0
+    timeframe: str = "day"
+    trailing_stop_enabled: bool = False
+    trailing_stop_percent: Optional[float] = None
+    trailing_stop_min: Optional[float] = None
+    partial_exits: List[PartialExit] = []
+
 class BacktestRequest(BaseModel):
     trading_symbol: str
     instrument_token: str
@@ -340,3 +366,56 @@ class MFSIPResponse(BaseModel):
     status: str
     user_id: str
     created_at: datetime
+
+# Market Data Request Schemas
+class MarketDataRequest(BaseModel):
+    """Base request model for market data endpoints"""
+    instruments: Optional[str] = Field(None, description="Comma-separated instrument tokens (e.g., 'NSE_EQ|INE002A01018,NSE_EQ|INE009A01021')")
+    trading_symbols: Optional[str] = Field(None, description="Comma-separated trading symbols (e.g., 'RELIANCE,TCS')")
+
+    @validator('*', pre=True)
+    def validate_at_least_one_parameter(cls, v, values):
+        if 'instruments' in values and 'trading_symbols' in values:
+            if not values.get('instruments') and not values.get('trading_symbols'):
+                raise ValueError('Either instruments or trading_symbols must be provided')
+        return v
+
+class TimeUnit(str, Enum):
+    minute = "minute"
+    day = "day"
+    week = "week"
+    month = "month"
+
+class Interval(str, Enum):
+    one = "1"
+    three = "3"
+    five = "5"
+    ten = "10"
+    fifteen = "15"
+    thirty = "30"
+    sixty = "60"
+
+class HistoricalDataRequest(BaseModel):
+    """Request model for historical data endpoint with proper parameter documentation"""
+    instrument: Optional[str] = Field(None, description="Instrument token (e.g., 'NSE_EQ|INE002A01018')")
+    trading_symbol: Optional[str] = Field(None, description="Trading symbol (e.g., 'RELIANCE')")
+    from_date: str = Field(..., description="Start date in YYYY-MM-DD format", example="2024-01-01")
+    to_date: str = Field(..., description="End date in YYYY-MM-DD format", example="2024-12-31")
+    unit: TimeUnit = Field(..., description="Time unit for data points")
+    interval: Interval = Field(..., description="Interval value")
+    source: str = Field("default", description="Data source (default, upstox, nse)")
+
+    @validator('from_date', 'to_date')
+    def validate_date_format(cls, v):
+        try:
+            datetime.strptime(v, '%Y-%m-%d')
+            return v
+        except ValueError:
+            raise ValueError('Date must be in YYYY-MM-DD format')
+
+    @validator('*', pre=True)
+    def validate_instrument_or_symbol(cls, v, values):
+        if 'instrument' in values and 'trading_symbol' in values:
+            if not values.get('instrument') and not values.get('trading_symbol'):
+                raise ValueError('Either instrument or trading_symbol must be provided')
+        return v

@@ -24,7 +24,8 @@ from apscheduler.jobstores.memory import MemoryJobStore
 import pytz
 import traceback
 from backend.app.database import db_manager
-from backend.app.services import OrderManager
+from backend.app.services import OrderManager, place_order, get_ltp, calculate_portfolio_current_value
+from backend.app.api_manager import initialize_user_apis
 
 
 # Clean imports - multi-database architecture
@@ -32,6 +33,12 @@ from backend.app.database import get_db, get_nsedata_db
 from backend.app.auth import UserManager, oauth2_scheme
 from backend.app.strategies.enhanced_sip_strategy import (
     EnhancedSIPStrategy, SIPConfig, Trade, EnhancedSIPStrategyWithLimits, BenchmarkSIPCalculator)
+from .sip_models import (
+    JobTriggerType, SchedulerConfigRequest, SIPSymbolConfig, SIPConfigRequest,
+    SIPBacktestRequest, SIPMultiPortfolioRequest, SIPPortfolioRequest,
+    InvestmentReportRequest, InvestmentReportResponse, OrderType, SIPExecutionRequest,
+    PortfolioUpdateRequest, MultiPortfolioUpdateRequest
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,29 +75,7 @@ def create_enhanced_scheduler():
 # Create global scheduler instance
 scheduler = create_enhanced_scheduler()
 
-class JobTriggerType(str, Enum):
-    CRON = "cron"
-    INTERVAL = "interval"
-    DATE = "date"
 
-# Pydantic models for request/response
-class SchedulerConfigRequest(BaseModel):
-    job_id: str
-    trigger_type: JobTriggerType
-    # For CRON triggers
-    cron_expression: Optional[str] = None
-    # For interval triggers
-    interval_seconds: Optional[int] = None
-    interval_minutes: Optional[int] = None
-    interval_hours: Optional[int] = None
-    # For date triggers
-    run_date: Optional[datetime] = None
-    # Common job settings
-    timezone: str = "Asia/Kolkata"
-    max_instances: int = 1
-    coalesce: bool = True
-    misfire_grace_time: int = 300
-    replace_existing: bool = True
 
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
@@ -137,127 +122,7 @@ class EnhancedJSONEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-class SIPSymbolConfig(BaseModel):
-    """Configuration for individual symbol in multi-symbol portfolio"""
-    symbol: str
-    allocation_percentage: float = 100.0
-    config: Optional[Dict] = None
 
-    @validator('allocation_percentage')
-    def validate_allocation(cls, v):
-        if v <= 0 or v > 100:
-            raise ValueError('Allocation percentage must be between 0 and 100')
-        return v
-
-
-class SIPConfigRequest(BaseModel):
-    """Enhanced SIP Configuration with monthly investment limits"""
-    fixed_investment: float = 5000
-    major_drawdown_threshold: float = -10.0
-    minor_drawdown_threshold: float = -4.0
-    extreme_drawdown_threshold: float = -15.0
-    minor_drawdown_inv_multiplier: float = 1.75
-    major_drawdown_inv_multiplier: float = 3.0
-    extreme_drawdown_inv_multiplier: float = 4.0  # For extreme opportunities
-    rolling_window: int = 100
-    fallback_day: int = 28
-    min_investment_gap_days: int = 5
-    max_amount_in_a_month: Optional[float] = None
-    price_reduction_threshold: float = 4.0
-    force_remaining_investment: bool = True  # Force invest remaining amount
-
-    @validator('fixed_investment')
-    def validate_investment(cls, v):
-        if v <= 0:
-            raise ValueError('Investment amount must be positive')
-        return v
-
-    @validator('max_amount_in_a_month', always=True)
-    def validate_monthly_limit(cls, v, values):
-        if v is None:
-            # Default to 4 times the fixed investment
-            fixed_investment = values.get('fixed_investment', 5000)
-            return fixed_investment * 4
-        if v <= 0:
-            raise ValueError('Monthly limit must be positive')
-        fixed_investment = values.get('fixed_investment', 5000)
-        if v < fixed_investment:
-            raise ValueError('Monthly limit cannot be less than fixed investment')
-        return v
-
-    @validator('price_reduction_threshold')
-    def validate_price_threshold(cls, v):
-        if v <= 0:
-            raise ValueError('Price reduction threshold must be positive')
-        return v
-
-
-class SIPBacktestRequest(BaseModel):
-    """Enhanced backtest request with monthly limits"""
-    symbols: List[str]
-    start_date: str
-    end_date: str
-    config: SIPConfigRequest
-    enable_monthly_limits: bool = True
-
-    @validator('symbols')
-    def validate_symbols(cls, v):
-        if not v:
-            raise ValueError('At least one symbol required')
-        return v
-
-
-class SIPMultiPortfolioRequest(BaseModel):
-    """Multi-symbol portfolio creation"""
-    portfolio_name: str
-    symbols: List[SIPSymbolConfig]
-    default_config: SIPConfigRequest
-    auto_rebalance: bool = False
-    rebalance_frequency_days: int = 30
-
-    @validator('symbols')
-    def validate_symbols_allocation(cls, v):
-        if not v:
-            raise ValueError('At least one symbol required')
-
-        total_allocation = sum(symbol.allocation_percentage for symbol in v)
-        if abs(total_allocation - 100.0) > 0.01:
-            raise ValueError('Total allocation must equal 100%')
-
-        return v
-
-
-class SIPPortfolioRequest(BaseModel):
-    symbol: str
-    portfolio_name: Optional[str] = None
-    config: SIPConfigRequest
-
-
-class InvestmentReportRequest(BaseModel):
-    symbols: List[str]
-    config: Optional[SIPConfigRequest] = None
-    report_type: str = "comprehensive"  # "quick", "comprehensive", "detailed"
-    include_risk_assessment: bool = True
-    include_allocation_suggestions: bool = True
-
-    @validator('symbols')
-    def validate_symbols(cls, v):
-        if not v:
-            raise ValueError('At least one symbol required')
-        if len(v) > 20:
-            raise ValueError('Maximum 20 symbols allowed per report')
-        return v
-
-
-class InvestmentReportResponse(BaseModel):
-    report_id: str
-    report_generated: str
-    analysis_period: str
-    overall_metrics: Dict[str, Any]
-    portfolio_recommendation: Dict[str, Any]
-    risk_assessment: Dict[str, Any]
-    symbol_reports: Dict[str, Any]
-    disclaimer: str
 
 
 # Create router
@@ -344,6 +209,8 @@ async def get_user_apis(user_id: str, trading_db: AsyncSession, all_apis: bool=F
     except Exception as e:
         logger.error(f"Error getting user APIs for {user_id}: {e}")
         return {}
+
+
 
 
 async def get_instrument_token_for_symbol(symbol: str, trading_db: AsyncSession) -> Optional[str]:
@@ -479,6 +346,62 @@ async def place_gtt_order_via_existing_api(
             "message": f"GTT order placement failed: {str(e)}"
         }
 
+def determine_optimal_order_type(signal_result: dict, config: dict) -> str:
+    """
+    Determine the optimal order type based on signal strength, confidence, and market conditions.
+    
+    Args:
+        signal_result: Signal data containing signal type, confidence, etc.
+        config: Portfolio configuration
+        
+    Returns:
+        str: Order type ("GTT", "LIMIT", or "MARKET")
+    """
+    signal_type = signal_result.get('signal', 'NORMAL')
+    confidence = signal_result.get('confidence', 0)
+    current_time = datetime.now()
+    
+    # Check if markets are open (9:15 AM to 3:30 PM IST, Monday to Friday)
+    ist_time = current_time.replace(tzinfo=None)  # Assuming server is in IST
+    is_weekday = ist_time.weekday() < 5  # Monday = 0, Friday = 4
+    is_market_hours = (9, 15) <= (ist_time.hour, ist_time.minute) <= (15, 30)
+    markets_open = is_weekday and is_market_hours
+    
+    # Enhanced order type selection logic
+    if signal_type == 'STRONG_BUY' and confidence > 0.85:
+        # Very strong signals: Use MARKET orders during market hours for immediate execution
+        if markets_open:
+            return "MARKET"
+        else:
+            # Outside market hours, use GTT for strong signals
+            return "GTT"
+    
+    elif signal_type == 'STRONG_BUY' and confidence > 0.7:
+        # Strong signals: Use LIMIT orders during market hours to reduce slippage
+        if markets_open:
+            return "LIMIT"
+        else:
+            return "GTT"
+    
+    elif signal_type == 'BUY' and confidence > 0.6:
+        # Moderate signals: Use LIMIT orders during market hours, GTT otherwise
+        if markets_open:
+            return "LIMIT"
+        else:
+            return "GTT"
+    
+    elif signal_type in ['EXTREME_OPPORTUNITY', 'FORCE_INVESTMENT']:
+        # Extreme opportunities and force investments: Use MARKET orders for immediate execution
+        if markets_open:
+            return "MARKET"
+        else:
+            return "GTT"
+    
+    else:
+        # Default: Use GTT for all other cases (safest option)
+        return "GTT"
+
+
 async def daily_signal_check():
     """Enhanced background task with proper session management and error handling"""
     job_start_time = datetime.now()
@@ -495,6 +418,8 @@ async def daily_signal_check():
         'holiday_makeups_executed': 0,
         'errors_encountered': 0,
         'gtt_orders_placed': 0,
+        'limit_orders_placed': 0,
+        'market_orders_placed': 0,
         'total_investment_amount': 0.0
     }
 
@@ -539,6 +464,7 @@ async def daily_signal_check():
 
         # Process each portfolio
         for portfolio in portfolios:
+            metrics['portfolios_processed'] += 1
             portfolio_id, user_id, symbols_json, config_json, total_invested, current_units, next_investment_date = portfolio
 
             try:
@@ -724,28 +650,49 @@ async def daily_signal_check():
                             f"amount: ₹{signal_result.get('recommended_amount', 0):,.2f})"
                         )
 
-                        # SOLUTION 3: GTT order integration
+                        # SOLUTION 3: Enhanced signal-based investment execution (using execute_sip_investment logic)
                         try:
                             if signal_result.get('signal') not in ['NO_DATA', 'ERROR', 'NORMAL']:
-                                save_result = await save_signal_with_gtt_order(
-                                    portfolio_id, symbol, signal_result, trading_db, merged_config
+                                # Enhanced order type selection based on signal strength, confidence, and market conditions
+                                order_type = determine_optimal_order_type(signal_result, merged_config)
+                                
+                                logger.info(f"🎯 Selected {order_type} order for {symbol} (signal: {signal_result.get('signal')}, confidence: {signal_result.get('confidence', 0):.2f})")
+                                
+                                execution_result = await execute_signal_based_investment(
+                                    portfolio_id=portfolio_id,
+                                    symbol=symbol,
+                                    signals=signal_result,
+                                    config=merged_config,
+                                    trading_db=trading_db,
+                                    user_id=user_id,
+                                    order_type=order_type
                                 )
 
-                                if save_result.get('status') == 'success':
-                                    logger.info(f"✅ Signal and REAL GTT order saved successfully for {symbol}")
-                                    metrics['signal_result_generated'] += 1
-                                elif save_result.get('status') in ['partial_success', 'signal_only']:
-                                    logger.info(
-                                        f"⚠️ Signal saved (GTT partial/none) for {symbol}: {save_result.get('message')}")
-                                    metrics['signal_result_generated'] += 1
+                                if execution_result.get('status') == 'success':
+                                    executed_order_type = execution_result.get('order_type', 'GTT')
+                                    logger.info(f"✅ Signal-based {executed_order_type} order executed successfully for {symbol}")
+                                    metrics['signals_generated'] += 1
+                                    
+                                    # Track order types separately
+                                    if executed_order_type == 'GTT':
+                                        metrics['gtt_orders_placed'] += 1
+                                    elif executed_order_type == 'LIMIT':
+                                        metrics['limit_orders_placed'] = metrics.get('limit_orders_placed', 0) + 1
+                                    elif executed_order_type == 'MARKET':
+                                        metrics['market_orders_placed'] = metrics.get('market_orders_placed', 0) + 1
+                                    
+                                    if execution_result.get('executed_trades'):
+                                        metrics['total_investment_amount'] += sum(trade.get('amount', 0) for trade in execution_result['executed_trades'])
+                                elif execution_result.get('status') == 'skipped':
+                                    logger.info(f"⏭️ Investment skipped for {symbol}: {execution_result.get('message')}")
                                 else:
-                                    logger.error(f"❌ Failed to save signal for {symbol}: {save_result.get('message')}")
+                                    logger.error(f"❌ Failed to execute investment for {symbol}: {execution_result.get('message')}")
                                     metrics['errors_encountered'] += 1
                             else:
                                 logger.info(f"ℹ️ No actionable signal for {symbol}: {signal_result.get('signal')}")
 
-                        except Exception as save_error:
-                            logger.error(f"Error saving signal for {symbol}: {save_error}")
+                        except Exception as execution_error:
+                            logger.error(f"Error executing signal-based investment for {symbol}: {execution_error}")
                             metrics['errors_encountered'] += 1
 
                     except asyncio.TimeoutError:
@@ -790,6 +737,7 @@ async def daily_signal_check():
             f"   • Total symbols checked: {len(metrics['symbols_processed'])}\n"
             f"   • Unique symbols: {metrics['unique_symbols_count']}\n"
             f"   • Signals generated: {metrics['signals_generated']}\n"
+            f"   • Order types placed: GTT={metrics['gtt_orders_placed']}, LIMIT={metrics['limit_orders_placed']}, MARKET={metrics['market_orders_placed']}\n"
             f"   • Success rate: {success_rate:.1f}%\n"
             f"   • Errors encountered: {metrics['errors_encountered']}\n"
             f"   • Average time per portfolio: {total_processing_time / max(metrics['portfolios_processed'], 1):.2f}s\n"
@@ -1080,13 +1028,19 @@ async def update_portfolio_after_gtt_placement(
 async def save_signal_with_gtt_order(portfolio_id: str, symbol: str, signals: dict,
                                      trading_db: AsyncSession, config: dict):
     """
+    DEPRECATED: This function is being replaced by execute_signal_based_investment
+    which uses the more efficient execute_sip_investment logic.
+    
     REAL GTT Integration using OrderManager.place_gtt_order
     FIXED: No circular imports - creates OrderManager instance locally
     1. Saves signal to database
     2. Places actual GTT order through broker API integration
     3. Links signal with GTT order ID
     4. Handles errors gracefully
+    
+    Use execute_signal_based_investment instead for better order tracking and status management.
     """
+    logger.warning(f"DEPRECATED: save_signal_with_gtt_order is being replaced by execute_signal_based_investment")
     signal_id =  f"sig_{str(uuid.uuid4())}_{int(datetime.now().timestamp())}"
     gtt_order_id = None
 
@@ -1522,12 +1476,12 @@ async def run_sip_backtest(
                     }
 
                     results.append(combined_result)
-                    logger.info(f"✅ Completed enhanced backtest with benchmark for {symbol}")
+                    logger.info(f"Completed enhanced backtest with benchmark for {symbol}")
                 else:
-                    logger.warning(f"⚠️ No data or trades for {symbol}")
+                    logger.warning(f"No data or trades for {symbol}")
 
             except Exception as symbol_error:
-                logger.error(f"❌ Error processing {symbol}: {symbol_error}")
+                logger.error(f"Error processing {symbol}: {symbol_error}")
                 continue
 
         if not results:
@@ -1542,7 +1496,7 @@ async def run_sip_backtest(
             results, user_id, request, trading_db
         )
 
-        logger.info(f"✅ Enhanced backtest with benchmark completed for {len(results)} symbols")
+        logger.info(f"Enhanced backtest with benchmark completed for {len(results)} symbols")
         return results
 
     except Exception as e:
@@ -1642,7 +1596,7 @@ async def save_enhanced_backtest_results(
             })
 
         await trading_db.commit()
-        logger.info(f"✅ Saved enhanced backtest results with benchmark data for {len(results)} symbols")
+        logger.info(f"Saved enhanced backtest results with benchmark data for {len(results)} symbols")
 
     except Exception as e:
         logger.error(f"Error saving enhanced backtest results: {e}")
@@ -2654,6 +2608,20 @@ async def get_sip_portfolios(
 
         enhanced_portfolios = []
 
+        # Initialize APIs for LTP fetching
+        upstox_api = None
+        kite_api = None
+        try:
+            user_apis = await initialize_user_apis(user_id, trading_db)
+            upstox_apis = user_apis.get("upstox", {})
+            zerodha_apis = user_apis.get("zerodha", {})
+            
+            # Extract specific API clients
+            upstox_api = upstox_apis.get("market_data_v3")
+            kite_api = zerodha_apis.get("kite")
+        except Exception as api_error:
+            logger.warning(f"Could not initialize APIs for LTP fetching: {api_error}")
+
         for row in portfolios:
             try:
                 # CRITICAL FIX: Safe JSON parsing for symbols
@@ -2680,6 +2648,20 @@ async def get_sip_portfolios(
                     logger.warning(f"Symbols data is not a list for portfolio {row[0]}: {type(symbols_data)}")
                     symbols_data = []
 
+                # Calculate real-time current value using optimized function
+                current_value = row[7] or 0  # Default to stored value
+                if symbols_data:
+                    try:
+                        current_value = await calculate_portfolio_current_value(
+                            portfolio_id=row[0],
+                            symbols_data=symbols_data,
+                            upstox_api=upstox_api,
+                            kite_api=kite_api,
+                            trading_db=trading_db
+                        )
+                    except Exception as value_error:
+                        logger.warning(f"Error calculating current value for portfolio {row[0]}: {value_error}, using stored value")
+
                 portfolio_info = {
                     "portfolio_id": row[0],
                     "portfolio_name": row[1],
@@ -2688,7 +2670,7 @@ async def get_sip_portfolios(
                     "status": row[4],
                     "total_invested": row[5] or 0,
                     "current_units": row[6] or 0,
-                    "current_value": row[7] or 0,
+                    "current_value": current_value,
                     "next_investment_date": row[8].isoformat() if row[8] else None,
                     "auto_rebalance": row[9] or False,
                     "created_at": row[10].isoformat() if row[10] else None,
@@ -2954,12 +2936,28 @@ async def get_investment_signals(
                     # Save signal to database if investment is recommended
                     try:
                         if signals.get('signal') not in ['NO_DATA', 'ERROR']:
-                            await save_signal_with_gtt_order(portfolio_id, symbol, signals, trading_db, config)
-                            logger.info(f"✅ Saved signal and GTT order for {symbol}")
+                            # Use new execute_signal_based_investment for better order tracking
+                            # Use enhanced order type selection logic
+                            order_type = determine_optimal_order_type(signals, config)
+                            
+                            execution_result = await execute_signal_based_investment(
+                                portfolio_id=portfolio_id,
+                                symbol=symbol,
+                                signals=signals,
+                                config=config,
+                                trading_db=trading_db,
+                                user_id=user_id,
+                                order_type=order_type
+                            )
+                            if execution_result.get('status') == 'success':
+                                logger.info(f"✅ Signal-based investment executed for {symbol}")
+                            else:
+                                logger.warning(f"⚠️ Signal investment failed for {symbol}: {execution_result.get('message')}")
+                                signals['save_warning'] = f"Signal generated but investment failed: {execution_result.get('message')}"
                     except Exception as save_error:
-                        logger.error(f"Error saving signal for {symbol}: {save_error}")
+                        logger.error(f"Error executing signal-based investment for {symbol}: {save_error}")
                         # Don't fail the entire request if saving fails
-                        signals['save_warning'] = f"Signal generated but not saved: {str(save_error)}"
+                        signals['save_warning'] = f"Signal generated but investment failed: {str(save_error)}"
 
                 except asyncio.TimeoutError:
                     logger.error(f"Timeout generating signals for {symbol}")
@@ -3213,15 +3211,16 @@ async def get_symbol_signals(
 # EXECUTION ENDPOINTS
 # ============================================================================
 
+
+
 @sip_router.post("/execute/{portfolio_id}")
 async def execute_sip_investment(
         portfolio_id: str,
-        amount: Optional[float] = None,
-        place_gtt_orders: bool = True,
+        execution_request: SIPExecutionRequest,
         user_id: str = Depends(get_current_user),
         trading_db: AsyncSession = Depends(get_db)
 ):
-    """Execute SIP investment with minimum gap enforcement - FIXED VERSION"""
+    """Execute SIP investment with real order execution and order type selection"""
     try:
         # Verify portfolio and get details
         portfolio_query = text("""
@@ -3268,7 +3267,15 @@ async def execute_sip_investment(
         if not isinstance(symbols_data, list) or not symbols_data:
             raise HTTPException(status_code=400, detail="Invalid or empty symbols in portfolio")
 
-        # Create trades table if not exists
+        # Validate order type specific parameters
+        if execution_request.order_type == OrderType.LIMIT and not execution_request.limit_price:
+            raise HTTPException(status_code=400, detail="Limit price is required for LIMIT orders")
+        
+        if execution_request.order_type == OrderType.GTT:
+            if not execution_request.gtt_trigger_price or not execution_request.gtt_limit_price:
+                raise HTTPException(status_code=400, detail="GTT trigger price and limit price are required for GTT orders")
+
+        # Create trades table if not exists with order_id, order_status, and execution_status fields
         create_trades_table = text("""
                         CREATE TABLE IF NOT EXISTS sip_actual_trades (
                             trade_id VARCHAR PRIMARY KEY,
@@ -3279,7 +3286,11 @@ async def execute_sip_investment(
                             units FLOAT NOT NULL,
                             amount FLOAT NOT NULL,
                             trade_type VARCHAR DEFAULT 'BUY',
-                            execution_status VARCHAR DEFAULT 'EXECUTED'
+                            execution_status VARCHAR DEFAULT 'PENDING',
+                            order_status VARCHAR DEFAULT 'PLACED',
+                            order_id VARCHAR,
+                            order_type VARCHAR,
+                            broker VARCHAR
                         )
                     """)
         await trading_db.execute(create_trades_table)
@@ -3306,10 +3317,36 @@ async def execute_sip_investment(
                            f"Last investment was {days_since_last} days ago."
                 )
 
+        # Get user APIs for order execution and LTP calculations
+        upstox_api = None
+        kite_api = None
+        api = None  # For order placement
+        
+        try:
+            user_apis = await initialize_user_apis(user_id, trading_db)
+            upstox_apis = user_apis.get("upstox", {})
+            zerodha_apis = user_apis.get("zerodha", {})
+            
+            # Extract specific API clients for LTP
+            upstox_api = upstox_apis.get("market_data_v3")
+            kite_api = zerodha_apis.get("kite")
+            
+            # Get broker API for order execution (assuming Zerodha for SIP orders)
+            broker = "Zerodha"
+            api = zerodha_apis.get("kite")
+            
+            if not api:
+                raise HTTPException(status_code=400, detail="Zerodha API not initialized for order execution")
+                
+        except Exception as api_error:
+            logger.warning(f"Could not initialize APIs: {api_error}")
+            raise HTTPException(status_code=400, detail="User APIs not available for order execution")
+
         # Execute investments for each symbol
         executed_trades = []
-        total_invested = 0
-        total_units = 0
+        failed_trades = []
+        incremental_invested = 0  # Track incremental amount from this execution
+        incremental_units = 0     # Track incremental units from this execution
 
         for symbol_config in symbols_data:
             try:
@@ -3326,20 +3363,180 @@ async def execute_sip_investment(
                     continue
 
                 # Calculate investment amount for this symbol
-                base_amount = amount or config.fixed_investment
+                base_amount = execution_request.amount or config.fixed_investment
                 symbol_amount = (base_amount * allocation_pct) / 100.0
 
-                # Mock execution (replace with actual broker integration)
-                execution_price = 150.0  # Replace with actual market price
-                units_bought = symbol_amount / execution_price
+                # Get current market price for the symbol using get_ltp from services.py
+                try:
+                    # Get LTP using services.py function
+                    ltp_data = await get_ltp(upstox_api, kite_api, [symbol], trading_db)
+                    
+                    if ltp_data and len(ltp_data) > 0:
+                        current_price = ltp_data[0].last_price
+                    else:
+                        logger.warning(f"Could not get LTP for {symbol}, using fallback price")
+                        current_price = 150.0  # Fallback price
+                except Exception as ltp_error:
+                    logger.warning(f"Error getting LTP for {symbol}: {ltp_error}, using fallback price")
+                    current_price = 150.0  # Fallback price
 
-                # Record trade
+                # Calculate quantity based on amount and price
+                quantity = max(1, int(symbol_amount / current_price))  # Ensure minimum 1 quantity
+
+                # Record trade with PLACED status initially
                 trade_id = f"trade_{portfolio_id}_{symbol}_{int(datetime.now().timestamp())}"
 
+                # Place real order based on order type
+                order_result = None
+                order_id = None
+                execution_price = current_price
+                order_error = None
+
+                try:
+                    if execution_request.order_type == OrderType.GTT:
+                        # Place GTT order
+                        order_result = await place_gtt_order_via_existing_api(
+                            user_id=user_id,
+                            symbol=symbol,
+                            quantity=quantity,
+                            trigger_price=execution_request.gtt_trigger_price,
+                            limit_price=execution_request.gtt_limit_price,
+                            current_price=current_price,
+                            trading_db=trading_db
+                        )
+                        if order_result.get('status') == 'success':
+                            order_id = order_result.get('gtt_id')
+                            execution_price = execution_request.gtt_limit_price
+                        else:
+                            order_error = order_result.get('message', 'GTT order placement failed')
+
+                    elif execution_request.order_type == OrderType.MARKET:
+                        # Place market order
+                        instrument_token = await get_instrument_token_for_symbol(symbol, trading_db)
+                        if instrument_token:
+                            # Set appropriate product type based on broker
+                            product_type = "CNC" if broker == "Zerodha" else "D"
+                            order_result = await place_order(
+                                api=api,
+                                instrument_token=instrument_token,
+                                trading_symbol=symbol,
+                                transaction_type="BUY",
+                                quantity=quantity,
+                                price=0,  # Market order
+                                order_type="MARKET",
+                                product_type=product_type,
+                                broker=broker,
+                                db=trading_db,
+                                user_id=user_id
+                            )
+                            # Handle different response formats for different brokers
+                            if broker == "Zerodha":
+                                # Zerodha returns just the order_id directly
+                                order_id = order_result if order_result else None
+                            else:
+                                # Upstox returns a dictionary
+                                order_id = order_result.get('order_id') if order_result and order_result.get('status') == 'success' else None
+
+                    elif execution_request.order_type == OrderType.LIMIT:
+                        # Place limit order
+                        instrument_token = await get_instrument_token_for_symbol(symbol, trading_db)
+                        if instrument_token:
+                            # Set appropriate product type based on broker
+                            product_type = "CNC" if broker == "Zerodha" else "D"
+                            order_result = await place_order(
+                                api=api,
+                                instrument_token=instrument_token,
+                                trading_symbol=symbol,
+                                transaction_type="BUY",
+                                quantity=quantity,
+                                price=execution_request.limit_price,
+                                order_type="LIMIT",
+                                product_type=product_type,
+                                broker=broker,
+                                db=trading_db,
+                                user_id=user_id
+                            )
+                            # Handle different response formats for different brokers
+                            if broker == "Zerodha":
+                                # Zerodha returns just the order_id directly
+                                order_id = order_result if order_result else None
+                            else:
+                                # Upstox returns a dictionary
+                                order_id = order_result.get('order_id') if order_result and order_result.get('status') == 'success' else None
+                            
+                            if order_id:
+                                execution_price = execution_request.limit_price
+
+                except HTTPException as http_ex:
+                    # Capture HTTP exceptions from place_order (like broker errors)
+                    order_error = http_ex.detail
+                    logger.error(f"HTTP error placing {execution_request.order_type.value} order for {symbol}: {order_error}")
+                except Exception as order_ex:
+                    # Capture any other exceptions during order placement
+                    order_error = str(order_ex)
+                    logger.error(f"Error placing {execution_request.order_type.value} order for {symbol}: {order_error}")
+
+                # Check if order was placed successfully
+                if not order_id:
+                    error_message = order_error or f"Failed to place {execution_request.order_type.value} order"
+                    logger.error(f"Failed to place {execution_request.order_type.value} order for {symbol}: {error_message}")
+                    
+                    # Still insert a record to track the failed attempt
+                    insert_trade = text("""
+                        INSERT INTO sip_actual_trades 
+                        (trade_id, portfolio_id, symbol, timestamp, price, units, amount, trade_type, 
+                         execution_status, order_status, order_id, order_type, broker)
+                        VALUES (:trade_id, :portfolio_id, :symbol, :timestamp, :price, :units, :amount, :trade_type,
+                               :execution_status, :order_status, :order_id, :order_type, :broker)
+                    """)
+
+                    await trading_db.execute(insert_trade, {
+                        'trade_id': trade_id,
+                        'portfolio_id': portfolio_id,
+                        'symbol': symbol,
+                        'timestamp': datetime.now(),
+                        'price': 0,  # No execution price for failed orders
+                        'units': quantity,
+                        'amount': symbol_amount,
+                        'trade_type': 'BUY',
+                        'execution_status': 'FAILED',
+                        'order_status': 'FAILED',
+                        'order_id': None,
+                        'order_type': execution_request.order_type.value,
+                        'broker': broker
+                    })
+                    
+                    # Calculate actual amount that would have been invested (units * price) for failed trades
+                    actual_invested_amount = quantity * execution_price
+                    
+                    # Add to failed trades list for reporting with detailed error
+                    failed_trades.append({
+                        "symbol": symbol,
+                        "amount": actual_invested_amount,  # Store actual amount that would have been invested
+                        "order_type": execution_request.order_type.value,
+                        "error": error_message
+                    })
+                    continue  # Skip this symbol and continue with next
+                
+                # Order was placed successfully
+                # Determine initial execution_status and order_status based on order type
+                initial_execution_status = 'PENDING'  # Default for GTT and LIMIT orders
+                initial_order_status = 'PLACED'
+                
+                # For MARKET orders, if order is placed successfully, it's immediately executed
+                if execution_request.order_type == OrderType.MARKET:
+                    initial_execution_status = 'EXECUTED'
+                
+                # Calculate actual invested amount (units * price) instead of requested amount (symbol_amount)
+                actual_invested_amount = quantity * execution_price
+                
+                # Insert trade record with appropriate status
                 insert_trade = text("""
                     INSERT INTO sip_actual_trades 
-                    (trade_id, portfolio_id, symbol, timestamp, price, units, amount, trade_type)
-                    VALUES (:trade_id, :portfolio_id, :symbol, :timestamp, :price, :units, :amount, :trade_type)
+                    (trade_id, portfolio_id, symbol, timestamp, price, units, amount, trade_type, 
+                     execution_status, order_status, order_id, order_type, broker)
+                    VALUES (:trade_id, :portfolio_id, :symbol, :timestamp, :price, :units, :amount, :trade_type,
+                           :execution_status, :order_status, :order_id, :order_type, :broker)
                 """)
 
                 await trading_db.execute(insert_trade, {
@@ -3348,21 +3545,37 @@ async def execute_sip_investment(
                     'symbol': symbol,
                     'timestamp': datetime.now(),
                     'price': execution_price,
-                    'units': units_bought,
-                    'amount': symbol_amount,
-                    'trade_type': 'BUY'
+                    'units': quantity,
+                    'amount': actual_invested_amount,  # Store actual invested amount
+                    'trade_type': 'BUY',
+                    'execution_status': initial_execution_status,
+                    'order_status': initial_order_status,
+                    'order_id': order_id,
+                    'order_type': execution_request.order_type.value,
+                    'broker': broker
                 })
 
+                # Calculate actual invested amount (units * price) instead of requested amount (symbol_amount)
+                actual_invested_amount = quantity * execution_price
+                
                 executed_trades.append({
                     "symbol": symbol,
-                    "amount": symbol_amount,
+                    "amount": actual_invested_amount,  # Store actual invested amount
                     "price": execution_price,
-                    "units": units_bought,
-                    "trade_id": trade_id
+                    "units": quantity,
+                    "trade_id": trade_id,
+                    "order_id": order_id,
+                    "order_type": execution_request.order_type.value,
+                    "execution_status": initial_execution_status,
+                    "order_status": initial_order_status
                 })
 
-                total_invested += symbol_amount
-                total_units += units_bought
+                # Only update portfolio totals for MARKET orders (immediately executed)
+                # For LIMIT and GTT orders, totals will be updated in sync_order_statuses when orders are executed
+                if execution_request.order_type == OrderType.MARKET:
+                    # Add the actual invested amount to portfolio totals
+                    incremental_invested += actual_invested_amount
+                    incremental_units += quantity
 
             except Exception as symbol_error:
                 logger.error(f"Error executing trade for symbol {symbol_config}: {symbol_error}")
@@ -3374,34 +3587,76 @@ async def execute_sip_investment(
         # Update portfolio totals and next investment date
         next_investment_date = calculate_next_investment_date(current_date, config)
 
-        update_query = text("""
-            UPDATE sip_portfolios 
-            SET total_invested = total_invested + :amount,
-                current_units = current_units + :units,
-                current_value = (current_units + :units) * 150.0,
-                next_investment_date = :next_date,
-                updated_at = :now
-            WHERE portfolio_id = :portfolio_id
-        """)
+        # For MARKET orders: Update portfolio totals immediately since orders are executed
+        # For LIMIT/GTT orders: Portfolio totals will be updated in sync_order_statuses when orders are executed
+        if execution_request.order_type == OrderType.MARKET:
+            # Calculate current portfolio value based on actual market prices (only executed trades)
+            try:
+                current_portfolio_value = await calculate_portfolio_current_value(
+                    portfolio_id=portfolio_id,
+                    symbols_data=symbols_data,
+                    upstox_api=upstox_api,
+                    kite_api=kite_api,
+                    trading_db=trading_db
+                )
+            except Exception as value_error:
+                logger.warning(f"Error calculating current portfolio value: {value_error}, using fallback calculation")
+                # Fallback: use the new units added and current prices from executed trades
+                current_portfolio_value = 0.0
+                for trade in executed_trades:
+                    current_portfolio_value += trade['units'] * trade['price']
 
-        await trading_db.execute(update_query, {
-            'amount': total_invested,
-            'units': total_units,
-            'next_date': next_investment_date,
-            'now': datetime.now(),
-            'portfolio_id': portfolio_id
-        })
+            # Update portfolio totals for MARKET orders
+            # Note: incremental_invested and incremental_units contain the incremental amounts from this execution
+            update_query = text("""
+                UPDATE sip_portfolios 
+                SET total_invested = total_invested + :amount,
+                    current_units = current_units + :units,
+                    current_value = :current_value,
+                    next_investment_date = :next_date,
+                    updated_at = :now
+                WHERE portfolio_id = :portfolio_id
+            """)
+
+            await trading_db.execute(update_query, {
+                'amount': incremental_invested,  # This is the incremental amount from this execution
+                'units': incremental_units,     # This is the incremental units from this execution
+                'current_value': current_portfolio_value,
+                'next_date': next_investment_date,
+                'now': datetime.now(),
+                'portfolio_id': portfolio_id
+            })
+        else:
+            # For LIMIT/GTT orders: Only update next investment date, totals will be updated when orders are executed
+            update_query = text("""
+                UPDATE sip_portfolios 
+                SET next_investment_date = :next_date,
+                    updated_at = :now
+                WHERE portfolio_id = :portfolio_id
+            """)
+
+            await trading_db.execute(update_query, {
+                'next_date': next_investment_date,
+                'now': datetime.now(),
+                'portfolio_id': portfolio_id
+            })
+
+        # Note: Order statuses will be automatically synced by OrderMonitor.sync_order_statuses
+        # which runs periodically and updates sip_actual_trades execution_status based on order status
+        logger.info(f"✅ Orders placed for portfolio {portfolio_id}. Status updates will be handled by OrderMonitor")
 
         await trading_db.commit()
 
-        logger.info(f"✅ Successfully executed {len(executed_trades)} trades for portfolio {portfolio_id}")
+        logger.info(f"✅ Successfully executed {len(executed_trades)} trades for portfolio {portfolio_id} using {execution_request.order_type.value} orders")
 
         return {
             "status": "success",
             "portfolio_id": portfolio_id,
-            "total_investment_amount": total_invested,
+            "total_investment_amount": incremental_invested,
             "executed_trades": executed_trades,
-            "next_investment_date": next_investment_date.isoformat()
+            "failed_trades": failed_trades,
+            "next_investment_date": next_investment_date.isoformat(),
+            "order_type_used": execution_request.order_type.value
         }
 
     except HTTPException:
@@ -3465,6 +3720,40 @@ async def get_detailed_portfolio_analytics(
         result = await trading_db.execute(trades_query, {'portfolio_id': portfolio_id})
         trades = result.fetchall()
 
+        # Get current market prices for all portfolio symbols
+        try:
+            # Initialize APIs for LTP fetching - using same logic as get_sip_portfolios
+            upstox_api = None
+            kite_api = None
+            try:
+                user_apis = await initialize_user_apis(user_id, trading_db)
+                upstox_apis = user_apis.get("upstox", {})
+                zerodha_apis = user_apis.get("zerodha", {})
+                
+                # Extract specific API clients
+                upstox_api = upstox_apis.get("market_data_v3")
+                kite_api = zerodha_apis.get("kite")
+            except Exception as api_error:
+                logger.warning(f"Could not initialize APIs for LTP fetching: {api_error}")
+            
+            # Extract symbols from portfolio
+            portfolio_symbols = []
+            for symbol_config in symbols_data:
+                if isinstance(symbol_config, dict):
+                    symbol = symbol_config.get('symbol')
+                else:
+                    symbol = symbol_config
+                if symbol:
+                    portfolio_symbols.append(symbol)
+            
+            # Get current market prices for all portfolio symbols
+            ltp_data = await get_ltp(upstox_api, kite_api, portfolio_symbols, trading_db)
+            logger.info(f"Received LTP data: {[f'{item.trading_symbol}:{item.last_price}' for item in ltp_data] if ltp_data else 'None'}")
+            
+        except Exception as ltp_error:
+            logger.warning(f"Error getting LTP for portfolio analytics: {ltp_error}")
+            ltp_data = None
+
         # Calculate performance metrics per symbol
         symbol_analytics = {}
         total_current_value = 0
@@ -3487,8 +3776,14 @@ async def get_detailed_portfolio_analytics(
                 symbol_units = sum(float(t[3]) for t in symbol_trades)  # units column
                 avg_price = symbol_invested / symbol_units if symbol_units > 0 else 0
 
-                # Current value (placeholder price - replace with actual market price)
-                current_price = 150.0
+                # Get current market price for this symbol
+                current_price = 150.0  # Default fallback price
+                if ltp_data:
+                    for ltp_item in ltp_data:
+                        if ltp_item.trading_symbol == symbol:
+                            current_price = ltp_item.last_price
+                            break
+                
                 symbol_current_value = symbol_units * current_price
                 symbol_return = ((symbol_current_value / symbol_invested) - 1) * 100 if symbol_invested > 0 else 0
 
@@ -3504,6 +3799,7 @@ async def get_detailed_portfolio_analytics(
                 }
 
                 total_current_value += symbol_current_value
+                logger.info(f"Symbol: {symbol}, Units: {symbol_units}, Price: {current_price}, Value: {symbol_current_value}")
 
         # Overall portfolio metrics
         total_return = ((total_current_value / total_invested) - 1) * 100 if total_invested > 0 else 0
@@ -3611,8 +3907,36 @@ async def get_portfolio_performance(
             logger.error(f"Error parsing symbols for performance {portfolio_id}: {parse_error}")
             symbols_data = []
 
-        # Calculate basic performance metrics
-        current_value = (current_units or 0) * 150.0  # Mock current price
+        # Calculate current portfolio value using optimized function
+        try:
+            # Initialize APIs for LTP fetching - using same logic as get_sip_portfolios
+            upstox_api = None
+            kite_api = None
+            try:
+                user_apis = await initialize_user_apis(user_id, trading_db)
+                upstox_apis = user_apis.get("upstox", {})
+                zerodha_apis = user_apis.get("zerodha", {})
+                
+                # Extract specific API clients
+                upstox_api = upstox_apis.get("market_data_v3")
+                kite_api = zerodha_apis.get("kite")
+            except Exception as api_error:
+                logger.warning(f"Could not initialize APIs for LTP fetching: {api_error}")
+            
+            current_value = await calculate_portfolio_current_value(
+                portfolio_id=portfolio_id,
+                symbols_data=symbols_data,
+                upstox_api=upstox_api,
+                kite_api=kite_api,
+                trading_db=trading_db
+            )
+                
+        except Exception as value_error:
+            logger.warning(f"Error calculating current portfolio value for performance: {value_error}, using fallback calculation")
+            # Fallback: use the stored current_units with fallback price
+            current_value = (current_units or 0) * 150.0
+
+        # Calculate performance metrics
         total_return = ((current_value / (total_invested or 1)) - 1) * 100 if total_invested else 0
 
         days_invested = (datetime.now() - created_at).days if created_at else 1
@@ -4830,6 +5154,41 @@ async def get_scheduler_presets():
     }
 
 
+@sip_router.get("/scheduler/recommendations")
+async def get_scheduler_recommendations():
+    """Get comprehensive scheduling recommendations and best practices"""
+    return get_optimal_schedule_recommendations()
+
+
+@sip_router.get("/scheduler/calculate-optimal/{user_count}")
+async def calculate_optimal_schedule(user_count: int, avg_portfolios_per_user: int = 2, avg_symbols_per_portfolio: int = 5):
+    """Calculate optimal schedule based on user count and system load"""
+    try:
+        if user_count <= 0:
+            raise HTTPException(status_code=400, detail="User count must be positive")
+        
+        if avg_portfolios_per_user <= 0 or avg_symbols_per_portfolio <= 0:
+            raise HTTPException(status_code=400, detail="Average values must be positive")
+        
+        recommendation = calculate_optimal_schedule_for_user_count(
+            user_count, avg_portfolios_per_user, avg_symbols_per_portfolio
+        )
+        
+        return {
+            "status": "success",
+            "user_count": user_count,
+            "avg_portfolios_per_user": avg_portfolios_per_user,
+            "avg_symbols_per_portfolio": avg_symbols_per_portfolio,
+            "recommendation": recommendation
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error calculating optimal schedule: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to calculate optimal schedule: {str(e)}")
+
+
 @sip_router.post("/scheduler/apply-preset/{preset_name}")
 async def apply_scheduler_preset(preset_name: str):
     """Apply a predefined scheduler configuration"""
@@ -5099,3 +5458,1154 @@ async def remove_test_job():
     except Exception as e:
         logger.error(f"Error removing test job: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to remove test job: {str(e)}")
+
+# ============================================================================
+# PORTFOLIO UPDATE ENDPOINTS
+# ============================================================================
+
+
+
+
+@sip_router.get("/portfolio/{portfolio_id}")
+async def get_portfolio_details(
+        portfolio_id: str,
+        user_id: str = Depends(get_current_user),
+        trading_db: AsyncSession = Depends(get_db)
+):
+    """Get detailed information about a specific portfolio"""
+    try:
+        # Get portfolio details
+        portfolio_query = text("""
+            SELECT portfolio_id, portfolio_name, portfolio_type, symbols, config, status, 
+                   total_invested, current_units, current_value, next_investment_date, 
+                   auto_rebalance, created_at, updated_at
+            FROM sip_portfolios 
+            WHERE portfolio_id = :portfolio_id AND user_id = :user_id
+        """)
+
+        result = await trading_db.execute(portfolio_query, {
+            'portfolio_id': portfolio_id,
+            'user_id': user_id
+        })
+        
+        portfolio = result.fetchone()
+        
+        if not portfolio:
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+
+        # Parse JSON fields
+        symbols_data = safe_json_parse(portfolio[3], "symbols", [])
+        config_data = safe_json_parse(portfolio[4], "config", {})
+
+        # Get recent signals for this portfolio
+        signals_query = text("""
+            SELECT signal_id, symbol, signal_type, recommended_amount, current_price, 
+                   signal_strength, gtt_status, created_at
+            FROM sip_signals 
+            WHERE portfolio_id = :portfolio_id 
+            ORDER BY created_at DESC 
+            LIMIT 10
+        """)
+
+        signals_result = await trading_db.execute(signals_query, {'portfolio_id': portfolio_id})
+        recent_signals = signals_result.fetchall()
+
+        # Get recent trades for this portfolio
+        trades_query = text("""
+            SELECT trade_id, symbol, timestamp, price, units, amount, trade_type, execution_status
+            FROM sip_actual_trades 
+            WHERE portfolio_id = :portfolio_id 
+            ORDER BY timestamp DESC 
+            LIMIT 10
+        """)
+
+        trades_result = await trading_db.execute(trades_query, {'portfolio_id': portfolio_id})
+        recent_trades = trades_result.fetchall()
+
+        # Calculate real-time current value
+        total_invested = portfolio[6] or 0
+        current_value = portfolio[8] or 0  # Default to stored value
+        
+        # Initialize APIs for LTP fetching
+        upstox_api = None
+        kite_api = None
+        try:
+            user_apis = await initialize_user_apis(user_id, trading_db)
+            upstox_apis = user_apis.get("upstox", {})
+            zerodha_apis = user_apis.get("zerodha", {})
+            
+            # Extract specific API clients
+            upstox_api = upstox_apis.get("market_data_v3")
+            kite_api = zerodha_apis.get("kite")
+        except Exception as api_error:
+            logger.warning(f"Could not initialize APIs for LTP fetching: {api_error}")
+
+        # Calculate real-time current value using optimized function
+        if symbols_data:
+            try:
+                current_value = await calculate_portfolio_current_value(
+                    portfolio_id=portfolio_id,
+                    symbols_data=symbols_data,
+                    upstox_api=upstox_api,
+                    kite_api=kite_api,
+                    trading_db=trading_db
+                )
+            except Exception as value_error:
+                logger.warning(f"Error calculating current value for portfolio {portfolio_id}: {value_error}, using stored value")
+
+        # Calculate performance metrics
+        total_return_pct = ((current_value - total_invested) / total_invested * 100) if total_invested > 0 else 0
+
+        portfolio_details = {
+            "portfolio_id": portfolio[0],
+            "portfolio_name": portfolio[1],
+            "portfolio_type": portfolio[2],
+            "symbols": symbols_data,
+            "config": config_data,
+            "status": portfolio[5],
+            "performance": {
+                "total_invested": float(total_invested),
+                "current_value": float(current_value),
+                "current_units": float(portfolio[7] or 0),
+                "total_return_percent": round(total_return_pct, 2),
+                "unrealized_pnl": float(current_value - total_invested)
+            },
+            "next_investment_date": portfolio[9].isoformat() if portfolio[9] else None,
+            "auto_rebalance": portfolio[10] or False,
+            "created_at": portfolio[11].isoformat() if portfolio[11] else None,
+            "updated_at": portfolio[12].isoformat() if portfolio[12] else None,
+            "recent_signals": [
+                {
+                    "signal_id": signal[0],
+                    "symbol": signal[1],
+                    "signal_type": signal[2],
+                    "recommended_amount": float(signal[3]) if signal[3] else 0,
+                    "current_price": float(signal[4]) if signal[4] else 0,
+                    "signal_strength": float(signal[5]) if signal[5] else 0,
+                    "gtt_status": signal[6],
+                    "created_at": signal[7].isoformat() if signal[7] else None
+                }
+                for signal in recent_signals
+            ],
+            "recent_trades": [
+                {
+                    "trade_id": trade[0],
+                    "symbol": trade[1],
+                    "timestamp": trade[2].isoformat() if trade[2] else None,
+                    "price": float(trade[3]) if trade[3] else 0,
+                    "units": float(trade[4]) if trade[4] else 0,
+                    "amount": float(trade[5]) if trade[5] else 0,
+                    "trade_type": trade[6],
+                    "execution_status": trade[7]
+                }
+                for trade in recent_trades
+            ]
+        }
+
+        return portfolio_details
+
+    except Exception as e:
+        logger.error(f"Error fetching portfolio details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@sip_router.put("/portfolio/{portfolio_id}")
+async def update_sip_portfolio(
+        portfolio_id: str,
+        request: PortfolioUpdateRequest,
+        user_id: str = Depends(get_current_user),
+        trading_db: AsyncSession = Depends(get_db)
+):
+    """Update SIP portfolio parameters and status"""
+    try:
+        # First verify portfolio exists and user owns it
+        check_query = text("""
+            SELECT portfolio_id, status, config, symbols 
+            FROM sip_portfolios 
+            WHERE portfolio_id = :portfolio_id AND user_id = :user_id
+        """)
+
+        result = await trading_db.execute(check_query, {
+            'portfolio_id': portfolio_id,
+            'user_id': user_id
+        })
+        
+        portfolio = result.fetchone()
+        
+        if not portfolio:
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+
+        current_status = portfolio[1]
+        current_config = safe_json_parse(portfolio[2], "config", {})
+        current_symbols = safe_json_parse(portfolio[3], "symbols", [])
+
+        # Build update query dynamically based on what's being updated
+        update_fields = []
+        update_params = {
+            'portfolio_id': portfolio_id,
+            'user_id': user_id,
+            'now': datetime.now()
+        }
+
+        # Update portfolio name if provided
+        if request.portfolio_name is not None:
+            update_fields.append("portfolio_name = :portfolio_name")
+            update_params['portfolio_name'] = request.portfolio_name
+
+        # Update config if provided
+        if request.config is not None:
+            new_config = request.config.dict()
+            # Merge with existing config to preserve any custom fields
+            merged_config = {**current_config, **new_config}
+            update_fields.append("config = :config")
+            update_params['config'] = json.dumps(merged_config)
+
+            # If config changed, recalculate next investment date
+            if new_config.get('fallback_day') != current_config.get('fallback_day'):
+                config_obj = SIPConfig(**merged_config)
+                next_investment_date = calculate_next_investment_date(datetime.now().date(), config_obj)
+                update_fields.append("next_investment_date = :next_investment_date")
+                update_params['next_investment_date'] = next_investment_date
+
+        # Update status if provided
+        if request.status is not None:
+            update_fields.append("status = :status")
+            update_params['status'] = request.status
+
+        # Update auto_rebalance if provided
+        if request.auto_rebalance is not None:
+            update_fields.append("auto_rebalance = :auto_rebalance")
+            update_params['auto_rebalance'] = request.auto_rebalance
+
+        # Always update the updated_at timestamp
+        update_fields.append("updated_at = :now")
+
+        if not update_fields:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        # Build and execute update query
+        update_query = text(f"""
+            UPDATE sip_portfolios 
+            SET {', '.join(update_fields)}
+            WHERE portfolio_id = :portfolio_id AND user_id = :user_id
+        """)
+
+        await trading_db.execute(update_query, update_params)
+        await trading_db.commit()
+
+        # Log the update
+        changes = []
+        if request.portfolio_name is not None:
+            changes.append(f"name: {request.portfolio_name}")
+        if request.config is not None:
+            changes.append("configuration updated")
+        if request.status is not None:
+            changes.append(f"status: {request.status}")
+        if request.auto_rebalance is not None:
+            changes.append(f"auto_rebalance: {request.auto_rebalance}")
+
+        logger.info(f"Updated portfolio {portfolio_id}: {', '.join(changes)}")
+
+        # Return updated portfolio details
+        return await get_portfolio_details(portfolio_id, user_id, trading_db)
+
+    except Exception as e:
+        logger.error(f"Error updating portfolio: {e}")
+        await trading_db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@sip_router.put("/portfolio/{portfolio_id}/pause")
+async def pause_sip_portfolio(
+        portfolio_id: str,
+        user_id: str = Depends(get_current_user),
+        trading_db: AsyncSession = Depends(get_db)
+):
+    """Pause SIP portfolio (temporarily stop automated investments)"""
+    try:
+        # Update status to paused
+        update_query = text("""
+            UPDATE sip_portfolios 
+            SET status = 'paused', updated_at = :now
+            WHERE portfolio_id = :portfolio_id AND user_id = :user_id
+        """)
+
+        result = await trading_db.execute(update_query, {
+            'portfolio_id': portfolio_id,
+            'user_id': user_id,
+            'now': datetime.now()
+        })
+
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+
+        await trading_db.commit()
+
+        logger.info(f"Paused SIP portfolio {portfolio_id}")
+
+        return {"status": "paused", "portfolio_id": portfolio_id, "message": "Portfolio paused successfully"}
+
+    except Exception as e:
+        logger.error(f"Error pausing portfolio: {e}")
+        await trading_db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@sip_router.put("/portfolio/{portfolio_id}/resume")
+async def resume_sip_portfolio(
+        portfolio_id: str,
+        user_id: str = Depends(get_current_user),
+        trading_db: AsyncSession = Depends(get_db)
+):
+    """Resume SIP portfolio (restart automated investments)"""
+    try:
+        # Update status to active
+        update_query = text("""
+            UPDATE sip_portfolios 
+            SET status = 'active', updated_at = :now
+            WHERE portfolio_id = :portfolio_id AND user_id = :user_id
+        """)
+
+        result = await trading_db.execute(update_query, {
+            'portfolio_id': portfolio_id,
+            'user_id': user_id,
+            'now': datetime.now()
+        })
+
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+
+        await trading_db.commit()
+
+        logger.info(f"Resumed SIP portfolio {portfolio_id}")
+
+        return {"status": "active", "portfolio_id": portfolio_id, "message": "Portfolio resumed successfully"}
+
+    except Exception as e:
+        logger.error(f"Error resuming portfolio: {e}")
+        await trading_db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@sip_router.put("/portfolio/{portfolio_id}/multi")
+async def update_multi_sip_portfolio(
+        portfolio_id: str,
+        request: MultiPortfolioUpdateRequest,
+        user_id: str = Depends(get_current_user),
+        trading_db: AsyncSession = Depends(get_db)
+):
+    """Update multi-symbol SIP portfolio parameters and status"""
+    try:
+        # First verify portfolio exists, user owns it, and it's a multi-portfolio
+        check_query = text("""
+            SELECT portfolio_id, status, config, symbols, portfolio_type
+            FROM sip_portfolios 
+            WHERE portfolio_id = :portfolio_id AND user_id = :user_id
+        """)
+
+        result = await trading_db.execute(check_query, {
+            'portfolio_id': portfolio_id,
+            'user_id': user_id
+        })
+        
+        portfolio = result.fetchone()
+        
+        if not portfolio:
+            raise HTTPException(status_code=404, detail="Portfolio not found")
+
+        if portfolio[4] != 'multi':  # portfolio_type
+            raise HTTPException(status_code=400, detail="This endpoint is only for multi-portfolios")
+
+        current_status = portfolio[1]
+        current_config = safe_json_parse(portfolio[2], "config", {})
+        current_symbols = safe_json_parse(portfolio[3], "symbols", [])
+
+        # Build update query dynamically based on what's being updated
+        update_fields = []
+        update_params = {
+            'portfolio_id': portfolio_id,
+            'user_id': user_id,
+            'now': datetime.now()
+        }
+
+        # Update portfolio name if provided
+        if request.portfolio_name is not None:
+            update_fields.append("portfolio_name = :portfolio_name")
+            update_params['portfolio_name'] = request.portfolio_name
+
+        # Update symbols if provided
+        if request.symbols is not None:
+            # Validate total allocation equals 100%
+            total_allocation = sum(symbol.allocation_percentage for symbol in request.symbols)
+            if abs(total_allocation - 100.0) > 0.01:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Total allocation must equal 100% (current: {total_allocation}%)"
+                )
+            
+            symbols_data = [symbol.dict() for symbol in request.symbols]
+            update_fields.append("symbols = :symbols")
+            update_params['symbols'] = json.dumps(symbols_data)
+
+        # Update default config if provided
+        if request.default_config is not None:
+            new_config = request.default_config.dict()
+            # Merge with existing config to preserve any custom fields
+            merged_config = {**current_config, **new_config}
+            update_fields.append("config = :config")
+            update_params['config'] = json.dumps(merged_config)
+
+            # If config changed, recalculate next investment date
+            if new_config.get('fallback_day') != current_config.get('fallback_day'):
+                config_obj = SIPConfig(**merged_config)
+                next_investment_date = calculate_next_investment_date(datetime.now().date(), config_obj)
+                update_fields.append("next_investment_date = :next_investment_date")
+                update_params['next_investment_date'] = next_investment_date
+
+        # Update status if provided
+        if request.status is not None:
+            update_fields.append("status = :status")
+            update_params['status'] = request.status
+
+        # Update auto_rebalance if provided
+        if request.auto_rebalance is not None:
+            update_fields.append("auto_rebalance = :auto_rebalance")
+            update_params['auto_rebalance'] = request.auto_rebalance
+
+        # Update rebalance_frequency_days if provided
+        if request.rebalance_frequency_days is not None:
+            update_fields.append("rebalance_frequency_days = :rebalance_frequency_days")
+            update_params['rebalance_frequency_days'] = request.rebalance_frequency_days
+
+        # Always update the updated_at timestamp
+        update_fields.append("updated_at = :now")
+
+        if not update_fields:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        # Build and execute update query
+        update_query = text(f"""
+            UPDATE sip_portfolios 
+            SET {', '.join(update_fields)}
+            WHERE portfolio_id = :portfolio_id AND user_id = :user_id
+        """)
+
+        await trading_db.execute(update_query, update_params)
+        await trading_db.commit()
+
+        # Log the update
+        changes = []
+        if request.portfolio_name is not None:
+            changes.append(f"name: {request.portfolio_name}")
+        if request.symbols is not None:
+            changes.append(f"symbols: {len(request.symbols)} symbols")
+        if request.default_config is not None:
+            changes.append("default configuration updated")
+        if request.status is not None:
+            changes.append(f"status: {request.status}")
+        if request.auto_rebalance is not None:
+            changes.append(f"auto_rebalance: {request.auto_rebalance}")
+        if request.rebalance_frequency_days is not None:
+            changes.append(f"rebalance_frequency: {request.rebalance_frequency_days} days")
+
+        logger.info(f"Updated multi-portfolio {portfolio_id}: {', '.join(changes)}")
+
+        # Return updated portfolio details
+        return await get_portfolio_details(portfolio_id, user_id, trading_db)
+
+    except Exception as e:
+        logger.error(f"Error updating multi-portfolio: {e}")
+        await trading_db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# SIGNAL-BASED INVESTMENT EXECUTION (NEW - BRIDGES SIGNALS WITH EXECUTE_SIP_INVESTMENT)
+# ============================================================================
+
+async def execute_signal_based_investment(
+    portfolio_id: str,
+    symbol: str,
+    signals: dict,
+    config: dict,
+    trading_db: AsyncSession,
+    user_id: str,
+    order_type: str = "GTT"  # Default to GTT, can be "GTT", "LIMIT", or "MARKET"
+) -> Dict:
+    """
+    Execute investment based on signal data using execute_sip_investment logic
+    This bridges the gap between signal generation and order execution
+    Supports GTT, LIMIT, and MARKET orders
+    """
+    try:
+        # Extract signal data
+        current_price = signals.get('current_price', 0)
+        recommended_amount = signals.get('recommended_amount', 0)
+        signal_type = signals.get('signal', 'NORMAL')
+        
+        # Validate signal
+        if signal_type in ['NO_DATA', 'ERROR', 'MONTHLY_LIMIT_REACHED']:
+            logger.info(f"Skipping investment for {symbol}: {signal_type}")
+            return {
+                "status": "skipped",
+                "message": f"Signal type not actionable: {signal_type}"
+            }
+        
+        if recommended_amount <= 0 or current_price <= 0:
+            logger.warning(f"Invalid amount or price for {symbol}: amount={recommended_amount}, price={current_price}")
+            return {
+                "status": "skipped",
+                "message": "Invalid price or amount"
+            }
+        
+        # Calculate order parameters based on order type
+        if order_type == "GTT":
+            # GTT parameters: trigger and limit prices below current price
+            gtt_trigger_price = current_price * 0.994  # 0.6% below current price
+            gtt_limit_price = current_price * 0.992   # 0.8% below current price
+            limit_price = None
+        elif order_type == "LIMIT":
+            # LIMIT order: use current price as limit price to reduce slippage
+            gtt_trigger_price = None
+            gtt_limit_price = None
+            limit_price = current_price
+        elif order_type == "MARKET":
+            # MARKET order: no price parameters needed
+            gtt_trigger_price = None
+            gtt_limit_price = None
+            limit_price = None
+        else:
+            return {
+                "status": "error",
+                "message": f"Unsupported order type: {order_type}"
+            }
+        
+        # Create execution request (similar to SIPExecutionRequest)
+        execution_data = {
+            "amount": recommended_amount,
+            "order_type": order_type,
+            "gtt_trigger_price": gtt_trigger_price,
+            "gtt_limit_price": gtt_limit_price,
+            "limit_price": limit_price
+        }
+        
+        # Get portfolio details
+        portfolio_query = text("""
+            SELECT symbols, config FROM sip_portfolios 
+            WHERE portfolio_id = :portfolio_id AND user_id = :user_id AND status = 'active'
+        """)
+        
+        result = await trading_db.execute(portfolio_query, {
+            'portfolio_id': portfolio_id,
+            'user_id': user_id
+        })
+        portfolio_data = result.fetchone()
+        
+        if not portfolio_data:
+            return {
+                "status": "error",
+                "message": "Portfolio not found or inactive"
+            }
+        
+        symbols_json, config_json = portfolio_data
+        
+        # Parse symbols and config
+        try:
+            if isinstance(symbols_json, str):
+                symbols_data = json.loads(symbols_json)
+            elif isinstance(symbols_json, list):
+                symbols_data = symbols_json
+            else:
+                raise ValueError(f"Invalid symbols data type: {type(symbols_json)}")
+            
+            if isinstance(config_json, str):
+                config_dict = json.loads(config_json)
+            elif isinstance(config_json, dict):
+                config_dict = config_json
+            else:
+                raise ValueError(f"Invalid config data type: {type(config_json)}")
+            
+            config_obj = SIPConfig(**config_dict)
+            
+        except Exception as parse_error:
+            logger.error(f"JSON parsing error for portfolio {portfolio_id}: {parse_error}")
+            return {
+                "status": "error",
+                "message": f"Portfolio data parsing failed: {str(parse_error)}"
+            }
+        
+        # Initialize APIs
+        try:
+            user_apis_dict = await initialize_user_apis(user_id, trading_db)
+            if not user_apis_dict:
+                return {
+                    "status": "error",
+                    "message": "Failed to initialize user APIs"
+                }
+            
+            # Extract specific API clients
+            upstox_api = user_apis_dict.get("upstox", {}).get("market_data_v3")
+            kite_api = user_apis_dict.get("zerodha", {}).get("kite")
+            
+            # Determine broker
+            broker = "Zerodha" if kite_api else "Upstox" if upstox_api else "Unknown"
+            api = kite_api if kite_api else upstox_api
+            
+            if not api:
+                return {
+                    "status": "error",
+                    "message": "No broker API available"
+                }
+                
+        except Exception as api_error:
+            logger.error(f"Error initializing APIs: {api_error}")
+            return {
+                "status": "error",
+                "message": f"API initialization failed: {str(api_error)}"
+            }
+        
+        # Create trades table if not exists
+        create_trades_table = text("""
+            CREATE TABLE IF NOT EXISTS sip_actual_trades (
+                trade_id VARCHAR PRIMARY KEY,
+                portfolio_id VARCHAR NOT NULL,
+                symbol VARCHAR NOT NULL,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                price FLOAT NOT NULL,
+                units FLOAT NOT NULL,
+                amount FLOAT NOT NULL,
+                trade_type VARCHAR DEFAULT 'BUY',
+                execution_status VARCHAR DEFAULT 'PENDING',
+                order_status VARCHAR DEFAULT 'PLACED',
+                order_id VARCHAR,
+                order_type VARCHAR,
+                broker VARCHAR
+            )
+        """)
+        await trading_db.execute(create_trades_table)
+        
+        # Check minimum gap
+        last_trade_query = text("""
+            SELECT MAX(timestamp) FROM sip_actual_trades 
+            WHERE portfolio_id = :portfolio_id AND symbol = :symbol
+        """)
+        
+        last_trade_result = await trading_db.execute(
+            last_trade_query, {'portfolio_id': portfolio_id, 'symbol': symbol}
+        )
+        last_trade_date = last_trade_result.scalar()
+        
+        current_date = datetime.now().date()
+        
+        if last_trade_date:
+            days_since_last = (current_date - last_trade_date.date()).days
+            if days_since_last < config_obj.min_investment_gap_days:
+                return {
+                    "status": "skipped",
+                    "message": f"Minimum gap not met ({days_since_last}/{config_obj.min_investment_gap_days} days)"
+                }
+        
+        # Execute the investment using execute_sip_investment logic
+        executed_trades = []
+        failed_trades = []
+        incremental_invested = 0.0
+        incremental_units = 0
+        
+        # Process the specific symbol from the signal
+        symbol_config = next((s for s in symbols_data if s.get('symbol') == symbol), {'symbol': symbol, 'allocation_percentage': 100.0})
+        
+        if isinstance(symbol_config, dict):
+            allocation_pct = symbol_config.get('allocation_percentage', 100.0)
+        else:
+            allocation_pct = 100.0 / len(symbols_data)
+        
+        # Calculate investment amount for this symbol
+        base_amount = execution_data["amount"] or config_obj.fixed_investment
+        symbol_amount = (base_amount * allocation_pct) / 100.0
+        
+        # Get current market price
+        try:
+            ltp_data = await get_ltp(upstox_api, kite_api, [symbol], trading_db)
+            
+            if ltp_data and len(ltp_data) > 0:
+                current_price = ltp_data[0].last_price
+            else:
+                logger.warning(f"Could not get LTP for {symbol}, using fallback price")
+                current_price = 150.0
+        except Exception as ltp_error:
+            logger.warning(f"Error getting LTP for {symbol}: {ltp_error}, using fallback price")
+            current_price = 150.0
+        
+        # Calculate quantity
+        quantity = max(1, int(symbol_amount / current_price))
+        
+        # Record trade
+        trade_id = f"trade_{portfolio_id}_{symbol}_{int(datetime.now().timestamp())}"
+        
+        # Place order based on order type
+        order_result = None
+        order_id = None
+        execution_price = current_price  # Default to current price
+        order_error = None
+        
+        try:
+            if order_type == "GTT":
+                # Place GTT order
+                order_result = await place_gtt_order_via_existing_api(
+                    user_id=user_id,
+                    symbol=symbol,
+                    quantity=quantity,
+                    trigger_price=gtt_trigger_price,
+                    limit_price=gtt_limit_price,
+                    current_price=current_price,
+                    trading_db=trading_db
+                )
+                
+                if order_result.get('status') == 'success':
+                    order_id = order_result.get('gtt_id')
+                    execution_price = gtt_limit_price
+                else:
+                    order_error = order_result.get('message', 'GTT order placement failed')
+                    
+            elif order_type == "LIMIT":
+                # Place LIMIT order using current price as limit price
+                instrument_token = await get_instrument_token_for_symbol(symbol, trading_db)
+                if instrument_token:
+                    # Set appropriate product type based on broker
+                    product_type = "CNC" if broker == "Zerodha" else "D"
+                    order_result = await place_order(
+                        api=api,
+                        instrument_token=instrument_token,
+                        trading_symbol=symbol,
+                        transaction_type="BUY",
+                        quantity=quantity,
+                        price=limit_price,  # Use current price as limit price
+                        order_type="LIMIT",
+                        product_type=product_type,
+                        broker=broker,
+                        db=trading_db,
+                        user_id=user_id
+                    )
+                    
+                    if order_result.get('status') == 'success':
+                        order_id = order_result.get('order_id')
+                        execution_price = limit_price
+                    else:
+                        order_error = order_result.get('message', 'LIMIT order placement failed')
+                else:
+                    order_error = f"Could not get instrument token for {symbol}"
+                    
+            elif order_type == "MARKET":
+                # Place MARKET order
+                instrument_token = await get_instrument_token_for_symbol(symbol, trading_db)
+                if instrument_token:
+                    # Set appropriate product type based on broker
+                    product_type = "CNC" if broker == "Zerodha" else "D"
+                    order_result = await place_order(
+                        api=api,
+                        instrument_token=instrument_token,
+                        trading_symbol=symbol,
+                        transaction_type="BUY",
+                        quantity=quantity,
+                        price=0,  # Market order doesn't need price
+                        order_type="MARKET",
+                        product_type=product_type,
+                        broker=broker,
+                        db=trading_db,
+                        user_id=user_id
+                    )
+                    
+                    if order_result.get('status') == 'success':
+                        order_id = order_result.get('order_id')
+                        execution_price = current_price  # Will be updated when executed
+                    else:
+                        order_error = order_result.get('message', 'MARKET order placement failed')
+                else:
+                    order_error = f"Could not get instrument token for {symbol}"
+                    
+        except Exception as order_ex:
+            order_error = str(order_ex)
+            logger.error(f"Error placing {order_type} order for {symbol}: {order_error}")
+        
+        # Check if order was placed successfully
+        if not order_id:
+            error_message = order_error or f"Failed to place {order_type} order"
+            logger.error(f"Failed to place {order_type} order for {symbol}: {error_message}")
+            
+            # Insert failed trade record
+            insert_trade = text("""
+                INSERT INTO sip_actual_trades 
+                (trade_id, portfolio_id, symbol, timestamp, price, units, amount, trade_type, 
+                 execution_status, order_status, order_id, order_type, broker)
+                VALUES (:trade_id, :portfolio_id, :symbol, :timestamp, :price, :units, :amount, :trade_type,
+                       :execution_status, :order_status, :order_id, :order_type, :broker)
+            """)
+            
+            await trading_db.execute(insert_trade, {
+                'trade_id': trade_id,
+                'portfolio_id': portfolio_id,
+                'symbol': symbol,
+                'timestamp': datetime.now(),
+                'price': 0,
+                'units': quantity,
+                'amount': symbol_amount,
+                'trade_type': 'BUY',
+                'execution_status': 'FAILED',
+                'order_status': 'FAILED',
+                'order_id': None,
+                'order_type': order_type,
+                'broker': broker
+            })
+            
+            failed_trades.append({
+                "symbol": symbol,
+                "amount": symbol_amount,
+                "order_type": order_type,
+                "error": error_message
+            })
+            
+            return {
+                "status": "error",
+                "message": f"{order_type} order failed: {error_message}",
+                "failed_trades": failed_trades
+            }
+        
+        # Order was placed successfully
+        actual_invested_amount = quantity * execution_price
+        
+        # Determine execution status based on order type
+        if order_type == "MARKET":
+            execution_status = "EXECUTED"  # Market orders are typically executed immediately
+        else:
+            execution_status = "PENDING"   # GTT and LIMIT orders start as PENDING
+        
+        # Insert successful trade record
+        insert_trade = text("""
+            INSERT INTO sip_actual_trades 
+            (trade_id, portfolio_id, symbol, timestamp, price, units, amount, trade_type, 
+             execution_status, order_status, order_id, order_type, broker)
+            VALUES (:trade_id, :portfolio_id, :symbol, :timestamp, :price, :units, :amount, :trade_type,
+                   :execution_status, :order_status, :order_id, :order_type, :broker)
+        """)
+        
+        await trading_db.execute(insert_trade, {
+            'trade_id': trade_id,
+            'portfolio_id': portfolio_id,
+            'symbol': symbol,
+            'timestamp': datetime.now(),
+            'price': execution_price,
+            'units': quantity,
+            'amount': actual_invested_amount,
+            'trade_type': 'BUY',
+            'execution_status': execution_status,
+            'order_status': 'PLACED',
+            'order_id': order_id,
+            'order_type': order_type,
+            'broker': broker
+        })
+        
+        executed_trades.append({
+            "symbol": symbol,
+            "amount": actual_invested_amount,
+            "price": execution_price,
+            "units": quantity,
+            "trade_id": trade_id,
+            "order_id": order_id,
+            "order_type": order_type,
+            "execution_status": execution_status,
+            "order_status": "PLACED"
+        })
+        
+        # Update portfolio based on order type
+        if order_type == "MARKET":
+            # For MARKET orders, update portfolio totals immediately since they're executed
+            actual_invested_amount = quantity * execution_price
+            
+            update_query = text("""
+                UPDATE sip_portfolios 
+                SET total_invested = total_invested + :amount,
+                    current_units = current_units + :units,
+                    next_investment_date = :next_date,
+                    updated_at = :now
+                WHERE portfolio_id = :portfolio_id
+            """)
+            
+            await trading_db.execute(update_query, {
+                'amount': actual_invested_amount,
+                'units': quantity,
+                'next_date': calculate_next_investment_date(current_date, config_obj),
+                'now': datetime.now(),
+                'portfolio_id': portfolio_id
+            })
+        else:
+            # For GTT and LIMIT orders, don't update portfolio totals immediately (will be updated when executed)
+            # Only update next investment date
+            next_investment_date = calculate_next_investment_date(current_date, config_obj)
+            
+            update_query = text("""
+                UPDATE sip_portfolios 
+                SET next_investment_date = :next_date,
+                    updated_at = :now
+                WHERE portfolio_id = :portfolio_id
+            """)
+            
+            await trading_db.execute(update_query, {
+                'next_date': next_investment_date,
+                'now': datetime.now(),
+                'portfolio_id': portfolio_id
+            })
+        
+        # Save signal to database
+        signal_id = f"sig_{str(uuid.uuid4())}_{int(datetime.now().timestamp())}"
+        await save_signal_to_database_with_real_gtt(
+            signal_id, portfolio_id, symbol, signals, config_dict, trading_db, order_id
+        )
+        
+        await trading_db.commit()
+        
+        logger.info(f"✅ Signal-based {order_type} order placed successfully for {symbol}: {order_id}")
+        
+        return {
+            "status": "success",
+            "portfolio_id": portfolio_id,
+            "executed_trades": executed_trades,
+            "failed_trades": failed_trades,
+            "signal_id": signal_id,
+            "order_id": order_id,
+            "order_type": order_type,
+            "message": f"Signal-based {order_type} order placed successfully for {symbol}"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in execute_signal_based_investment for {symbol}: {e}")
+        try:
+            await trading_db.rollback()
+        except:
+            pass
+        return {
+            "status": "error",
+            "message": f"Investment execution failed: {str(e)}"
+        }
+
+# ============================================================================
+# ENHANCED DAILY SIGNAL CHECK (USING NEW EXECUTE_SIGNAL_BASED_INVESTMENT)
+# ============================================================================
+
+# ============================================================================
+# ADAPTIVE SCHEDULING RECOMMENDATIONS
+# ============================================================================
+
+def get_optimal_schedule_recommendations():
+    """
+    Get optimal scheduling recommendations based on different scenarios and requirements.
+    Returns detailed recommendations for various use cases.
+    """
+    return {
+        "production_recommendations": {
+            "conservative": {
+                "name": "Conservative Production",
+                "description": "Once daily at market open - minimal resource usage",
+                "cron_expression": "0 9 * * 1-5",
+                "timezone": "Asia/Kolkata",
+                "rationale": [
+                    "9:00 AM IST (15 min before market open)",
+                    "Captures overnight market sentiment",
+                    "Minimal server load and API calls",
+                    "Optimal for GTT order placement",
+                    "Suitable for long-term SIP strategies"
+                ],
+                "estimated_processing_time": "2-5 minutes",
+                "api_calls_per_run": "Low (1 per symbol per portfolio)",
+                "server_load": "Minimal"
+            },
+            "balanced": {
+                "name": "Balanced Production",
+                "description": "Twice daily - morning and afternoon sessions",
+                "cron_expression": "0 9,14 * * 1-5",
+                "timezone": "Asia/Kolkata",
+                "rationale": [
+                    "9:00 AM: Pre-market analysis and GTT orders",
+                    "2:00 PM: Intraday momentum capture",
+                    "Balanced resource usage",
+                    "Captures two key market phases",
+                    "Suitable for most production environments"
+                ],
+                "estimated_processing_time": "2-5 minutes per run",
+                "api_calls_per_run": "Medium (2 runs per day)",
+                "server_load": "Moderate"
+            },
+            "aggressive": {
+                "name": "Aggressive Production",
+                "description": "Multiple times during market hours",
+                "cron_expression": "0 9,11,13,15 * * 1-5",
+                "timezone": "Asia/Kolkata",
+                "rationale": [
+                    "9:00 AM: Market open preparation",
+                    "11:00 AM: Morning session analysis",
+                    "1:00 PM: Lunch hour volatility",
+                    "3:00 PM: Pre-close opportunities",
+                    "Maximum signal capture",
+                    "Best for active trading strategies"
+                ],
+                "estimated_processing_time": "2-5 minutes per run",
+                "api_calls_per_run": "High (4 runs per day)",
+                "server_load": "High"
+            }
+        },
+        "development_recommendations": {
+            "testing": {
+                "name": "Testing Mode",
+                "description": "Frequent execution for development and testing",
+                "cron_expression": "*/5 * * * *",
+                "timezone": "Asia/Kolkata",
+                "rationale": [
+                    "Every 5 minutes for rapid testing",
+                    "Quick feedback on signal generation",
+                    "Easy debugging and issue identification",
+                    "Not suitable for production use"
+                ],
+                "estimated_processing_time": "1-3 minutes per run",
+                "api_calls_per_run": "Very High (288 runs per day)",
+                "server_load": "Very High"
+            },
+            "debugging": {
+                "name": "Debug Mode",
+                "description": "Every minute for intensive debugging",
+                "cron_expression": "* * * * *",
+                "timezone": "Asia/Kolkata",
+                "rationale": [
+                    "Maximum frequency for debugging",
+                    "Real-time issue tracking",
+                    "Resource intensive - use only when needed"
+                ],
+                "estimated_processing_time": "1-2 minutes per run",
+                "api_calls_per_run": "Extreme (1440 runs per day)",
+                "server_load": "Extreme"
+            }
+        },
+        "adaptive_recommendations": {
+            "smart_morning": {
+                "name": "Smart Morning Session",
+                "description": "Adaptive scheduling based on market conditions",
+                "cron_expression": "0 9 * * 1-5",
+                "timezone": "Asia/Kolkata",
+                "adaptive_logic": [
+                    "9:00 AM: Full signal analysis",
+                    "Use MARKET/LIMIT orders during market hours",
+                    "Fallback to GTT for after-hours",
+                    "Dynamic order type selection based on signal strength"
+                ]
+            },
+            "weekend_preparation": {
+                "name": "Weekend Preparation",
+                "description": "Friday evening analysis for Monday",
+                "cron_expression": "0 17 * * 5",  # 5:00 PM Friday
+                "timezone": "Asia/Kolkata",
+                "rationale": [
+                    "Analyze weekend market sentiment",
+                    "Prepare GTT orders for Monday",
+                    "Capture Friday closing momentum"
+                ]
+            }
+        },
+        "performance_considerations": {
+            "processing_time_factors": [
+                "Number of active portfolios",
+                "Number of symbols per portfolio",
+                "API response times",
+                "Database query performance",
+                "Signal generation complexity"
+            ],
+            "resource_optimization": [
+                "Use connection pooling for database",
+                "Implement API rate limiting",
+                "Cache frequently accessed data",
+                "Use async processing where possible",
+                "Monitor memory usage and cleanup"
+            ],
+            "scaling_recommendations": [
+                "Start with conservative schedule",
+                "Monitor performance metrics",
+                "Scale up based on user growth",
+                "Consider distributed processing for large scale",
+                "Implement job queuing for high load"
+            ]
+        },
+        "market_hours_considerations": {
+            "ist_market_hours": "9:15 AM - 3:30 PM IST (Monday to Friday)",
+            "pre_market_analysis": "9:00 AM - 9:15 AM IST",
+            "post_market_analysis": "3:30 PM - 5:00 PM IST",
+            "holiday_considerations": [
+                "Skip execution on market holidays",
+                "Adjust for special trading sessions",
+                "Consider global market holidays"
+            ]
+        }
+    }
+
+
+def calculate_optimal_schedule_for_user_count(user_count: int, avg_portfolios_per_user: int = 2, avg_symbols_per_portfolio: int = 5):
+    """
+    Calculate optimal schedule based on system load and user count.
+    
+    Args:
+        user_count: Number of active users
+        avg_portfolios_per_user: Average portfolios per user
+        avg_symbols_per_portfolio: Average symbols per portfolio
+    
+    Returns:
+        dict: Recommended schedule configuration
+    """
+    total_portfolios = user_count * avg_portfolios_per_user
+    total_symbols = total_portfolios * avg_symbols_per_portfolio
+    
+    # Estimate processing time (rough calculation)
+    base_processing_time = 0.1  # seconds per symbol
+    estimated_time = total_symbols * base_processing_time
+    
+    if user_count <= 10:
+        # Small user base - can be more aggressive
+        if estimated_time <= 60:  # Less than 1 minute
+            return {
+                "schedule": "0 9,11,13,15 * * 1-5",  # 4 times daily
+                "rationale": "Small user base allows frequent execution",
+                "estimated_processing_time": f"{estimated_time:.1f} seconds"
+            }
+        else:
+            return {
+                "schedule": "0 9,14 * * 1-5",  # 2 times daily
+                "rationale": "Balanced approach for moderate load",
+                "estimated_processing_time": f"{estimated_time:.1f} seconds"
+            }
+    
+    elif user_count <= 50:
+        # Medium user base - balanced approach
+        return {
+            "schedule": "0 9,14 * * 1-5",  # 2 times daily
+            "rationale": "Balanced frequency for medium user base",
+            "estimated_processing_time": f"{estimated_time:.1f} seconds"
+        }
+    
+    elif user_count <= 200:
+        # Large user base - conservative approach
+        return {
+            "schedule": "0 9 * * 1-5",  # Once daily
+            "rationale": "Conservative approach for large user base",
+            "estimated_processing_time": f"{estimated_time:.1f} seconds"
+        }
+    
+    else:
+        # Very large user base - needs optimization
+        return {
+            "schedule": "0 9 * * 1-5",  # Once daily
+            "rationale": "Conservative approach for very large user base",
+            "estimated_processing_time": f"{estimated_time:.1f} seconds",
+            "recommendations": [
+                "Consider distributed processing",
+                "Implement job queuing",
+                "Optimize database queries",
+                "Use caching strategies"
+            ]
+        }
+
+
+# ... existing code ...

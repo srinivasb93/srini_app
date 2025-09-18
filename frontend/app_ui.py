@@ -13,10 +13,22 @@ from collections import deque
 # Import module functions
 from unified_theme_manager import apply_unified_theme, reset_theme_styles, PageTheme, ThemeMode
 from ui_context_manager import safe_notify, create_safe_task, with_safe_ui_context
+from cache_manager import frontend_cache, cached_fetch_api, TradingDataCache, FrontendCacheConfig
+from cache_invalidation import (
+    cache_invalidation_manager,
+    invalidate_on_order_placed,
+    invalidate_on_strategy_action,
+    invalidate_on_position_change,
+    invalidate_on_settings_change,
+    emergency_cache_clear
+)
+from cache_admin_ui import render_cache_admin_panel
 from order_management import render_order_management
 from strategies import render_strategies_page
 from analytics import render_analytics_page
+from tradingview_charts import render_tradingview_page
 from orderbook import render_order_book_page
+from ws_events import emit_order_event
 from portfolio import render_portfolio_page
 from positions import render_positions_page
 from livetrading import render_live_trading_page
@@ -25,10 +37,37 @@ from watchlist import render_watchlist_page
 from settings import render_settings_page
 from dashboard import render_dashboard_page
 from backtesting import render_backtesting_page
+from enhanced_professional_scanner import create_enhanced_professional_scanner_page
 
-# Configure logging
-logging.basicConfig(level=logging.DEBUG)
+# Configure logging with file handler
+import os
+from pathlib import Path
+
+# Create logs directory relative to project root
+project_root = Path(__file__).parent.parent
+log_dir = project_root / "logs"
+log_dir.mkdir(exist_ok=True)
+
+# Serve static assets (e.g., JS libraries) from frontend/static
+static_dir = Path(__file__).parent / 'static'
+static_dir.mkdir(exist_ok=True)
+try:
+    app.add_static_files('/static', str(static_dir))
+except Exception:
+    # In some contexts this may be called multiple times; ignore
+    pass
+
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_dir / "frontend.log", mode='a'),
+        logging.StreamHandler()  # Also log to console
+    ]
+)
 logger = logging.getLogger(__name__)
+logger.info("Frontend logging configured successfully")
 
 BASE_URL = "http://localhost:8000"
 
@@ -42,6 +81,43 @@ STORAGE_INSTRUMENTS_CACHE_KEY_PREFIX = 'instruments_cache_'
 
 # WebSocket message queue
 websocket_messages = deque()
+
+# Admin users configuration - in production, this should come from database
+ADMIN_USERS = {
+    "admin@example.com",
+    "trader@company.com",
+    # Add more admin emails here
+}
+
+# For development only - set to True to allow all users to access admin features
+# WARNING: Set to False in production!
+DEVELOPMENT_ADMIN_MODE = False
+
+def is_admin_user() -> bool:
+    """Check if current user has admin privileges"""
+    try:
+        user_email = app.storage.user.get('email', '')
+        # In development, you can also check for specific user IDs or other criteria
+        user_id = app.storage.user.get('user_id', '')
+        
+        # Check if user email is in admin list
+        if user_email.lower() in {email.lower() for email in ADMIN_USERS}:
+            return True
+        
+        # Development mode - allow all users to access admin features
+        if DEVELOPMENT_ADMIN_MODE:
+            logger.warning("DEVELOPMENT_ADMIN_MODE is enabled - all users have admin access!")
+            return True
+        
+        # Additional admin checks can be added here:
+        # - Check database for user role
+        # - Check specific user IDs
+        # - Check domain-based permissions
+        
+        return False
+    except Exception as e:
+        logger.error(f"Error checking admin privileges: {e}")
+        return False
 
 
 async def fetch_api(endpoint, method="GET", data=None, params=None, retries=3, backoff=1):
@@ -79,14 +155,22 @@ async def fetch_api(endpoint, method="GET", data=None, params=None, retries=3, b
                         return {"error": {"code": "NOT_FOUND", "message": "Profile not found"}, "status": 404}
                     if response.status >= 400:
                         try:
+                            # First try to parse as JSON
                             error_data = await response.json()
-                            detail = error_data.get('detail', 'Unknown API error')
+                            # Backend puts error message in 'error' key, fallback to 'detail' for compatibility
+                            detail = error_data.get('error') or error_data.get('detail') or 'Unknown API error'
                             logger.error(f"API Error: {detail}")
                             return {"error": {"code": "API_ERROR", "message": detail}, "status": response.status}
                         except Exception as e:
-                            logger.error(f"Error parsing API error: {e}")
-                            return {"error": {"code": "UNKNOWN", "message": "Unknown API error"},
-                                    "status": response.status}
+                            # If JSON parsing fails, try to get the raw text
+                            try:
+                                error_text = await response.text()
+                                logger.error(f"API Error (text): {error_text}")
+                                return {"error": {"code": "API_ERROR", "message": error_text}, "status": response.status}
+                            except Exception as text_error:
+                                logger.error(f"Error parsing API error: {e}, text error: {text_error}")
+                                return {"error": {"code": "UNKNOWN", "message": "Unknown API error"},
+                                        "status": response.status}
                     if response.content_type == 'application/json':
                         return await response.json()
                     return await response.text()
@@ -100,6 +184,90 @@ async def fetch_api(endpoint, method="GET", data=None, params=None, retries=3, b
             logger.error(f"API request failed: {str(e)}")
             return {"error": {"code": "UNKNOWN", "message": str(e)}, "status": 500}
     return {"error": {"code": "RETRIES_EXCEEDED", "message": "Max retries exceeded"}, "status": 429}
+
+# Cached version of fetch_api for improved performance
+@cached_fetch_api()
+async def cached_fetch_api(endpoint, method="GET", data=None, params=None, retries=3, backoff=1):
+    """Cached wrapper for fetch_api - automatically handles caching for GET requests"""
+    return await fetch_api(endpoint, method, data, params, retries, backoff)
+
+# Cache-aware API functions that handle invalidation
+async def place_order_with_invalidation(endpoint, data, broker, user_id):
+    """Place order and invalidate related caches"""
+    response = await fetch_api(endpoint, method="POST", data=data)
+    if response and not response.get('error'):
+        invalidate_on_order_placed(broker, user_id, data)
+    return response
+
+async def strategy_action_with_invalidation(endpoint, action, broker, strategy_id=None, method="POST", data=None):
+    """Execute strategy action and invalidate related caches"""
+    response = await fetch_api(endpoint, method=method, data=data)
+    if response and not response.get('error'):
+        invalidate_on_strategy_action(action, broker, strategy_id)
+    return response
+
+async def position_change_with_invalidation(endpoint, broker, user_id, symbol=None, method="PUT", data=None):
+    """Execute position-related action and invalidate related caches"""
+    response = await fetch_api(endpoint, method=method, data=data)
+    if response and not response.get('error'):
+        invalidate_on_position_change(broker, user_id, symbol)
+    return response
+
+async def settings_change_with_invalidation(endpoint, user_id, setting_type=None, data=None):
+    """Update settings and invalidate related caches"""
+    response = await fetch_api(endpoint, method="POST", data=data)
+    if response and not response.get('error'):
+        invalidate_on_settings_change(user_id, setting_type)
+    return response
+
+async def fetch_with_cache(endpoint, method="GET", data=None, params=None, ttl=None):
+    """
+    Fetch API data with intelligent cache control using FrontendCacheConfig
+    """
+    if method.upper() != "GET":
+        return await fetch_api(endpoint, method, data, params)
+    
+    # Auto-determine TTL based on endpoint if not provided
+    if ttl is None:
+        ttl = get_ttl_for_endpoint(endpoint)
+    
+    cache_key = frontend_cache.generate_cache_key("fetch_api", endpoint, method, str(params))
+    cached_result = frontend_cache.get(cache_key)
+    
+    if cached_result is not None:
+        logger.debug(f"Cache hit for {endpoint}")
+        return cached_result
+    
+    result = await fetch_api(endpoint, method, data, params)
+    
+    # Only cache successful results (no error key or error is None)
+    if result and not result.get('error'):
+        frontend_cache.set(cache_key, result, ttl)
+    
+    return result
+
+def get_ttl_for_endpoint(endpoint: str) -> int:
+    """Auto-determine TTL based on endpoint pattern"""
+    if '/quotes' in endpoint or '/ltp' in endpoint:
+        return FrontendCacheConfig.LIVE_QUOTES
+    elif '/positions' in endpoint:
+        return FrontendCacheConfig.POSITION_DATA
+    elif '/orders' in endpoint:
+        return FrontendCacheConfig.ORDER_STATUS
+    elif '/strategies' in endpoint:
+        return FrontendCacheConfig.STRATEGY_LIST
+    elif '/instruments' in endpoint:
+        return FrontendCacheConfig.INSTRUMENTS
+    elif '/portfolio' in endpoint:
+        return FrontendCacheConfig.PORTFOLIO_DATA
+    elif '/watchlist' in endpoint:
+        return FrontendCacheConfig.WATCHLIST
+    elif '/preferences' in endpoint or '/settings' in endpoint:
+        return FrontendCacheConfig.USER_PREFERENCES
+    elif '/analytics' in endpoint or '/metrics' in endpoint:
+        return FrontendCacheConfig.ANALYTICS_DATA
+    else:
+        return FrontendCacheConfig.MARKET_DATA  # Default TTL
 
 
 async def connect_websocket(max_retries=5, initial_backoff=2):
@@ -142,6 +310,11 @@ async def connect_websocket(max_retries=5, initial_backoff=2):
                                 message = f"Order Update: {data.get('trading_symbol', 'Unknown Symbol')} - {data.get('status', 'Status N/A')}"
                                 websocket_messages.append(message)
                                 ui.notify(message, type="info")
+                                # Emit to registered callbacks
+                                try:
+                                    await emit_order_event(data)
+                                except Exception:
+                                    pass
                             except json.JSONDecodeError:
                                 logger.error(f"WebSocket non-JSON message: {msg.data}")
                         elif msg.type == aiohttp.WSMsgType.ERROR:
@@ -229,15 +402,23 @@ def render_header():
                 ("Portfolio", [
                     ("Holdings", "/portfolio", "pie_chart"),
                     ("Watchlist", "/watchlist", "visibility"),
-                    ("Analytics", "/analytics", "analytics")
+                    ("Analytics", "/analytics", "analytics"),
+                    ("TV Charts", "/tv-charts", "stacked_line_chart"),
+                    ("Scanner", "/scanner", "search")
                 ]),
                 ("Strategies", [
                     ("All Strategies", "/strategies", "psychology"),
                     ("SIP Strategy", "/sip-strategy", "savings"),
                     ("Backtesting", "/backtesting", "assessment")
-                ])
+                ]),
+                ("Admin", [
+                    ("Cache Admin", "/cache-admin", "memory")
+                ]) if is_admin_user() else None
             ]
 
+            # Filter out None items (non-admin users)
+            nav_items = [item for item in nav_items if item is not None]
+            
             for item in nav_items:
                 if isinstance(item[1], str):  # Single item
                     name, route, icon = item
@@ -514,6 +695,17 @@ async def analytics_page(client: Client):
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_analytics_page(fetch_api, app.storage.user, await get_cached_instruments(broker))
 
+@ui.page('/tv-charts')
+async def tv_charts_page(client: Client):
+    await client.connected()
+    if not app.storage.user.get(STORAGE_TOKEN_KEY):
+        ui.navigate.to('/')
+        return
+    apply_unified_theme(PageTheme.ANALYTICS, app.storage.user)
+    render_header()
+    broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
+    await render_tradingview_page(fetch_api, app.storage.user, await get_cached_instruments(broker))
+
 
 @ui.page('/strategies')
 async def strategies_page(client: Client):
@@ -611,6 +803,18 @@ async def watchlist_page(client: Client):
     await render_watchlist_page(fetch_api, app.storage.user, get_cached_instruments, broker)
 
 
+@ui.page('/scanner')
+async def scanner_page(client: Client):
+    await client.connected()
+    if not app.storage.user.get(STORAGE_TOKEN_KEY):
+        ui.navigate.to('/')
+        return
+    apply_unified_theme(PageTheme.ENHANCED_SCANNER, app.storage.user)  # Use enhanced scanner theme
+    render_header()
+    auth_token = app.storage.user.get(STORAGE_TOKEN_KEY)
+    create_enhanced_professional_scanner_page(auth_token)
+
+
 @ui.page('/settings')
 async def settings_page(client: Client):
     await client.connected()
@@ -621,6 +825,42 @@ async def settings_page(client: Client):
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_settings_page(fetch_api, app.storage.user, apply_theme_from_storage)
+
+@ui.page('/cache-admin')
+async def cache_admin_page(client: Client):
+    await client.connected()
+    
+    # Check authentication
+    if not app.storage.user.get(STORAGE_TOKEN_KEY):
+        ui.navigate.to('/')
+        return
+    
+    # Check admin privileges
+    if not is_admin_user():
+        apply_unified_theme(PageTheme.DEFAULT, app.storage.user)
+        render_header()
+        
+        with ui.column().classes("w-full p-8 items-center"):
+            ui.icon("security", size="4rem").classes("text-red-400 mb-4")
+            ui.label("Access Denied").classes("text-h4 text-white mb-2")
+            ui.label("Cache Administration is restricted to admin users only.").classes("text-gray-400 mb-4")
+            ui.label("This page contains sensitive system information and controls.").classes("text-gray-500 text-sm mb-6")
+            
+            ui.button("Go to Dashboard", icon="dashboard", 
+                     on_click=lambda: ui.navigate.to('/dashboard')).classes("q-mt-md")
+        return
+    
+    apply_unified_theme(PageTheme.SETTINGS, app.storage.user)
+    render_header()
+    
+    with ui.column().classes("w-full p-4"):
+        # Admin indicator
+        with ui.row().classes("items-center mb-4"):
+            ui.icon("admin_panel_settings", size="1.5rem").classes("text-yellow-400")
+            ui.label("Cache Administration").classes("text-h4 q-pa-md text-white")
+            ui.chip("ADMIN ONLY", color="red").classes("text-xs ml-4")
+        
+        await render_cache_admin_panel()
 
 @ui.page('/strategy-performance')
 async def strategy_performance_page(client: Client):
@@ -652,13 +892,48 @@ async def on_client_connect(client: Client):
         logger.error(f"Error applying theme on client connect: {e}")
 
 
+# Cache utility functions for application-wide use
+def invalidate_user_cache(user_id: str):
+    """Invalidate all cached data for a user"""
+    TradingDataCache.invalidate_user_data(user_id)
+    ui.notify("User cache invalidated", type="info")
+
+def invalidate_market_cache():
+    """Invalidate market data caches"""
+    TradingDataCache.invalidate_market_data()
+
+def invalidate_strategy_cache():
+    """Invalidate strategy and execution related caches"""
+    frontend_cache.delete_pattern("fetch_api:*/strategies*")
+    frontend_cache.delete_pattern("fetch_api:*/executions*")
+    frontend_cache.delete_pattern("safe_api:/strategies*")
+    frontend_cache.delete_pattern("safe_api:/executions*")
+
+def invalidate_position_cache(broker: str = None):
+    """Invalidate position and order related caches"""
+    if broker:
+        frontend_cache.delete_pattern(f"fetch_api:*/positions/{broker}*")
+        frontend_cache.delete_pattern(f"fetch_api:*/orders/{broker}*")
+    else:
+        frontend_cache.delete_pattern("fetch_api:*/positions*")
+        frontend_cache.delete_pattern("fetch_api:*/orders*")
+
+def get_cache_stats():
+    """Get cache statistics for monitoring"""
+    return frontend_cache.get_stats()
+
+def clear_all_caches():
+    """Clear all frontend caches (emergency function)"""
+    frontend_cache.clear()
+
+
 if __name__ in {"__main__", "__mp_main__"}:
     storage_secret_key = "my_super_secret_key_for_testing_123_please_change_for_prod"
     # Add static files support for CSS
     # ui.add_css('static/styles.css')
 
     ui.run(title="AlgoTrade Pro - Advanced Trading Platform",
-           port=8083,
+           port=8080,
            reload=True,
            uvicorn_reload_dirs='.',
            uvicorn_reload_includes='*.py',

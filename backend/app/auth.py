@@ -9,9 +9,9 @@ from passlib.context import CryptContext
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from pydantic import BaseModel
-from models import User
-from schemas import UserCreate, UserResponse
-from database import get_db
+from .models import User
+from .schemas import UserCreate, UserResponse
+from .database import get_db
 from dotenv import load_dotenv
 
 load_dotenv()

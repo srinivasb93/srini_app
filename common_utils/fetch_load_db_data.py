@@ -21,9 +21,9 @@ def get_config():
     return config
 
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging - removed basicConfig to not interfere with main app logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 # --- Multi-Database Connection Management ---
 

@@ -5,6 +5,8 @@ from nicegui import ui
 import logging
 import pandas as pd
 from datetime import datetime
+from cache_manager import frontend_cache, FrontendCacheConfig, TradingDataCache
+from cache_invalidation import invalidate_on_position_change
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +69,14 @@ async def render_enhanced_positions_summary(fetch_api, user_storage, broker):
 
     with ui.row().classes("w-full gap-4 p-4"):
         try:
-            # Fetch positions data
-            positions_data = await fetch_api(f"/positions/{broker}")
+            # Fetch positions data with caching
+            cache_key = frontend_cache.generate_cache_key("positions", broker)
+            positions_data = frontend_cache.get(cache_key)
+            
+            if positions_data is None:
+                positions_data = await fetch_api(f"/positions/{broker}")
+                if positions_data:
+                    frontend_cache.set(cache_key, positions_data, FrontendCacheConfig.POSITION_DATA)
 
             if positions_data and isinstance(positions_data, list):
                 # Calculate summary metrics
@@ -115,8 +123,9 @@ async def render_enhanced_positions_summary(fetch_api, user_storage, broker):
                 with ui.column().classes("p-4 text-center"):
                     ui.icon(pnl_icon, size="2rem").classes(f"{pnl_color} mb-2")
                     ui.label("Unrealized P&L").classes("text-sm text-gray-400")
-                    ui.label(f"₹{total_pnl:,.2f}").classes(f"text-2xl font-bold {pnl_color}")
-                    ui.label(f"({pnl_percentage:+.2f}%)").classes(f"text-sm {pnl_color}")
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label(f"₹{total_pnl:,.2f}").classes(f"text-2xl font-bold {pnl_color}")
+                        ui.label(f"({pnl_percentage:+.2f}%)").classes(f"text-sm {pnl_color}")
 
             # Investment Value
             with ui.card().classes("dashboard-card metric-card flex-1"):
@@ -135,8 +144,14 @@ async def render_enhanced_positions_table(fetch_api, user_storage, broker, conta
     """Enhanced positions table with beautiful styling"""
 
     try:
-        # Fetch positions data
-        positions_data = await fetch_api(f"/positions/{broker}")
+        # Fetch positions data with caching (reuse cached data from summary)
+        cache_key = frontend_cache.generate_cache_key("positions", broker)
+        positions_data = frontend_cache.get(cache_key)
+        
+        if positions_data is None:
+            positions_data = await fetch_api(f"/positions/{broker}")
+            if positions_data:
+                frontend_cache.set(cache_key, positions_data, FrontendCacheConfig.POSITION_DATA)
 
         if not positions_data:
             # Enhanced empty state
@@ -321,6 +336,10 @@ async def execute_close_position(dialog, symbol, transaction_type, quantity, bro
         response = await fetch_api(f"/orders/{broker}/place", method="POST", data=order_data)
 
         if response and response.get('status') == 'success':
+            # Use centralized cache invalidation for position changes
+            # Note: In a real implementation, user_id should be passed from the calling context
+            user_id = 'current_user'  # Placeholder - should be actual user ID
+            invalidate_on_position_change(broker, user_id, symbol)
             ui.notify(f"Position close order placed successfully", type="positive")
             dialog.close()
             # Refresh positions

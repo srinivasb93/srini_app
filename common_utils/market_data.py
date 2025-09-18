@@ -5,13 +5,17 @@ import datetime
 import json
 import pandas as pd
 import requests
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 from common_utils import fetch_load_db_data as rd
 import datetime as dt
 import logging
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
+# Set up logging - removed force=True to not override main app logging configuration
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 headers = {
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -111,14 +115,18 @@ class MarketData:
 
     @staticmethod
     def nse_symbol_quote(symbol):
-        payload = {}
+        price_data = {}
         try:
             payload = fetch_nse_data('https://www.nseindia.com/api/quote-equity?symbol=' + symbol)
             price_data = payload['priceInfo']
             trade_info = fetch_nse_data('https://www.nseindia.com/api/quote-equity?symbol=' + symbol + '&section=trade_info')
+            price_data['totalTradedVolume'] = trade_info['securityWiseDP']['quantityTraded']
+            price_data['deliveryQuantity'] = trade_info['securityWiseDP']['deliveryQuantity']
+            price_data['deliveryToTradedQuantity'] = trade_info['securityWiseDP']['deliveryToTradedQuantity']
+            price_data['totalMarketCap'] = trade_info['marketDeptOrderBook']['tradeInfo']['totalMarketCap']
         except KeyError:
             print("Getting Error While Fetching.")
-        return payload
+        return price_data
 
     @staticmethod
     def nse_fno_quote(symbol):
@@ -418,7 +426,7 @@ if __name__ == "__main__":
     # print(md.get_corporate_actions_data())
     # print(md.nse_events())
     # print(md.nse_get_fno_snapshot_live())
-    # print(md.nse_symbol_quote('SBIN'))
+    print(md.nse_symbol_quote('GOLDBEES'))
     # print(md.equity_history_virgin('BATAINDIA', 'EQ', '01-01-2023', '01-02-2023'))
     # print(md.security_wise_archive('01-01-2023', '01-01-2024', 'SBIN', series='EQ'))
     # print(md.nse_get_advances_declines())
@@ -429,6 +437,6 @@ if __name__ == "__main__":
     # print(md.load_all_stocks_table_with_stock_index(indices_list))
     # print(md.get_main_nse_indices_list())
     # print(index_history("NIFTY 50", "01-01-2023", "01-01-2024"))
-    print(index_pe_pb_div("NIFTY 50", "01-01-2023", "01-01-2024"))
+    # print(index_pe_pb_div("NIFTY 50", "01-01-2023", "01-01-2024"))
     # print(index_total_returns("NIFTY 50", "01-01-2023", "01-01-2024"))
     # print(get_bhavcopy("2023-01-01"))

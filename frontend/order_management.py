@@ -37,7 +37,7 @@ async def get_symbol_options(index_value):
 async def render_order_management(fetch_api, user_storage, instruments):
     """Enhanced order management page with compact header and full-width forms"""
 
-    broker = user_storage.get('broker', 'Zerodha')
+    broker = user_storage.get('default_broker', 'Zerodha')  # Changed from 'broker' to 'default_broker'
 
     # Fetch instruments if not already available
     if not instruments:
@@ -247,7 +247,7 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker):
                 with ui.row().classes('w-half gap-3'):
                     with ui.column().classes("flex-1 gap-2"):
                         ui.label("Stop Loss (₹)").classes("text-sm font-medium text-gray-300")
-                        stop_loss = ui.number(
+                        regular_stop_loss = ui.number(
                             value=0,
                             min=0,
                             step=0.05,
@@ -256,7 +256,7 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker):
 
                     with ui.column().classes("flex-1 gap-2"):
                         ui.label("Target (₹)").classes("text-sm font-medium text-gray-300")
-                        target = ui.number(
+                        regular_target = ui.number(
                             value=0,
                             min=0,
                             step=0.05,
@@ -271,7 +271,7 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker):
                     with ui.column().classes("flex-1 gap-2"):
                         ui.label("Stop Loss (₹)").classes("text-sm font-medium text-gray-300")
                         ui.label("Initial stop loss when order is placed").classes("text-xs text-gray-400")
-                        stop_loss = ui.number(
+                        trailing_stop_loss = ui.number(
                             value=0,
                             min=0,
                             step=0.05,
@@ -281,7 +281,7 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker):
                     with ui.column().classes("flex-1 gap-2"):
                         ui.label("Target (₹)").classes("text-sm font-medium text-gray-300")
                         ui.label("Fixed Target if required else leave it at 0.0").classes("text-xs text-gray-400")
-                        target = ui.number(
+                        trailing_target = ui.number(
                             value=0,
                             min=0,
                             step=0.05,
@@ -408,14 +408,14 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker):
                 # Add risk management parameters based on type
                 if risk_management_type.value == 'regular':
                     order_data.update({
-                        "stop_loss": float(stop_loss.value) if stop_loss.value > 0 else None,
-                        "target": float(target.value) if target.value > 0 else None,
+                        "stop_loss": float(regular_stop_loss.value) if regular_stop_loss.value > 0 else None,
+                        "target": float(regular_target.value) if regular_target.value > 0 else None,
                         "is_trailing_stop_loss": False
                     })
                 else:  # trailing stop loss
                     order_data.update({
-                        "stop_loss": float(stop_loss.value) if stop_loss.value > 0 else None,
-                        "target": float(target.value) if target.value > 0 else None,
+                        "stop_loss": float(trailing_stop_loss.value) if trailing_stop_loss.value > 0 else None,
+                        "target": float(trailing_target.value) if trailing_target.value > 0 else None,
                         "is_trailing_stop_loss": True,
                         "trailing_stop_loss_percent": float(trailing_stop_loss_percent.value),
                         "trail_start_target_percent": float(trail_start_target_percent.value)
@@ -429,13 +429,14 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker):
                         ui.label(f"Symbol: {order_data['trading_symbol']}").classes('text-white')
                         ui.label(f"Type: {order_data['transaction_type']} {order_data['quantity']} shares").classes('text-white')
                         ui.label(f"Order Type: {order_data['order_type']}").classes('text-white')
+                        ui.label(f"Order details - {order_data}").classes('text-white')
                         if order_data['price'] > 0:
                             ui.label(f"Price: ₹{order_data['price']:.2f}").classes('text-white')
                         if order_data['trigger_price'] > 0:
                             ui.label(f"Trigger: ₹{order_data['trigger_price']:.2f}").classes('text-white')
 
                         if order_data.get('is_trailing_stop_loss'):
-                            ui.label(f"Risk Management: Trailing Stop Loss").classes('text-green-400 font-semibold')
+                            ui.label("Risk Management: Trailing Stop Loss").classes('text-green-400 font-semibold')
                             ui.label(f"Trail Start Target: {order_data['trail_start_target_percent']}%").classes('text-white')
                             ui.label(f"Trailing Stop Loss: {order_data['trailing_stop_loss_percent']}%").classes('text-white')
                         else:
@@ -443,6 +444,13 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker):
                                 ui.label(f"Stop Loss: ₹{order_data['stop_loss']:.2f}").classes('text-white')
                             if order_data.get('target'):
                                 ui.label(f"Target: ₹{order_data['target']:.2f}").classes('text-white')
+
+                    # Upstox rules summary (GTT)
+                    if broker == 'Upstox':
+                        ui.label(f"GTT Type: {order_data['trigger_type']}").classes('text-white')
+                        for r in order_data.get('rules', [])[:3]:
+                            s = f"{r.get('strategy')} {r.get('trigger_type')} @ {r.get('trigger_price')}"
+                            ui.label(s).classes('text-white')
 
                     with ui.row().classes('gap-3'):
                         ui.button('Cancel', on_click=dialog.close).classes('bg-gray-600 text-white px-4 py-2 rounded')
@@ -620,6 +628,7 @@ async def render_scheduled_orders(fetch_api, user_storage, instruments, broker):
                     return
 
                 order_data = {
+                    "broker": broker,  # Add missing broker field
                     "trading_symbol": symbol_select.value,
                     "instrument_token": instruments[symbol_select.value],
                     "transaction_type": transaction_type.value,
@@ -681,9 +690,20 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker):
 
             # Symbol and GTT Configuration
             with ui.row().classes('w-full gap-6'):
+                # Index filter and symbol selection similar to regular orders
+                with ui.column().classes("flex-1 gap-2"):
+                    ui.label("Index Filter").classes("text-sm font-medium text-gray-300")
+                    index_select = ui.select(
+                        options=['NIFTY_50', 'NIFTY_NEXT_50', 'All Instruments'],
+                        value='NIFTY_50'
+                    ).classes('w-full')
+
                 with ui.column().classes("flex-1 gap-2"):
                     ui.label("Trading Symbol").classes("text-sm font-medium text-gray-300")
-                    symbol_options = sorted(list(instruments.keys())[:20]) if instruments else []
+                    # Prepare initial symbol options
+                    symbol_options = await get_symbol_options(index_select.value)
+                    if not symbol_options and instruments:
+                        symbol_options = sorted(list(instruments.keys())[:50])
                     initial_symbol = symbol_options[0] if symbol_options else None
 
                     symbol_select = ui.select(
@@ -692,11 +712,24 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker):
                         value=initial_symbol
                     ).classes('w-full')
 
+                    async def on_index_change():
+                        try:
+                            new_options = await get_symbol_options(index_select.value)
+                            if not new_options and instruments:
+                                new_options = sorted(list(instruments.keys())[:50])
+                            symbol_select.options = new_options
+                            if new_options:
+                                symbol_select.value = new_options[0]
+                            symbol_select.update()
+                        except Exception:
+                            pass
+                    index_select.on('update:model-value', lambda e: asyncio.create_task(on_index_change()))
+
                 with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Trigger Type").classes("text-sm font-medium text-gray-300")
+                    ui.label("GTT Type").classes("text-sm font-medium text-gray-300")
                     trigger_type = ui.select(
-                        options=['single', 'OCO'],
-                        value='single'
+                        options=['single', 'OCO'] if broker == 'Zerodha' else ['SINGLE', 'OCO'],
+                        value='single' if broker == 'Zerodha' else 'SINGLE'
                     ).classes('w-full')
 
                 with ui.column().classes("flex-1 gap-2"):
@@ -714,26 +747,6 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker):
                         format='%d'
                     ).classes('w-full')
 
-            # Price Configuration
-            with ui.row().classes('w-full gap-6'):
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Trigger Price").classes("text-sm font-medium text-gray-300")
-                    trigger_price = ui.number(
-                        value=0,
-                        min=0,
-                        step=0.05,
-                        format='%.2f'
-                    ).classes('w-full')
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Limit Price").classes("text-sm font-medium text-gray-300")
-                    limit_price = ui.number(
-                        value=0,
-                        min=0,
-                        step=0.05,
-                        format='%.2f'
-                    ).classes('w-full')
-
                 with ui.column().classes("flex-1 gap-2"):
                     ui.label("Product Type").classes("text-sm font-medium text-gray-300")
                     product_type = ui.select(
@@ -741,35 +754,80 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker):
                         value='CNC' if broker == 'Zerodha' else 'D'
                     ).classes('w-full')
 
-            # OCO specific fields (shown conditionally)
-            oco_section = ui.column().classes("gap-4")
-            with oco_section:
-                ui.label("Second Trigger (OCO)").classes("text-lg font-medium text-orange-400")
-
-                with ui.row().classes('w-full gap-6'):
+            # Price Configuration
+            with ui.row().classes('w-full gap-6'):
+                if broker == 'Zerodha':
                     with ui.column().classes("flex-1 gap-2"):
-                        ui.label("Second Trigger Price").classes("text-sm font-medium text-gray-300")
-                        second_trigger_price = ui.number(
-                            value=0,
-                            min=0,
-                            step=0.05,
-                            format='%.2f'
-                        ).classes('w-full')
+                        ui.label("Trigger Price").classes("text-sm font-medium text-gray-300")
+                        trigger_price = ui.number(value=0, min=0, step=0.05, format='%.2f').classes('w-full')
 
                     with ui.column().classes("flex-1 gap-2"):
-                        ui.label("Second Limit Price").classes("text-sm font-medium text-gray-300")
-                        second_limit_price = ui.number(
-                            value=0,
-                            min=0,
-                            step=0.05,
-                            format='%.2f'
-                        ).classes('w-full')
+                        ui.label("Limit Price").classes("text-sm font-medium text-gray-300")
+                        limit_price = ui.number(value=0, min=0, step=0.05, format='%.2f').classes('w-full')                
 
-            def update_oco_fields():
-                oco_section.visible = trigger_type.value == 'OCO'
+            # Upstox rules editor (ENTRY / TARGET / STOP_LOSS)
+            if broker == 'Upstox':
+                with ui.column().classes('gap-3'):
+                    ui.label('Upstox GTT Rules').classes('text-sm font-medium text-gray-300')
+                    with ui.row().classes('w-full gap-6'):
+                        with ui.column().classes('flex-1 gap-2') as up_entry_container:
+                            ui.label('ENTRY').classes('text-xs text-gray-400')
+                            up_entry_enabled = ui.checkbox('Include ENTRY', value=True)
+                            up_entry_trigger_type = ui.select(options=['BELOW','ABOVE','IMMEDIATE'], value='ABOVE').classes('w-full')
+                            up_entry_trigger_price = ui.number(value=0, min=0, step=0.05, format='%.2f').classes('w-full')
+                        with ui.column().classes('flex-1 gap-2') as up_target_container:
+                            ui.label('TARGET').classes('text-xs text-gray-400')
+                            up_target_enabled = ui.checkbox('Include TARGET', value=True)
+                            up_target_trigger_type = ui.select(options=['IMMEDIATE'], value='IMMEDIATE').classes('w-full')
+                            up_target_trigger_price = ui.number(value=0, min=0, step=0.05, format='%.2f').classes('w-full')
+                        with ui.column().classes('flex-1 gap-2') as up_sl_container:
+                            ui.label('STOP_LOSS').classes('text-xs text-gray-400')
+                            up_sl_enabled = ui.checkbox('Include STOP_LOSS', value=True)
+                            up_sl_trigger_type = ui.select(options=['IMMEDIATE'], value='IMMEDIATE').classes('w-full')
+                            up_sl_trigger_price = ui.number(value=0, min=0, step=0.05, format='%.2f').classes('w-full')
 
-            trigger_type.on_value_change(update_oco_fields)
-            update_oco_fields()
+                    # Show only ENTRY for SINGLE; show TARGET/STOP_LOSS for OCO
+                    def update_upstox_rule_visibility():
+                        is_single = str(trigger_type.value).upper() == 'SINGLE'
+                        up_entry_container.visible = True
+                        up_target_container.visible = not is_single
+                        up_sl_container.visible = not is_single
+                        up_target_enabled.value = not is_single
+                        up_sl_enabled.value = not is_single
+                        up_entry_container.update(); up_target_container.update(); up_sl_container.update()
+                    trigger_type.on_value_change(lambda e: update_upstox_rule_visibility())
+                    update_upstox_rule_visibility()
+
+            # OCO specific fields (shown conditionally) for Zerodha only
+            if broker == 'Zerodha':
+                oco_section = ui.column().classes("gap-4")
+                with oco_section:
+                    ui.label("Second Trigger (OCO)").classes("text-lg font-medium text-orange-400")
+
+                    with ui.row().classes('w-full gap-6'):
+                        with ui.column().classes("flex-1 gap-2"):
+                            ui.label("Second Trigger Price").classes("text-sm font-medium text-gray-300")
+                            second_trigger_price = ui.number(
+                                value=0,
+                                min=0,
+                                step=0.05,
+                                format='%.2f'
+                            ).classes('w-full')
+
+                        with ui.column().classes("flex-1 gap-2"):
+                            ui.label("Second Limit Price").classes("text-sm font-medium text-gray-300")
+                            second_limit_price = ui.number(
+                                value=0,
+                                min=0,
+                                step=0.05,
+                                format='%.2f'
+                            ).classes('w-full')
+
+                def update_oco_fields():
+                    oco_section.visible = trigger_type.value == 'OCO'
+
+                trigger_type.on_value_change(update_oco_fields)
+                update_oco_fields()
 
             # Market Price Section for GTT Orders
             market_price_label = ui.label("").classes("text-sm font-medium text-gray-300")
@@ -805,21 +863,20 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker):
                     ui.notify('Quantity must be greater than 0', type='negative')
                     return
 
-                if trigger_price.value <= 0:
-                    ui.notify('Trigger price must be greater than 0', type='negative')
-                    return
-
-                if limit_price.value <= 0:
-                    ui.notify('Limit price must be greater than 0', type='negative')
-                    return
-
-                if trigger_type.value == 'OCO':
-                    if second_trigger_price.value <= 0:
-                        ui.notify('Second trigger price must be greater than 0 for OCO orders', type='negative')
+                if broker == 'Zerodha':
+                    if trigger_price.value <= 0:
+                        ui.notify('Trigger price must be greater than 0', type='negative')
                         return
-                    if second_limit_price.value <= 0:
-                        ui.notify('Second limit price must be greater than 0 for OCO orders', type='negative')
+                    if limit_price.value <= 0:
+                        ui.notify('Limit price must be greater than 0', type='negative')
                         return
+                    if trigger_type.value == 'OCO':
+                        if second_trigger_price.value <= 0:
+                            ui.notify('Second trigger price must be greater than 0 for OCO orders', type='negative')
+                            return
+                        if second_limit_price.value <= 0:
+                            ui.notify('Second limit price must be greater than 0 for OCO orders', type='negative')
+                            return
 
                 # Fetch current market price for reference
                 try:
@@ -833,21 +890,59 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker):
                     last_price = 0
 
                 order_data = {
+                    "broker": broker,
                     "trading_symbol": symbol_select.value,
                     "instrument_token": instruments[symbol_select.value],
                     "transaction_type": transaction_type.value,
                     "quantity": int(quantity.value),
-                    "trigger_type": trigger_type.value,
-                    "trigger_price": float(trigger_price.value),
-                    "limit_price": float(limit_price.value),
                     "product_type": product_type.value,
                     "last_price": float(last_price)
                 }
 
-                if trigger_type.value == 'OCO':
+                if broker == 'Zerodha':
                     order_data.update({
-                        "second_trigger_price": float(second_trigger_price.value),
-                        "second_limit_price": float(second_limit_price.value)
+                        "trigger_type": trigger_type.value,
+                        "trigger_price": float(trigger_price.value),
+                        "limit_price": float(limit_price.value)
+                    })
+                    if trigger_type.value == 'OCO':
+                        order_data.update({
+                            "second_trigger_price": float(second_trigger_price.value),
+                            "second_limit_price": float(second_limit_price.value)
+                        })
+                else:
+                    # Upstox rules array
+                    up_rules = []
+                    try:
+                        if up_entry_enabled.value:
+                            rule = {
+                                "strategy": "ENTRY",
+                                "trigger_type": up_entry_trigger_type.value,
+                                "trigger_price": float(up_entry_trigger_price.value)
+                            }
+                            up_rules.append(rule)
+                        if up_target_enabled.value:
+                            rule = {
+                                "strategy": "TARGET",
+                                "trigger_type": up_target_trigger_type.value,
+                                "trigger_price": float(up_target_trigger_price.value)
+                            }
+                            up_rules.append(rule)
+                        if up_sl_enabled.value:
+                            rule = {
+                                "strategy": "STOPLOSS",
+                                "trigger_type": up_sl_trigger_type.value,
+                                "trigger_price": float(up_sl_trigger_price.value)
+                            }
+                            up_rules.append(rule)
+                    except Exception:
+                        up_rules = []
+                    if not up_rules:
+                        ui.notify('Select at least one rule for Upstox GTT', type='negative')
+                        return
+                    order_data.update({
+                        "trigger_type": str(trigger_type.value).upper(),  # SINGLE or OCO
+                        "rules": up_rules
                     })
 
                 # Confirmation dialog
@@ -857,11 +952,19 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker):
                     with ui.column().classes('gap-2 mb-4'):
                         ui.label(f"Symbol: {order_data['trading_symbol']}").classes('text-white')
                         ui.label(f"Type: {order_data['transaction_type']} {order_data['quantity']} shares").classes('text-white')
-                        ui.label(f"Trigger Type: {order_data['trigger_type']}").classes('text-white')
-                        ui.label(f"Trigger Price: ₹{order_data['trigger_price']:.2f}").classes('text-white')
-                        ui.label(f"Limit Price: ₹{order_data['limit_price']:.2f}").classes('text-white')
-                        if trigger_type.value == 'OCO':
-                            ui.label(f"Second Trigger: ₹{order_data['second_trigger_price']:.2f}").classes('text-white')
+
+                        if broker == 'Upstox':
+                            # Upstox: show rules summary only
+                            ui.label(f"GTT Type: {order_data['trigger_type']}").classes('text-white')
+                            for r in order_data.get('rules', [])[:3]:
+                                s = f"{r.get('strategy')} {r.get('trigger_type')} @ {r.get('trigger_price')}"
+                                ui.label(s).classes('text-white')
+                        else:
+                            ui.label(f"Trigger Type: {order_data['trigger_type']}").classes('text-white')
+                            ui.label(f"Trigger Price: ₹{order_data['trigger_price']:.2f}").classes('text-white')
+                            ui.label(f"Limit Price: ₹{order_data['limit_price']:.2f}").classes('text-white')
+                            if trigger_type.value == 'OCO':
+                                ui.label(f"Second Trigger: ₹{order_data['second_trigger_price']:.2f}").classes('text-white')
 
                     with ui.row().classes('gap-3'):
                         ui.button('Cancel', on_click=dialog.close).classes('bg-gray-600 text-white px-4 py-2 rounded')

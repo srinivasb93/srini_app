@@ -11,10 +11,10 @@ Displays tables for Placed, Scheduled, GTT, and Auto Orders with:
 import logging
 from nicegui import ui
 import asyncio
-from datetime import datetime, timedelta
-import json
+from datetime import datetime
 import math
-from ui_context_manager import safe_notify, create_safe_task, with_safe_ui_context
+from ui_context_manager import safe_notify, create_safe_task
+from ws_events import register_order_ws_callback
 
 logger = logging.getLogger(__name__)
 
@@ -130,13 +130,27 @@ def create_pagination_controls(current_page, total_pages, on_page_change, info_c
             ui.button(icon="last_page", on_click=lambda: on_page_change(total_pages)).props("flat dense size=sm").set_enabled(current_page < total_pages)
 
 def create_status_filter(current_value, on_change, label="Filter by Status"):
-    """Create status filter dropdown with predefined options"""
+    """Create status filter dropdown with predefined options.
+    Ensures the initial value is valid; falls back to 'All' otherwise.
+    """
     # Standard order status options
-    options = ["All", "Open", "Complete", "Rejected", "Cancelled", "Pending", "Active"]
-    
+    options = [
+        "All",
+        "Open",
+        "Complete",
+        "Rejected",
+        "Cancelled",
+        "Pending",
+        "Active",
+        "AMO REQ RECEIVED",
+    ]
+
+    # Guard against invalid initial values (e.g., dynamic GTT values like "ACTIVE | NONE")
+    safe_value = current_value if current_value in options else "All"
+
     return ui.select(
-        options=options, 
-        value=current_value, 
+        options=options,
+        value=safe_value,
         label=label,
         on_change=on_change
     ).classes("w-32").props("dense outlined color=primary size=sm")
@@ -435,6 +449,15 @@ async def render_placed_orders(fetch_api, user_storage, broker):
     placed_orders_table.on('modify_order', lambda e: create_safe_task(handle_modify_order(e.args)))
     placed_orders_table.on('cancel_order', lambda e: create_safe_task(handle_cancel_order(e.args)))
 
+    # Register WS callback to auto-refresh on placed order events
+    def _on_order_event(data: dict):
+        try:
+            if data.get('scope') == 'placed' and data.get('broker', '').lower() == broker.lower():
+                create_safe_task(refresh_placed_orders_with_pagination(fetch_api, broker))
+        except Exception:
+            pass
+    register_order_ws_callback(_on_order_event)
+
     # Initial load
     await refresh_placed_orders_with_pagination(fetch_api, broker)
 
@@ -452,9 +475,9 @@ async def cancel_single_section_orders(fetch_api, broker, section):
         if endpoint:
             response = await fetch_api(endpoint, method="DELETE")
             if response and response.get("status") == "success":
-                safe_notify(f"All {section} orders cancelled successfully.", type="positive")
+                safe_notify(f"All {section} orders cancelled successfully.", notify_type="positive")
             else:
-                safe_notify(f"Failed to cancel {section} orders.", type="negative")
+                safe_notify(f"Failed to cancel {section} orders.", notify_type="negative")
             
             # Refresh the appropriate section
             if section == "placed":
@@ -467,7 +490,7 @@ async def cancel_single_section_orders(fetch_api, broker, section):
                 await refresh_auto_orders_with_pagination(fetch_api, broker)
 
     except Exception as e:
-        safe_notify(f"Error cancelling {section} orders: {str(e)}", type="negative")
+        safe_notify(f"Error cancelling {section} orders: {str(e)}", notify_type="negative")
 
 # Similar functions for other order types would follow the same pattern...
 # For brevity, I'll create placeholders that can be expanded
@@ -686,12 +709,12 @@ async def render_scheduled_orders(fetch_api, user_storage, broker):
     
     scheduled_orders_table.add_slot('body-cell-actions', '''
         <q-td :props="props">
-            <q-btn v-if="props.row.status && props.row.status === 'PENDING'"
+            <q-btn v-if="props.row.status && (props.row.status === 'PENDING' || props.row.status === 'SCHEDULED')"
                    dense flat round color="primary" icon="edit" size="sm"
                    @click="() => $parent.$emit('modify_order', props.row)">
                 <q-tooltip>Modify Order</q-tooltip>
             </q-btn>
-            <q-btn v-if="props.row.status && props.row.status === 'PENDING'"
+            <q-btn v-if="props.row.status && (props.row.status === 'PENDING' || props.row.status === 'SCHEDULED')"
                    dense flat round color="negative" icon="cancel" size="sm"
                    @click="() => $parent.$emit('cancel_order', props.row.scheduled_order_id)">
                 <q-tooltip>Cancel Order</q-tooltip>
@@ -724,9 +747,19 @@ async def render_scheduled_orders(fetch_api, user_storage, broker):
             ui.notify(f"Error cancelling order: {str(e)}", type="negative")
     
     scheduled_orders_table.on('cancel_order', lambda e: create_safe_task(handle_cancel_order(e.args)))
+
+    # Register WS callback to auto-refresh on scheduled order events
+    def _on_sched_event(data: dict):
+        try:
+            if data.get('scope') == 'scheduled' and data.get('broker', '').lower() == broker.lower():
+                create_safe_task(refresh_scheduled_orders_with_pagination(fetch_api, broker))
+        except Exception:
+            pass
+    register_order_ws_callback(_on_sched_event)
+
     await refresh_scheduled_orders_with_pagination(fetch_api, broker)
 
-async def refresh_gtt_orders_with_pagination(fetch_api, broker):
+async def refresh_gtt_orders_with_pagination(fetch_api, broker, attempt: int = 1):
     """Refresh GTT orders with pagination support"""
     global gtt_orders_data, gtt_current_page, gtt_status_filter, gtt_orders_table, gtt_filter_select, gtt_pagination_info
     
@@ -739,7 +772,7 @@ async def refresh_gtt_orders_with_pagination(fetch_api, broker):
             for order in orders_data:
                 try:
                     trigger_price = float(order.get('trigger_price', 0)) if order.get('trigger_price') is not None else 0
-                    limit_price = float(order.get('limit_price', 0)) if order.get('limit_price') is not None else 0
+                    # Note: limit_price is available in _full_data for details view
                     created_at = order.get('created_at', '')
                     if created_at:
                         try:
@@ -750,26 +783,53 @@ async def refresh_gtt_orders_with_pagination(fetch_api, broker):
                     else:
                         created_at = 'N/A'
 
-                    last_price = float(order.get('last_price', 0)) if order.get('last_price') is not None else 0
-                    second_trigger_price = float(order.get('second_trigger_price', 0)) if order.get('second_trigger_price') is not None else 0
-                    second_limit_price = float(order.get('second_limit_price', 0)) if order.get('second_limit_price') is not None else 0
+                    # Note: last_price, second_trigger_price, second_limit_price are available in _full_data for details view
 
+                    # Process rules array for enhanced display
+                    rules = order.get('rules', [])
+                    gtt_type = order.get('gtt_type', 'SINGLE')
+                    
+                    # Create rules summary for table display
+                    rules_summary = "No rules"
+                    if rules:
+                        rule_descriptions = []
+                        for rule in rules:
+                            strategy = rule.get('strategy', 'UNKNOWN')
+                            trigger_type = rule.get('trigger_type', 'UNKNOWN')
+                            trigger_price = rule.get('trigger_price', 0)
+                            trailing_gap = rule.get('trailing_gap')
+                            
+                            # Create more readable rule description
+                            if strategy == 'ENTRY':
+                                rule_desc = f"📈 {strategy} @ ₹{trigger_price:.2f} ({trigger_type})"
+                            elif strategy == 'TARGET':
+                                rule_desc = f"🎯 {strategy} @ ₹{trigger_price:.2f}"
+                            elif strategy == 'STOPLOSS':
+                                if trailing_gap:
+                                    rule_desc = f"🔄 {strategy} @ ₹{trigger_price:.2f} (Trail: {trailing_gap})"
+                                else:
+                                    rule_desc = f"🛑 {strategy} @ ₹{trigger_price:.2f} ({trigger_type})"
+                            else:
+                                rule_desc = f"⚙️ {strategy} @ ₹{trigger_price:.2f} ({trigger_type})"
+                            
+                            rule_descriptions.append(rule_desc)
+                        
+                        rules_summary = " | ".join(rule_descriptions)
+                    
                     formatted_order = {
                         'gtt_order_id': order.get('gtt_order_id', 'N/A'),
-                        'instrument_token': order.get('instrument_token', 'N/A'),
                         'trading_symbol': order.get('trading_symbol', 'N/A'),
                         'transaction_type': order.get('transaction_type', 'N/A'),
                         'quantity': order.get('quantity', 0),
-                        'trigger_type': order.get('trigger_type', 'N/A').upper(),
-                        'trigger_price': f"{trigger_price:.2f}" if trigger_price != 0 else 'N/A',
-                        'limit_price': f"{limit_price:.2f}" if limit_price != 0 else 'N/A',
-                        'last_price': f"{last_price:.2f}" if last_price != 0 else 'N/A',
-                        'second_trigger_price': f"{second_trigger_price:.2f}" if second_trigger_price != 0 else 'N/A',
-                        'second_limit_price': f"{second_limit_price:.2f}" if second_limit_price != 0 else 'N/A',
-                        'status': order.get('status', 'N/A').upper(),
+                        'gtt_type': gtt_type,
+                        'rules_summary': rules_summary,
+                        # Keep status pure for filtering; show type in its own column
+                        'status': f"{order.get('status', 'N/A').upper()}",
                         'broker': order.get('broker', 'N/A'),
                         'created_at': created_at,
-                        'actions': ''
+                        'actions': '',
+                        # Store full data for details view
+                        '_full_data': order
                     }
                     formatted_orders.append(formatted_order)
                 except Exception as e:
@@ -792,6 +852,15 @@ async def refresh_gtt_orders_with_pagination(fetch_api, broker):
     except Exception as e:
         logger.error(f"Exception in refresh_gtt_orders_with_pagination: {str(e)}")
         gtt_orders_data = []
+
+    # If very few results on first attempt, retry once after a brief delay
+    try:
+        if attempt == 1 and isinstance(gtt_orders_data, list) and len(gtt_orders_data) <= 1:
+            await asyncio.sleep(0.5)
+            await refresh_gtt_orders_with_pagination(fetch_api, broker, attempt=2)
+    except Exception:
+        # Best-effort retry; ignore any errors here
+        pass
 
 def update_gtt_orders_table():
     global gtt_orders_table, gtt_current_page, gtt_status_filter, gtt_pagination_info
@@ -891,19 +960,14 @@ async def render_gtt_orders(fetch_api, user_storage, broker):
                     "box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);"
                 ).tooltip("Cancel All Open Orders")
         
-    # Complete GTT orders columns
+    # Enhanced GTT orders columns with rules support
     columns = [
         {'name': 'gtt_order_id', 'label': 'Order ID', 'field': 'gtt_order_id', 'sortable': True, 'align': 'left'},
-        {'name': 'instrument_token', 'label': 'Token', 'field': 'instrument_token', 'sortable': True, 'align': 'left'},
         {'name': 'trading_symbol', 'label': 'Symbol', 'field': 'trading_symbol', 'sortable': True, 'align': 'left'},
         {'name': 'transaction_type', 'label': 'Type', 'field': 'transaction_type', 'sortable': True, 'align': 'left'},
         {'name': 'quantity', 'label': 'Qty', 'field': 'quantity', 'sortable': True, 'align': 'right'},
-        {'name': 'trigger_type', 'label': 'Trigger Type', 'field': 'trigger_type', 'sortable': True, 'align': 'left'},
-        {'name': 'trigger_price', 'label': 'Trigger Price', 'field': 'trigger_price', 'sortable': True, 'align': 'right'},
-        {'name': 'limit_price', 'label': 'Limit Price', 'field': 'limit_price', 'sortable': True, 'align': 'right'},
-        {'name': 'last_price', 'label': 'Last Price', 'field': 'last_price', 'sortable': True, 'align': 'right'},
-        {'name': 'second_trigger_price', 'label': '2nd Trigger', 'field': 'second_trigger_price', 'sortable': True, 'align': 'right'},
-        {'name': 'second_limit_price', 'label': '2nd Limit', 'field': 'second_limit_price', 'sortable': True, 'align': 'right'},
+        {'name': 'gtt_type', 'label': 'GTT Type', 'field': 'gtt_type', 'sortable': True, 'align': 'left'},
+        {'name': 'rules_summary', 'label': 'Rules Summary', 'field': 'rules_summary', 'sortable': False, 'align': 'left'},
         {'name': 'status', 'label': 'Status', 'field': 'status', 'sortable': True, 'align': 'left'},
         {'name': 'broker', 'label': 'Broker', 'field': 'broker', 'sortable': True, 'align': 'left'},
         {'name': 'created_at', 'label': 'Created At', 'field': 'created_at', 'sortable': True, 'align': 'left'},
@@ -914,7 +978,16 @@ async def render_gtt_orders(fetch_api, user_storage, broker):
         
     gtt_orders_table.add_slot('body-cell-actions', '''
         <q-td :props="props">
-            <q-btn v-if="props.row.status && props.row.status === 'ACTIVE'"
+            <q-btn dense flat round color="primary" icon="info" size="sm"
+                   @click="() => $parent.$emit('view_details', props.row)">
+                <q-tooltip>View Details</q-tooltip>
+            </q-btn>
+            <q-btn v-if="props.row.status && (props.row.status === 'ACTIVE' || props.row.status === 'SCHEDULED')"
+                   dense flat round color="warning" icon="edit" size="sm"
+                   @click="() => $parent.$emit('modify_order', props.row)">
+                <q-tooltip>Modify GTT Order</q-tooltip>
+            </q-btn>
+            <q-btn v-if="props.row.status && (props.row.status === 'ACTIVE' || props.row.status === 'SCHEDULED')"
                    dense flat round color="negative" icon="cancel" size="sm"
                    @click="() => $parent.$emit('cancel_order', props.row.gtt_order_id)">
                 <q-tooltip>Cancel GTT Order</q-tooltip>
@@ -935,18 +1008,275 @@ async def render_gtt_orders(fetch_api, user_storage, broker):
             ui.button(icon="chevron_right", on_click=lambda: on_gtt_page_change(gtt_current_page + 1)).props("flat dense size=sm color=primary")
             ui.button(icon="last_page", on_click=lambda: on_gtt_page_change(get_total_pages(len(filter_orders_by_status(gtt_orders_data, gtt_status_filter))))).props("flat dense size=sm color=primary")
 
-    async def handle_cancel_order(order_id):
+    # GTT Order Handler Functions
+    async def handle_view_gtt_details(order_data):
+        """Display detailed GTT order information including rules"""
         try:
-            response = await fetch_api(f"/gtt-orders/{broker}/{order_id}", method="DELETE")
-            if response and response.get("status") == "success":
-                ui.notify(f"GTT order {order_id} cancelled successfully.", type="positive")
-            else:
-                ui.notify(f"Failed to cancel GTT order {order_id}.", type="negative")
-            await refresh_gtt_orders_with_pagination(fetch_api, broker)
-        except Exception as e:
-            ui.notify(f"Error cancelling GTT order: {str(e)}", type="negative")
+            # Try to fetch enriched details from backend first
+            full_data = None
+            try:
+                gtt_id = order_data.get('gtt_order_id')
+                details = await fetch_api(f"/gtt-orders/{broker}/{gtt_id}")
+                if details and not details.get('error'):
+                    full_data = details
+            except Exception:
+                full_data = None
 
-    gtt_orders_table.on('cancel_order', lambda e: create_safe_task(handle_cancel_order(e.args)))
+            if not full_data:
+                full_data = order_data.get('_full_data', {})
+            if not full_data:
+                safe_notify("No detailed data available for this order", notify_type="warning")
+                return
+                
+            # Create a detailed dialog
+            def create_dialog():
+                with ui.dialog() as dialog, ui.card().classes("w-full max-w-4xl"):
+                    ui.label(f"GTT Order Details - {full_data.get('trading_symbol', 'Unknown')}")
+                    
+                    with ui.card_section():
+                        # Basic order information
+                        with ui.row().classes("w-full gap-4 mb-4"):
+                            with ui.column().classes("flex-1"):
+                                ui.label("Order Information").classes("text-lg font-bold mb-2")
+                                ui.label(f"Order ID: {full_data.get('gtt_order_id', 'N/A')}")
+                                ui.label(f"Symbol: {full_data.get('trading_symbol', 'N/A')}")
+                                ui.label(f"Transaction Type: {full_data.get('transaction_type', 'N/A')}")
+                                ui.label(f"Quantity: {full_data.get('quantity', 'N/A')}")
+                                ui.label(f"Status: {full_data.get('status', 'N/A')}")
+                                ui.label(f"Broker: {full_data.get('broker', 'N/A')}")
+                            
+                            with ui.column().classes("flex-1"):
+                                ui.label("GTT Configuration").classes("text-lg font-bold mb-2")
+                                ui.label(f"GTT Type: {full_data.get('gtt_type', 'N/A')}")
+                                ui.label(f"Trigger Type: {full_data.get('trigger_type', 'N/A')}")
+                                ui.label(f"Created At: {full_data.get('created_at', 'N/A')}")
+                                if full_data.get('instrument_token'):
+                                    ui.label(f"Instrument Token: {full_data.get('instrument_token', 'N/A')}")
+                        
+                        # Rules section
+                        rules = full_data.get('rules', [])
+                        if rules:
+                            ui.label("Rules Configuration").classes("text-lg font-bold mb-3")
+
+                            # Build columns and rows for the table
+                            columns = [
+                                {'name': 'rule_index', 'label': 'Rule #', 'field': 'rule_index', 'align': 'center'},
+                                {'name': 'strategy', 'label': 'Strategy', 'field': 'strategy', 'align': 'left'},
+                                {'name': 'trigger_type', 'label': 'Trigger Type', 'field': 'trigger_type', 'align': 'left'},
+                                {'name': 'trigger_price', 'label': 'Trigger Price', 'field': 'trigger_price', 'align': 'right'},
+                                {'name': 'trailing_gap', 'label': 'Trailing Gap', 'field': 'trailing_gap', 'align': 'right'},
+                                {'name': 'description', 'label': 'Description', 'field': 'description', 'align': 'left'}
+                            ]
+
+                            rows = []
+                            for rule in rules:
+                                strategy = rule.get('strategy', 'UNKNOWN')
+                                trigger_type = rule.get('trigger_type', 'UNKNOWN')
+                                try:
+                                    trigger_price_val = float(rule.get('trigger_price', 0) or 0)
+                                except Exception:
+                                    trigger_price_val = 0.0
+                                trailing_gap = rule.get('trailing_gap')
+
+                                # Create description
+                                if strategy == 'ENTRY':
+                                    desc = f"Place {full_data.get('transaction_type', 'BUY')} order when price {trigger_type.lower()} {trigger_price_val:.2f}"
+                                elif strategy == 'TARGET':
+                                    desc = f"Take profit when price reaches {trigger_price_val:.2f}"
+                                elif strategy == 'STOPLOSS':
+                                    if trailing_gap:
+                                        desc = f"Trailing stop loss with {trailing_gap} gap"
+                                    else:
+                                        desc = f"Stop loss at {trigger_price_val:.2f}"
+                                else:
+                                    desc = f"{strategy} at {trigger_price_val:.2f}"
+
+                                rows.append({
+                                    'rule_index': rule.get('rule_index', 0),
+                                    'strategy': strategy,
+                                    'trigger_type': trigger_type,
+                                    'trigger_price': f"{trigger_price_val:.2f}",
+                                    'trailing_gap': f"{float(trailing_gap):.2f}" if trailing_gap not in (None, '') else 'N/A',
+                                    'description': desc
+                                })
+
+                            ui.table(columns=columns, rows=rows).classes("w-full").props('dense separator="cell"')
+                        else:
+                            ui.label("No rules configured for this GTT order").classes("text-grey-6 italic")
+                        
+                        # Legacy fields (if available)
+                        legacy_fields = []
+                        if full_data.get('trigger_price'):
+                            legacy_fields.append(f"Primary Trigger: {full_data.get('trigger_price'):.2f}")
+                        if full_data.get('limit_price'):
+                            legacy_fields.append(f"Primary Limit: {full_data.get('limit_price'):.2f}")
+                        if full_data.get('second_trigger_price'):
+                            legacy_fields.append(f"Secondary Trigger: {full_data.get('second_trigger_price'):.2f}")
+                        if full_data.get('second_limit_price'):
+                            legacy_fields.append(f"Secondary Limit: {full_data.get('second_limit_price'):.2f}")
+                        
+                        if legacy_fields:
+                            ui.label("Legacy Fields").classes("text-lg font-bold mb-2 mt-4")
+                            with ui.row().classes("w-full gap-4"):
+                                for field in legacy_fields:
+                                    ui.label(field).classes("text-sm")
+                    
+                    # Close button
+                    with ui.card_actions().classes("justify-end"):
+                        ui.button("Close", on_click=dialog.close).props("flat color=primary")
+                    
+                    dialog.open()
+            
+            # Execute dialog creation (runs in UI context when called from event handler)
+            create_dialog()
+                
+        except Exception as e:
+            logger.error(f"Error displaying GTT order details: {str(e)}")
+            safe_notify(f"Error displaying order details: {str(e)}", notify_type="negative")
+
+    async def handle_modify_gtt_order(order_data):
+        """Display modification dialog for GTT orders and submit changes"""
+        try:
+            # Fetch enriched details for accurate editing
+            gtt_id = order_data.get('gtt_order_id')
+            details = await fetch_api(f"/gtt-orders/{broker}/{gtt_id}")
+            full_data = details if details and not details.get('error') else order_data.get('_full_data', {})
+            if not full_data:
+                safe_notify("No detailed data available for this order", notify_type="warning")
+                return
+
+            # Initial form values
+            trigger_price_val = full_data.get('trigger_price') or 0.0
+            limit_price_val = full_data.get('limit_price') or trigger_price_val
+            last_price_val = full_data.get('last_price') or 0.0
+            quantity_val = full_data.get('quantity') or 1
+            trigger_type_val = full_data.get('trigger_type') or "single"
+            rules_val = full_data.get('rules')
+
+            # Dialog UI
+            def create_modify_dialog():
+                with ui.dialog() as dialog, ui.card().classes("w-full max-w-3xl"):
+                    ui.label(f"Modify GTT Order - {full_data.get('trading_symbol', 'Unknown')}")
+
+                    with ui.card_section():
+                        with ui.row().classes("gap-3"):
+                            trig = ui.number("Trigger Price", value=trigger_price_val).classes("w-40")
+                            lim = ui.number("Limit Price", value=limit_price_val).classes("w-40")
+                            qty = ui.number("Quantity", value=quantity_val).classes("w-32")
+                        with ui.row().classes("gap-3 mt-2"):
+                            lst = ui.number("Last Price", value=last_price_val).classes("w-40")
+                            ttype = ui.select(["single", "two_leg"], value=trigger_type_val, label="Trigger Type").classes("w-40")
+
+                    async def submit_modify():
+                        data = {
+                            "instrument_token": full_data.get('instrument_token', ''),
+                            "trading_symbol": full_data.get('trading_symbol', ''),
+                            "transaction_type": full_data.get('transaction_type', 'BUY'),
+                            "quantity": int(qty.value or quantity_val),
+                            "trigger_type": ttype.value or trigger_type_val,
+                            "trigger_price": float(trig.value or 0.0),
+                            "limit_price": float(lim.value or 0.0),
+                            "last_price": float(lst.value or 0.0),
+                            "second_trigger_price": full_data.get('second_trigger_price'),
+                            "second_limit_price": full_data.get('second_limit_price'),
+                            "rules": rules_val,
+                            "broker": broker,
+                        }
+                        resp = await fetch_api(f"/gtt-orders/{broker}/{gtt_id}", method="PUT", data=data)
+                        if resp and not resp.get('error') and resp.get('status') == 'success':
+                            safe_notify("GTT order modified", notify_type="positive")
+                            dialog.close()
+                            await refresh_gtt_orders_with_pagination(fetch_api, broker)
+                        else:
+                            msg = resp.get('message') if resp and isinstance(resp, dict) else 'Modify failed'
+                            safe_notify(f"Failed to modify: {msg}", notify_type="negative")
+
+                    with ui.card_actions().classes("justify-end"):
+                        ui.button("Update", on_click=lambda: create_safe_task(submit_modify())).props("color=primary")
+                        ui.button("Close", on_click=dialog.close).props("flat")
+
+                    dialog.open()
+            
+            # Execute dialog creation
+            create_modify_dialog()
+        except Exception as e:
+            logger.error(f"Error displaying GTT order modification dialog: {str(e)}")
+            safe_notify(f"Error displaying modification dialog: {str(e)}", notify_type="negative")
+
+    async def handle_cancel_gtt_order(order_id):
+        """Cancel GTT order with confirmation dialog"""
+        try:
+            # Get order details for confirmation
+            order_data = None
+            for order in gtt_orders_data:
+                if order.get('gtt_order_id') == order_id:
+                    order_data = order
+                    break
+            
+            if not order_data:
+                safe_notify("Order not found", notify_type="warning")
+                return
+            
+            # Create confirmation dialog
+            def create_confirmation_dialog():
+                with ui.dialog() as dialog, ui.card().classes("w-96"):
+                    ui.label("Confirm GTT Order Cancellation")
+                    
+                    with ui.card_section():
+                        ui.label("Are you sure you want to cancel this GTT order?")
+                        ui.label(f"Order ID: {order_id}")
+                        ui.label(f"Symbol: {order_data.get('trading_symbol', 'N/A')}")
+                        ui.label(f"Quantity: {order_data.get('quantity', 'N/A')}")
+                        ui.label(f"Trigger Price: {order_data.get('trigger_price', 'N/A')}")
+                        ui.label("").classes("text-red-600 font-medium")  # Empty line for spacing
+                        ui.label("This action cannot be undone.").classes("text-red-600 font-medium")
+                    
+                    with ui.card_actions().classes("justify-end gap-2"):
+                        ui.button("Cancel", on_click=dialog.close).props("flat")
+                        
+                        async def confirm_cancel():
+                            try:
+                                response = await fetch_api(f"/gtt-orders/{broker}/{order_id}", method="DELETE")
+                                if response and response.get("status") == "success":
+                                    safe_notify(f"GTT order {order_id} cancelled successfully.", notify_type="positive")
+                                    dialog.close()
+                                    await refresh_gtt_orders_with_pagination(fetch_api, broker)
+                                else:
+                                    safe_notify(f"Failed to cancel GTT order {order_id}.", notify_type="negative")
+                            except Exception as e:
+                                safe_notify(f"Error cancelling GTT order: {str(e)}", notify_type="negative")
+                        
+                        ui.button("Confirm Cancel", on_click=lambda: create_safe_task(confirm_cancel())).props("color=negative")
+                    
+                    dialog.open()
+            
+            # Execute dialog creation
+            create_confirmation_dialog()
+        except Exception as e:
+            safe_notify(f"Error cancelling GTT order: {str(e)}", notify_type="negative")
+
+    # Set up event handlers
+    async def _on_gtt_view_details(e):
+        await handle_view_gtt_details(e.args)
+    async def _on_gtt_modify(e):
+        await handle_modify_gtt_order(e.args)
+    async def _on_gtt_cancel(e):
+        await handle_cancel_gtt_order(e.args)
+
+    gtt_orders_table.on('cancel_order', _on_gtt_cancel)
+    gtt_orders_table.on('view_details', _on_gtt_view_details)
+    gtt_orders_table.on('modify_order', _on_gtt_modify)
+
+    # Register WS callback to auto-refresh on GTT order events
+    def _on_gtt_event(data: dict):
+        try:
+            if data.get('scope') == 'gtt' and data.get('broker', '').lower() == broker.lower():
+                create_safe_task(refresh_gtt_orders_with_pagination(fetch_api, broker))
+        except Exception:
+            pass
+    register_order_ws_callback(_on_gtt_event)
+
+    # Initial load
     await refresh_gtt_orders_with_pagination(fetch_api, broker)
 
 async def refresh_auto_orders_with_pagination(fetch_api, broker):
@@ -1174,6 +1504,11 @@ async def render_order_book_page(fetch_api, user_storage, broker):
 
     # Track which tabs have been loaded to avoid duplicate API calls
     loaded_tabs = {'placed': True, 'scheduled': False, 'gtt': False, 'auto': False}
+    
+    # Initialize tab content containers
+    scheduled_content = None
+    gtt_content = None
+    auto_content = None
 
     # Modern page header with glassmorphism design
     with ui.card().classes("w-full shadow-lg").style(
@@ -1186,7 +1521,7 @@ async def render_order_book_page(fetch_api, user_storage, broker):
         with ui.row().classes("w-full justify-between items-center p-4"):
             # Left - Enhanced page title with gradient effect
             with ui.column().classes("gap-1"):
-                ui.label(f"Order Book").classes("theme-header-text text-2xl font-bold")
+                ui.label("Order Book").classes("theme-header-text text-2xl font-bold")
                 ui.label(f"Trading with {broker} • Real-time order management").classes(
                     "text-sm theme-text-secondary opacity-80"
                 )
@@ -1238,7 +1573,7 @@ async def render_order_book_page(fetch_api, user_storage, broker):
             # Load placed orders by default when page opens
             await render_placed_orders(fetch_api, user_storage, broker)
         
-        with ui.tab_panel(scheduled_tab) as scheduled_panel:
+        with ui.tab_panel(scheduled_tab):
             # Create container for scheduled orders content
             scheduled_content = ui.column().classes('w-full')
             with scheduled_content:
@@ -1246,15 +1581,15 @@ async def render_order_book_page(fetch_api, user_storage, broker):
                     ui.icon('schedule', size='2rem', color='grey-5').classes('mb-2')
                     ui.label('Scheduled orders will load when this tab is selected').classes('text-center text-grey-6')
         
-        with ui.tab_panel(gtt_tab) as gtt_panel:
+        with ui.tab_panel(gtt_tab):
             # Create container for GTT orders content
             gtt_content = ui.column().classes('w-full')
             with gtt_content:
                 with ui.row().classes('w-full justify-center items-center p-8'):
-                    ui.icon('gavel', size='2rem', color='grey-5').classes('mb-2')
+                    ui.icon('gps_fixed', size='2rem', color='grey-5').classes('mb-2')
                     ui.label('GTT orders will load when this tab is selected').classes('text-center text-grey-6')
         
-        with ui.tab_panel(auto_tab) as auto_panel:
+        with ui.tab_panel(auto_tab):
             # Create container for auto orders content
             auto_content = ui.column().classes('w-full')
             with auto_content:
@@ -1264,62 +1599,96 @@ async def render_order_book_page(fetch_api, user_storage, broker):
     
     # Handle tab changes for lazy loading with proper UI context
     async def handle_tab_change(e):
-        tab_name = e.args
-        
+        # Normalize event payload to a tab name string
+        raw = getattr(e, 'args', None)
+        tab_name = None
+        if isinstance(raw, str):
+            tab_name = raw
+        elif isinstance(raw, dict):
+            tab_name = raw.get('value') or raw.get('name') or raw.get('args')
+        else:
+            # Try attribute-based access (e.g., element with .value)
+            tab_name = getattr(raw, 'value', None)
+            if not isinstance(tab_name, str) and raw is not None:
+                # Fallback to string representation parsing
+                raw_str = str(raw)
+                for candidate in ('placed', 'scheduled', 'gtt', 'auto'):
+                    if candidate in raw_str:
+                        tab_name = candidate
+                        break
+
         try:
-            if tab_name == 'scheduled' and not loaded_tabs['scheduled']:
-                loaded_tabs['scheduled'] = True
-                # Show loading state
-                scheduled_content.clear()
-                with scheduled_content:
-                    with ui.row().classes('w-full justify-center items-center p-8'):
-                        ui.spinner('dots', size='lg', color='primary')
-                        ui.label('Loading scheduled orders...').classes('ml-3 text-grey-6')
-                
-                # Small delay to show loading state
-                await asyncio.sleep(0.1)
-                
-                # Load content in the correct UI context
-                scheduled_content.clear()
-                with scheduled_content:
-                    await render_scheduled_orders(fetch_api, user_storage, broker)
+            if tab_name == 'scheduled':
+                if not loaded_tabs['scheduled']:
+                    loaded_tabs['scheduled'] = True
+                    # Show loading state
+                    scheduled_content.clear()
+                    with scheduled_content:
+                        with ui.row().classes('w-full justify-center items-center p-8'):
+                            ui.spinner('dots', size='lg', color='primary')
+                            ui.label('Loading scheduled orders...').classes('ml-3 text-grey-6')
                     
-            elif tab_name == 'gtt' and not loaded_tabs['gtt']:
-                loaded_tabs['gtt'] = True
-                # Show loading state
-                gtt_content.clear()
-                with gtt_content:
-                    with ui.row().classes('w-full justify-center items-center p-8'):
-                        ui.spinner('dots', size='lg', color='primary')
-                        ui.label('Loading GTT orders...').classes('ml-3 text-grey-6')
-                
-                # Small delay to show loading state
-                await asyncio.sleep(0.1)
-                
-                # Load content in the correct UI context
-                gtt_content.clear()
-                with gtt_content:
-                    await render_gtt_orders(fetch_api, user_storage, broker)
+                    # Small delay to show loading state and let session settle
+                    await asyncio.sleep(0.3)
                     
-            elif tab_name == 'auto' and not loaded_tabs['auto']:
-                loaded_tabs['auto'] = True
-                # Show loading state
-                auto_content.clear()
-                with auto_content:
-                    with ui.row().classes('w-full justify-center items-center p-8'):
-                        ui.spinner('dots', size='lg', color='primary')
-                        ui.label('Loading auto orders...').classes('ml-3 text-grey-6')
-                
-                # Small delay to show loading state
-                await asyncio.sleep(0.1)
-                
-                # Load content in the correct UI context
-                auto_content.clear()
-                with auto_content:
-                    await render_auto_orders(fetch_api, user_storage, broker)
+                    # Load content in the correct UI context
+                    scheduled_content.clear()
+                    with scheduled_content:
+                        await render_scheduled_orders(fetch_api, user_storage, broker)
+                else:
+                    # Refresh existing content
+                    create_safe_task(refresh_scheduled_orders_with_pagination(fetch_api, broker))
+                    
+            elif tab_name == 'gtt':
+                if not loaded_tabs['gtt']:
+                    loaded_tabs['gtt'] = True
+                    # Show loading state
+                    gtt_content.clear()
+                    with gtt_content:
+                        with ui.row().classes('w-full justify-center items-center p-8'):
+                            ui.spinner('dots', size='lg', color='primary')
+                            ui.label('Loading GTT orders...').classes('ml-3 text-grey-6')
+                    
+                    # Small delay to show loading state and let session settle
+                    await asyncio.sleep(0.3)
+                    
+                    # Load content in the correct UI context
+                    gtt_content.clear()
+                    with gtt_content:
+                        await render_gtt_orders(fetch_api, user_storage, broker)
+                else:
+                    # Refresh existing content
+                    create_safe_task(refresh_gtt_orders_with_pagination(fetch_api, broker))
+
+            elif tab_name == 'auto':
+                if not loaded_tabs['auto']:
+                    loaded_tabs['auto'] = True
+                    # Show loading state
+                    auto_content.clear()
+                    with auto_content:
+                        with ui.row().classes('w-full justify-center items-center p-8'):
+                            ui.spinner('dots', size='lg', color='primary')
+                            ui.label('Loading auto orders...').classes('ml-3 text-grey-6')
+
+                    # Small delay to show loading state and let session settle
+                    await asyncio.sleep(0.3)
+
+                    # Load content in the correct UI context
+                    auto_content.clear()
+                    with auto_content:
+                        await render_auto_orders(fetch_api, user_storage, broker)
+                else:
+                    # Refresh existing content
+                    create_safe_task(refresh_auto_orders_with_pagination(fetch_api, broker))
         except Exception as e:
             logger.error(f"Error in handle_tab_change: {str(e)}")
-            safe_notify(f"Error loading {tab_name} orders: {str(e)}", type="negative")
-    
-    # Set up the tab change handler
+            safe_notify(f"Error loading {tab_name} orders: {str(e)}", notify_type="negative")
+
+    # Set up the tab change handler (both kebab-case and camelCase variants)
     tabs.on('update:model-value', handle_tab_change)
+    tabs.on('update:modelValue', handle_tab_change)
+
+
+
+
+

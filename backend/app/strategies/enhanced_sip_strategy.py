@@ -261,11 +261,11 @@ class BenchmarkSIPCalculator:
                     'months_invested': len(invested_months)
                 }
 
-                logger.info(f"✅ FIXED Benchmark SIP completed for {symbol}:")
-                logger.info(f"   📊 Investment: ₹{total_investment:,.2f}")
-                logger.info(f"   💰 Final Value: ₹{final_portfolio_value:,.2f}")
-                logger.info(f"   📈 CAGR: {cagr_percent:.2f}%")
-                logger.info(f"   🔄 Total Trades: {len(benchmark_trades)}")
+                logger.info(f"FIXED Benchmark SIP completed for {symbol}:")
+                logger.info(f"Investment: ₹{total_investment:,.2f}")
+                logger.info(f"Final Value: ₹{final_portfolio_value:,.2f}")
+                logger.info(f"CAGR: {cagr_percent:.2f}%")
+                logger.info(f"Total Trades: {len(benchmark_trades)}")
 
                 return benchmark_result
             else:

@@ -2,8 +2,9 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-logging.basicConfig(level=logging.INFO)
+# Removed basicConfig to not interfere with main app logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 async def async_fetch_query(db: AsyncSession, query: str, params: dict) -> list:
     """

@@ -20,7 +20,7 @@ from backend.app.database import db_manager, get_db
 import pandas_ta as ta
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
+from sqlalchemy import select, or_
 from sqlalchemy.sql import text, func
 from fastapi import Depends, HTTPException
 from kiteconnect import KiteConnect
@@ -35,14 +35,19 @@ from common_utils.read_write_sql_data import load_sql_data
 from common_utils.fetch_load_db_data import *
 from common_utils.market_data import MarketData
 from common_utils.upstox_utils import get_symbol_for_instrument
-from models import Order, ScheduledOrder, QueuedOrder, User, GTTOrder, Instrument
-from schemas import Order as OrderSchema, ScheduledOrder as ScheduledOrderSchema, OrderHistory, Trade, QuoteResponse, \
+from .models import Order, ScheduledOrder, QueuedOrder, User, GTTOrder, Instrument
+from .schemas import Order as OrderSchema, ScheduledOrder as ScheduledOrderSchema, OrderHistory, Trade, QuoteResponse, \
     OHLCResponse, LTPResponse, HistoricalDataResponse, Instrument as InstrumentSchema, HistoricalDataPoint, MFSIPResponse, MFSIPRequest
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_not_exception_type
 from common_utils.indicators import calculate_ema, calculate_rsi, calculate_linear_regression, calculate_atr, \
     calculate_macd, calculate_bollinger_bands, calculate_stochastic_oscillator, calculate_sma
 from common_utils.predefined_strategies import check_macd_crossover, check_bollinger_band_signals, check_stochastic_signals, \
     check_support_resistance_breakout, macd_strategy, bollinger_band_strategy, rsi_strategy
+try:
+    from backend.app.ws_events import broadcast_event as ws_broadcast_event
+except Exception:
+    async def ws_broadcast_event(*args, **kwargs):
+        return None
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG)
@@ -118,15 +123,12 @@ class OrderMonitor:
                             if active_user_apis:
                                 for user_id, apis in active_user_apis.items():
                                     try:
-                                        upstox_api = apis.get("upstox", {}).get("order")
+                                        upstox_api = apis.get("upstox", {})
                                         zerodha_api = apis.get("zerodha", {}).get("kite")
 
                                         if upstox_api or zerodha_api:
                                             logger.info(f"Sync Order status for pending orders for user {user_id}")
                                             await self.sync_order_statuses(upstox_api, zerodha_api, db, user_id)
-
-                                        if upstox_api:
-                                            await self.monitor_gtt_orders(upstox_api, db)
 
                                     except Exception as user_error:
                                         logger.error(f"Error processing user {user_id}: {user_error}")
@@ -191,7 +193,7 @@ class OrderMonitor:
                     UNION
                     SELECT DISTINCT user_id FROM scheduled_orders WHERE status = 'PENDING'
                     UNION
-                    SELECT DISTINCT user_id FROM gtt_orders WHERE status IN ('PENDING', 'active')
+                    SELECT DISTINCT user_id FROM gtt_orders WHERE status IN ('PENDING', 'active', 'scheduled')
                 )
                 AND (
                     (u.upstox_access_token IS NOT NULL AND u.upstox_access_token_expiry > NOW())
@@ -440,6 +442,8 @@ class OrderMonitor:
                                 # Place opposite transaction (exit order)
                                 exit_transaction_type = "SELL" if transaction_type == "BUY" else "BUY"
 
+                                # Set appropriate product type based on broker
+                                product_type = "CNC" if order_row.broker == "Zerodha" else "D"
                                 exit_response = await place_order(
                                     api=order_api,
                                     instrument_token=instrument_token,
@@ -448,12 +452,22 @@ class OrderMonitor:
                                     quantity=quantity,
                                     price=0,  # Market order
                                     order_type="MARKET",
+                                    product_type=product_type,
                                     broker=order_row.broker,
                                     db=db,
                                     user_id=user_id
                                 )
 
-                                exit_order_id = exit_response.data.order_id if order_row.broker == "Upstox" else exit_response
+                                # Handle Upstox response which contains order_ids (plural) as an array
+                                if order_row.broker == "Upstox":
+                                    if hasattr(exit_response.data, 'order_ids') and exit_response.data.order_ids:
+                                        exit_order_id = exit_response.data.order_ids[0]  # Take the first order ID
+                                    elif hasattr(exit_response.data, 'order_id'):
+                                        exit_order_id = exit_response.data.order_id  # Fallback for single order_id
+                                    else:
+                                        exit_order_id = "unknown"  # Fallback if no order ID found
+                                else:
+                                    exit_order_id = exit_response
 
                                 # Update original order with exit details and exit_order_id
                                 update_fields = {
@@ -487,7 +501,7 @@ class OrderMonitor:
 
                                     await notify(
                                         f"{exit_reason}: {trading_symbol}",
-                                        f"Exit order placed at {current_price}. Estimated P&L: ₹{profit_loss:.2f}",
+                                        f"Exit order placed at {current_price}. Estimated P&L: Rs.{profit_loss:.2f}",
                                         user.email
                                     )
                             else:
@@ -517,7 +531,12 @@ class OrderMonitor:
             # ===== SYNC REGULAR ORDERS =====
             # Build the query with user_id filter if provided - Include PENDING status from place_order
             stmt = select(Order).where(
-                func.lower(Order.status).in_([status.lower() for status in ["open", "pending", "PENDING", "trigger pending", "amo req received"]])
+                func.lower(Order.status).in_([
+                    status.lower() for status in [
+                        "open", "pending", "PENDING", "trigger pending",
+                        "amo req received", "after market order req received"
+                    ]
+                ])
             )
 
             # CRITICAL FIX: Add user_id filter to only fetch orders for the current user
@@ -535,10 +554,26 @@ class OrderMonitor:
             # Sync regular orders
             for order in orders:
                 try:
+                    broker_response = None
+                    order_status = None
+                    broker_message = None
+                    failure_reason = None
+                    
                     if order.broker == "Upstox" and upstox_api:
-                        order_status = upstox_api.get_order_status(order_id=order.order_id).data.status
+                        broker_response = upstox_api["order_v2"].get_order_status(order_id=order.order_id)
+                        order_status = broker_response.data.status
+                        # Extract additional details from Upstox response
+                        if hasattr(broker_response.data, 'status_message'):
+                            broker_message = broker_response.data.status_message
+                        if hasattr(broker_response.data, 'rejection_reason') and broker_response.data.rejection_reason:
+                            failure_reason = broker_response.data.rejection_reason
+                            
                     elif order.broker == "Zerodha" and zerodha_api:
-                        order_status = zerodha_api.order_history(order_id=order.order_id)[-1]["status"].lower()
+                        broker_response = zerodha_api.order_history(order_id=order.order_id)
+                        latest_order = broker_response[-1] if broker_response else {}
+                        order_status = latest_order.get("status", "").lower()
+                        broker_message = latest_order.get("status_message")
+                        failure_reason = latest_order.get("status_message") if order_status in ["rejected", "cancelled"] else None
                     else:
                         logger.debug(f"Skipping order {order.order_id}: API not available for broker {order.broker}")
                         continue
@@ -546,7 +581,118 @@ class OrderMonitor:
                     if order_status and order_status.lower() != order.status.lower():
                         old_status = order.status
                         order.status = order_status.lower()
+                        
+                        # Prepare timestamp and tracking data
+                        current_time = datetime.now()
+                        update_data = {
+                            'order_id': order.order_id,
+                            'status': order.status,
+                            'status_updated_at': current_time
+                        }
+                        
+                        # Add broker message for all status changes
+                        if broker_message:
+                            update_data['broker_message'] = broker_message
+                        
+                        # Add specific event timestamps based on order events
+                        # Note: completed/cancelled/rejected timestamps are handled by order_timestamp + status
+                        if hasattr(order, 'trailing_activated') and order.trailing_activated and old_status != order.status:
+                            if order.status in ["complete", "filled"] and 'trailing_activated_at' not in update_data:
+                                update_data['trailing_activated_at'] = current_time
+                        
+                        # Check for stop loss triggers (you can enhance this logic based on your business rules)
+                        if order.status in ["complete", "filled"] and hasattr(order, 'stop_loss') and order.stop_loss:
+                            # This would need more sophisticated logic to detect if it was a stop loss trigger
+                            # For now, we can add the timestamp when available from broker response
+                            pass
+                        
+                        # Update the order with enhanced tracking
+                        update_fields = ', '.join([f"{k} = :{k}" for k in update_data.keys() if k != 'order_id'])
+                        update_query = text(f"""
+                            UPDATE orders 
+                            SET {update_fields}
+                            WHERE order_id = :order_id
+                        """)
+                        
+                        await db.execute(update_query, update_data)
+                        
                         logger.info(f"Updated order {order.order_id} status from {old_status} to {order.status}")
+                        # Broadcast order status update
+                        try:
+                            await ws_broadcast_event(order.user_id, "order_status_updated", {
+                                "scope": "placed",
+                                "broker": order.broker,
+                                "order_id": order.order_id,
+                                "trading_symbol": order.trading_symbol,
+                                "status": str(order.status).upper()
+                            })
+                        except Exception:
+                            pass
+                        if failure_reason:
+                            logger.info(f"Order {order.order_id} failure reason: {failure_reason}")
+                        if broker_message:
+                            logger.debug(f"Order {order.order_id} broker message: {broker_message}")
+
+                        # ===== SYNC SIP ACTUAL TRADES =====
+                        # Update corresponding sip_actual_trades records (only if they exist)
+                        try:
+                            # First check if the order exists in sip_actual_trades
+                            check_sip_trade = text("""
+                                SELECT COUNT(*) as count FROM sip_actual_trades 
+                                WHERE order_id = :order_id
+                            """)
+                            
+                            check_result = await db.execute(check_sip_trade, {'order_id': order.order_id})
+                            sip_trade_exists = check_result.scalar() > 0
+                            
+                            if sip_trade_exists:
+                                # Map order status to execution status
+                                if order.status in ["complete", "filled"]:
+                                    execution_status = "EXECUTED"
+                                elif order.status in ["rejected", "cancelled"]:
+                                    execution_status = "FAILED"
+                                else:
+                                    execution_status = "PENDING"
+                                
+                                # Prepare SIP update with optimized tracking
+                                sip_update_data = {
+                                    'execution_status': execution_status,
+                                    'order_id': order.order_id
+                                }
+                                
+                                # Add broker message and execution timestamp
+                                if broker_message:
+                                    sip_update_data['broker_message'] = broker_message
+                                
+                                # Set execution timestamp: NULL for failed, current_time for executed
+                                if execution_status == "EXECUTED":
+                                    sip_update_data['order_executed_at'] = current_time
+                                elif execution_status == "FAILED":
+                                    # NULL execution time indicates failure
+                                    sip_update_data['order_executed_at'] = None
+                                
+                                # Build dynamic query for SIP update
+                                sip_update_fields = ', '.join([f"{k} = :{k}" for k in sip_update_data.keys() if k != 'order_id'])
+                                update_sip_trade = text(f"""
+                                    UPDATE sip_actual_trades 
+                                    SET {sip_update_fields}
+                                    WHERE order_id = :order_id
+                                """)
+                                
+                                await db.execute(update_sip_trade, sip_update_data)
+                                logger.info(f"Updated sip_actual_trades execution_status to {execution_status} for order {order.order_id}")
+                                
+                                if failure_reason and execution_status == "FAILED":
+                                    logger.info(f"SIP trade {order.order_id} failure reason: {failure_reason}")
+                                
+                                # Update portfolio totals when order is executed
+                                if execution_status == "EXECUTED":
+                                    await self._update_portfolio_totals_on_execution(order.order_id, db, upstox_api["market_data_v3"], zerodha_api)
+                            else:
+                                logger.debug(f"Order {order.order_id} not found in sip_actual_trades, skipping SIP update")
+                            
+                        except Exception as sip_error:
+                            logger.warning(f"Could not update sip_actual_trades for order {order.order_id}: {sip_error}")
 
                         if order.status in ["complete", "rejected", "cancelled"]:
                             result = await db.execute(select(User).filter(User.user_id == order.user_id))
@@ -562,7 +708,7 @@ class OrderMonitor:
 
             # ===== SYNC GTT ORDERS =====
             # Build GTT query with user_id filter if provided
-            gtt_stmt = select(GTTOrder).where(GTTOrder.status.in_(["PENDING", "active"]))
+            gtt_stmt = select(GTTOrder).where(GTTOrder.status.in_(["PENDING", "active", "scheduled"]))
 
             if user_id:
                 gtt_stmt = gtt_stmt.where(GTTOrder.user_id == user_id)
@@ -585,6 +731,7 @@ class OrderMonitor:
                             # Get GTT status from Zerodha API
                             zerodha_gtt = zerodha_api.get_gtt(trigger_id=gtt.gtt_order_id)
                             api_status = zerodha_gtt.get("status", "").lower()
+                            logger.debug(f"Zerodha GTT {gtt.gtt_order_id} status: {zerodha_gtt}")
 
                             if api_status and api_status != gtt.status.lower():
                                 old_status = gtt.status
@@ -593,36 +740,93 @@ class OrderMonitor:
                                 logger.info(f"Updated GTT {gtt.gtt_order_id} status from {old_status} to {api_status}")
 
                         except Exception as api_error:
-                            logger.debug(f"Could not fetch GTT status from API for {gtt.gtt_order_id}: {api_error}")
+                            logger.debug(f"Could not fetch GTT status from Zerodha API for {gtt.gtt_order_id}: {api_error}")
 
                     elif gtt.broker == "Upstox" and upstox_api:
                         # For Upstox GTT orders, check if trigger conditions are met
                         try:
-                            ltp_data = await get_ltp(upstox_api, None, [gtt.instrument_token], db)
-                            if ltp_data and len(ltp_data) > 0:
-                                ltp = ltp_data[0].last_price
-
-                                # Check trigger conditions
-                                if gtt.trigger_type == "single" and ltp >= gtt.trigger_price:
-                                    # Place the actual order
-                                    await place_order(
-                                        api=upstox_api,
-                                        instrument_token=gtt.instrument_token,
-                                        trading_symbol=gtt.trading_symbol,
-                                        transaction_type=gtt.transaction_type,
-                                        quantity=gtt.quantity,
-                                        price=gtt.limit_price,
-                                        order_type="LIMIT",
-                                        broker="Upstox",
-                                        db=db,
-                                        user_id=gtt.user_id
-                                    )
-                                    gtt.status = "TRIGGERED"
+                            # Get GTT status from Zerodha API
+                            upstox_gtt_raw = upstox_api["order"].get_gtt_order_details(gtt_order_id=gtt.gtt_order_id).data
+                            logger.debug(f"Upstox GTT {gtt.gtt_order_id} status: {upstox_gtt_raw}")
+                            api_status = None
+                            for gtt_order in upstox_gtt_raw:
+                                upstox_gtt = gtt_order.to_dict()
+                                api_status = upstox_gtt.get("rules", [{"status": ""}])[0].get("status", "").lower()
+                                logger.debug(f"Upstox GTT {gtt.gtt_order_id} status: {api_status}")
+                                if api_status and api_status != gtt.status.lower():
+                                    old_status = gtt.status
+                                    gtt.status = api_status
                                     gtt_status_updated = True
-                                    logger.info(f"GTT {gtt.gtt_order_id} triggered at price {ltp}")
+                                    logger.info(f"Updated GTT {gtt.gtt_order_id} status from {old_status} to {api_status}")
 
-                        except Exception as trigger_error:
-                            logger.error(f"Error checking GTT trigger for {gtt.gtt_order_id}: {trigger_error}")
+                        except Exception as api_error:
+                            logger.debug(f"Could not fetch GTT status from API for {gtt.gtt_order_id}: {api_error}")
+
+                    # ===== SYNC SIP ACTUAL TRADES FOR GTT ORDERS =====
+                    # Update corresponding sip_actual_trades records for GTT orders (only if they exist)
+                    if gtt_status_updated:
+                        try:
+                            # First check if a SIP trade exists for this GTT order id
+                            check_sip_trade = text("""
+                                SELECT COUNT(*) as count FROM sip_actual_trades 
+                                WHERE gtt_order_id = :gtt_order_id
+                            """)
+                            check_result = await db.execute(check_sip_trade, {'gtt_order_id': gtt.gtt_order_id})
+                            sip_trade_exists = check_result.scalar() > 0
+
+                            if sip_trade_exists:
+                                # Map GTT status to execution status (normalize case)
+                                status_lower = str(gtt.status).lower() if gtt.status is not None else ""
+                                if status_lower in ["triggered", "completed"]:
+                                    execution_status = "EXECUTED"
+                                elif status_lower in ["cancelled"]:
+                                    execution_status = "FAILED"
+                                else:
+                                    execution_status = "PENDING"
+
+                                # Build SIP update data
+                                sip_update_data = {
+                                    'execution_status': execution_status,
+                                    'gtt_order_id': gtt.gtt_order_id
+                                }
+
+                                # Set execution timestamp: now for EXECUTED, NULL for FAILED
+                                current_time = datetime.now()
+                                if execution_status == "EXECUTED":
+                                    sip_update_data['order_executed_at'] = current_time
+                                elif execution_status == "FAILED":
+                                    sip_update_data['order_executed_at'] = None
+
+                                sip_update_fields = ', '.join([f"{k} = :{k}" for k in sip_update_data.keys() if k != 'gtt_order_id'])
+                                update_sip_trade = text(f"""
+                                    UPDATE sip_actual_trades 
+                                    SET {sip_update_fields}
+                                    WHERE gtt_order_id = :gtt_order_id
+                                """)
+
+                                await db.execute(update_sip_trade, sip_update_data)
+                                logger.info(f"Updated sip_actual_trades execution_status to {execution_status} for GTT order {gtt.gtt_order_id}")
+
+                                # Update portfolio totals when GTT order is executed
+                                if execution_status == "EXECUTED":
+                                    await self._update_portfolio_totals_on_execution(gtt.gtt_order_id, db, upstox_api["market_data_v3"], zerodha_api)
+                            else:
+                                logger.debug(f"GTT order {gtt.gtt_order_id} not found in sip_actual_trades, skipping SIP update")
+
+                        except Exception as sip_error:
+                            logger.warning(f"Could not update sip_actual_trades for GTT order {gtt.gtt_order_id}: {sip_error}")
+
+                        # Broadcast GTT status update
+                        try:
+                            await ws_broadcast_event(gtt.user_id, "gtt_status_updated", {
+                                "scope": "gtt",
+                                "broker": gtt.broker,
+                                "gtt_order_id": gtt.gtt_order_id,
+                                "trading_symbol": gtt.trading_symbol,
+                                "status": str(gtt.status).upper()
+                            })
+                        except Exception:
+                            pass
 
                     # Send notification if status changed
                     if gtt_status_updated and gtt.status in ["triggered", "cancelled", "completed"]:
@@ -643,46 +847,96 @@ class OrderMonitor:
                 logger.info(f"Sync completed for user {user_id if user_id else 'all users'}: {len(orders)} orders, {len(gtt_orders)} GTT orders")
             else:
                 logger.debug(f"No orders or GTT orders to sync for user {user_id if user_id else 'all users'}")
-
+            
             return True
+            
         except Exception as e:
             logger.error(f"Error in sync_order_statuses: {str(e)}")
             return False
 
-    async def monitor_gtt_orders(self, upstox_api: Optional[Any], db: AsyncSession):
-        stmt = select(GTTOrder).where(GTTOrder.status == "PENDING", GTTOrder.broker == "Upstox")
-        result = await db.execute(stmt)
-        gtt_orders: List[GTTOrder] = result.scalars().all()
-        for gtt in gtt_orders:
+    async def _update_portfolio_totals_on_execution(self, order_id: str, db: AsyncSession, upstox_api: Optional[Any] = None, kite_api: Optional[Any] = None):
+        """Update portfolio totals when an order is executed"""
+        try:
+            # Get the executed trade details
+            trade_query = text("""
+                SELECT portfolio_id, symbol, units, amount, price
+                FROM sip_actual_trades 
+                WHERE (order_id = :order_id OR gtt_order_id = :order_id) AND execution_status = 'EXECUTED'
+            """)
+            
+            trade_result = await db.execute(trade_query, {'order_id': order_id})
+            trade = trade_result.fetchone()
+            
+            if not trade:
+                logger.warning(f"No executed trade found for order {order_id}")
+                return
+            
+            portfolio_id, symbol, units, amount, price = trade
+            
+            # Get portfolio symbols for current value calculation
+            portfolio_query = text("""
+                SELECT symbols FROM sip_portfolios WHERE portfolio_id = :portfolio_id
+            """)
+            
+            portfolio_result = await db.execute(portfolio_query, {'portfolio_id': portfolio_id})
+            portfolio_data = portfolio_result.fetchone()
+            
+            if not portfolio_data:
+                logger.warning(f"Portfolio {portfolio_id} not found")
+                return
+            
+            symbols_json = portfolio_data[0]
+            
+            # Parse symbols safely
             try:
-                ltp_data = await get_ltp(upstox_api, None, [gtt.instrument_token])
-                ltp = ltp_data[0].last_price
-                if gtt.trigger_type == "single" and ltp >= gtt.trigger_price:
-                    await place_order(
-                        api=upstox_api,
-                        instrument_token=gtt.instrument_token,
-                        trading_symbol=gtt.trading_symbol,
-                        transaction_type=gtt.transaction_type,
-                        quantity=gtt.quantity,
-                        price=gtt.limit_price,
-                        order_type="LIMIT",
-                        broker="Upstox",
-                        db=db,
-                        user_id=gtt.user_id
-                    )
-                    gtt.status = "TRIGGERED"
-                    await db.commit()
-                    result = await db.execute(select(User).filter(User.user_id == gtt.user_id))
-                    user = result.scalars().first()
-                    if user:
-                        await notify(
-                            f"GTT Order Triggered: {gtt.gtt_order_id}",
-                            f"GTT order for {gtt.trading_symbol} triggered at ₹{ltp}",
-                            user.email
-                        )
-            except Exception as e:
-                logger.error(f"Error monitoring GTT order {gtt.gtt_order_id}: {str(e)}")
-        await asyncio.sleep(10)
+                if isinstance(symbols_json, str):
+                    symbols_data = json.loads(symbols_json)
+                elif isinstance(symbols_json, list):
+                    symbols_data = symbols_json
+                else:
+                    logger.error(f"Invalid symbols data type for portfolio {portfolio_id}")
+                    return
+            except Exception as parse_error:
+                logger.error(f"Error parsing symbols for portfolio {portfolio_id}: {parse_error}")
+                return
+            
+            # Calculate current portfolio value using the optimized function
+            try:
+                current_portfolio_value = await calculate_portfolio_current_value(
+                    portfolio_id=portfolio_id,
+                    symbols_data=symbols_data,
+                    upstox_api=upstox_api,
+                    kite_api=kite_api,
+                    trading_db=db
+                )
+            except Exception as value_error:
+                logger.warning(f"Error calculating current portfolio value for {portfolio_id}: {value_error}")
+                # Fallback: use the executed trade amount
+                current_portfolio_value = amount
+            
+            # Update portfolio totals
+            update_query = text("""
+                UPDATE sip_portfolios 
+                SET total_invested = total_invested + :amount,
+                    current_units = current_units + :units,
+                    current_value = :current_value,
+                    updated_at = :now
+                WHERE portfolio_id = :portfolio_id
+            """)
+            
+            await db.execute(update_query, {
+                'amount': amount,
+                'units': units,
+                'current_value': current_portfolio_value,
+                'now': datetime.now(),
+                'portfolio_id': portfolio_id
+            })
+            
+            logger.info(f"Updated portfolio {portfolio_id} totals: +{amount} invested, +{units} units, current_value={current_portfolio_value}")
+            
+        except Exception as e:
+            logger.error(f"Error updating portfolio totals for order {order_id}: {str(e)}")
+
 
     async def _update_order_status(self, order_id: str, status: str, broker: str, db: AsyncSession):
         query = """
@@ -707,15 +961,36 @@ class OrderMonitor:
             if not gtt_order:
                 logger.error(f"GTT order {gtt_id} not found in database")
                 raise HTTPException(status_code=404, detail=f"GTT order {gtt_id} not found")
-            if api:
+            
+            # Handle broker-specific cancellation
+            if api and gtt_order.broker == "Upstox":
+                try:
+                    # Upstox SDK: cancel GTT
+                    try:
+                        body = upstox_client.GttCancelOrderRequest(gtt_order_id=gtt_id)
+                        api.cancel_gtt_order(body=body)
+                    except Exception:
+                        # Some SDK versions may use path param
+                        api.cancel_gtt_order(gtt_id)
+                    logger.info(f"Upstox GTT order {gtt_id} cancelled successfully")
+                except Exception as e:
+                    logger.error(f"Error canceling Upstox GTT order {gtt_id}: {str(e)}")
+                    raise Exception(f"Failed to cancel Upstox GTT order: {str(e)}")
+            elif api and gtt_order.broker == "Zerodha":
                 api.delete_gtt(trigger_id=gtt_id)
-            query = "DELETE FROM gtt_orders WHERE gtt_order_id = :gtt_id"
-            await async_execute_query(db, text(query), {"gtt_id": gtt_id})
+
+            # Mark as cancelled in DB instead of deleting
+            update_query = """
+                UPDATE gtt_orders
+                SET status = :status
+                WHERE gtt_order_id = :gtt_id
+            """
+            await async_execute_query(db, text(update_query), {"status": "CANCELLED", "gtt_id": gtt_id})
             result = await db.execute(select(User).filter(User.user_id == gtt_order.user_id))
             user = result.scalars().first()
             if user:
-                await notify("GTT Order Deleted", f"GTT order {gtt_id} deleted", user.email)
-            return {"status": "success", "message": f"GTT order {gtt_id} deleted"}
+                await notify("GTT Order Cancelled", f"GTT order {gtt_id} cancelled", user.email)
+            return {"status": "success", "message": f"GTT order {gtt_id} cancelled"}
         except Exception as e:
             logger.error(f"Error deleting GTT order {gtt_id}: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Error deleting GTT order: {str(e)}")
@@ -870,7 +1145,7 @@ class OrderManager:
                                             order_monitor=self.order_monitor
                                         )
 
-                                        executed_order_id = response.get("order_id") if order["broker"] != 'Zerodha' else response
+                                        executed_order_id = response.data.order_ids[0] if order["broker"] != 'Zerodha' else response
 
                                         # Update order status to executed
                                         update_query = """
@@ -941,10 +1216,93 @@ class OrderManager:
 
     async def place_gtt_order(self, api, instrument_token, trading_symbol, transaction_type, quantity,
                               trigger_type, trigger_price, limit_price, last_price,
-                              second_trigger_price=None, second_limit_price=None, broker="Zerodha",
-                              db: AsyncSession = None, user_id: str = "default_user"):
+                              second_trigger_price=None, second_limit_price=None, rules: Optional[List[Dict[str, Any]]] = None,
+                              broker="Zerodha", db: AsyncSession = None, user_id: str = "default_user"):
         try:
-            if broker != "Zerodha":
+            # Handle Upstox GTT orders
+            if broker == "Upstox":
+                # Determine if caller provided full rules (preferred for Upstox)
+                provided_rules = rules if isinstance(rules, list) and len(rules) > 0 else None
+
+                # Basic validation for required Upstox GTT inputs
+                if not instrument_token:
+                    raise ValueError("Instrument key is required for Upstox GTT")
+                if quantity <= 0:
+                    raise ValueError("Quantity must be greater than 0 for GTT")
+                # When rules are provided, do not mandate top-level trigger_price
+                if not provided_rules:
+                    if not trigger_price or trigger_price <= 0:
+                        raise ValueError("Trigger price must be greater than 0 for GTT")
+                # For rules-based Upstox OCO, don't require top-level second_trigger_price
+                if not provided_rules:
+                    if trigger_type in ("two_leg", "OCO") and (second_trigger_price is None or second_trigger_price <= 0):
+                        raise ValueError("Second trigger price is required and must be > 0 for OCO GTT")
+
+                # Decide type and rules
+                # Normalize type from UI; Upstox expects SINGLE or MULTIPLE
+                type_norm = (trigger_type or "single").upper()
+                if type_norm == "OCO":
+                    type_norm = "MULTIPLE"
+                elif type_norm not in ("SINGLE", "MULTIPLE"):
+                    type_norm = "SINGLE" if not provided_rules or len(provided_rules) == 1 else "MULTIPLE"
+
+                # If caller provided full rules, use them as-is (validate minimal keys)
+                if provided_rules:
+                    normalized_rules = []
+                    # Upstox typically supports up to 2 rules; trim extras
+                    for r in provided_rules[:2]:
+                        strat = str(r.get("strategy", "ENTRY")).upper()
+                        # Map UI STOP_LOSS to API STOPLOSS
+                        if strat == "STOP_LOSS":
+                            strat = "STOPLOSS"
+                        if strat not in ("ENTRY", "STOPLOSS", "TARGET"):
+                            raise ValueError(f"Invalid rule strategy: {strat}")
+                        ttype = str(r.get("trigger_type", "ABOVE")).upper()
+                        # Upstox supports IMMEDIATE in addition to ABOVE/BELOW
+                        if ttype not in ("ABOVE", "BELOW", "IMMEDIATE"):
+                            raise ValueError(f"Invalid rule trigger_type: {ttype}")
+                        tprice = float(r.get("trigger_price"))
+                        if tprice <= 0:
+                            raise ValueError("trigger_price must be > 0 for each rule")
+                        rule_obj = {
+                            "strategy": strat,
+                            "trigger_type": ttype,
+                            "trigger_price": tprice,
+                        }
+                        normalized_rules.append(rule_obj)
+                    rules_to_send = normalized_rules
+                else:
+                    # Backward-compatible build when no rules array is provided
+                    rules_to_send = [{
+                        "strategy": "ENTRY",
+                        "trigger_type": "ABOVE" if transaction_type == "BUY" else "BELOW",
+                        "trigger_price": float(trigger_price),
+                    }]
+                    if type_norm == "MULTIPLE" and second_trigger_price is not None:
+                        rules_to_send.append({
+                            "strategy": "TARGET" if transaction_type == "BUY" else "STOPLOSS",
+                            "trigger_type": "ABOVE" if transaction_type == "BUY" else "BELOW",
+                            "trigger_price": float(second_trigger_price),
+                        })
+
+                body = {
+                    "type": type_norm,
+                    "quantity": int(quantity),
+                    "product": "D",
+                    "rules": rules_to_send,
+                    "instrument_token": instrument_token,
+                    "transaction_type": transaction_type,
+                }
+
+                logger.info(f"Placing Upstox GTT via SDK: {body}")
+                # Use SDK (OrderApiV3) - synchronous SDK
+                response = api.place_gtt_order(body=body)
+                logger.debug(f"Upstox GTT Order placed successfully - {response}")
+                
+                gtt_id = response.data.gtt_order_ids[0]
+
+                logger.info(f"Upstox GTT Order placed successfully - {gtt_id}")            
+
                 gtt_id = str(uuid.uuid4())
                 query = """
                     INSERT INTO gtt_orders (
@@ -979,26 +1337,21 @@ class OrderManager:
                 if user:
                     await notify("GTT Order Placed", f"GTT order {gtt_id} for {trading_symbol} placed", user.email)
                 return {"status": "success", "gtt_id": gtt_id}
-            condition = {
-                "exchange": "NSE",
-                "tradingsymbol": trading_symbol,
-                "last_price": last_price
-            }
-            if trigger_type == "single":
-                condition["trigger_values"] = [trigger_price]
-                orders = [{
+            elif broker == "Zerodha":
+                # Normalize trigger type for Kite Connect
+                ttype_in = (trigger_type or "single").strip().lower()
+                kite_trigger_type = "single"
+                if ttype_in in ("two-leg", "two_leg", "oco", "o-c-o"):
+                    kite_trigger_type = "two-leg"
+
+                condition = {
                     "exchange": "NSE",
                     "tradingsymbol": trading_symbol,
-                    "product": "CNC",
-                    "order_type": "LIMIT",
-                    "transaction_type": transaction_type,
-                    "quantity": quantity,
-                    "price": limit_price
-                }]
-            else:
-                condition["trigger_values"] = [trigger_price, second_trigger_price]
-                orders = [
-                    {
+                    "last_price": last_price
+                }
+                if kite_trigger_type == "single":
+                    condition["trigger_values"] = [trigger_price]
+                    orders = [{
                         "exchange": "NSE",
                         "tradingsymbol": trading_symbol,
                         "product": "CNC",
@@ -1006,37 +1359,70 @@ class OrderManager:
                         "transaction_type": transaction_type,
                         "quantity": quantity,
                         "price": limit_price
-                    },
-                    {
-                        "exchange": "NSE",
-                        "tradingsymbol": trading_symbol,
-                        "product": "CNC",
-                        "order_type": "LIMIT",
-                        "transaction_type": transaction_type,
-                        "quantity": quantity,
-                        "price": second_limit_price
-                    }
-                ]
-            response = api.place_gtt(
-                trigger_type=trigger_type,
-                tradingsymbol=trading_symbol,
-                exchange="NSE",
-                trigger_values=condition["trigger_values"],
-                last_price=condition["last_price"],
-                orders=orders
-            )
-            logger.info(f"GTT Order placed successfully - {response}")
-            gtt_id = str(response.get("trigger_id"))
+                    }]
+                else:
+                    condition["trigger_values"] = [trigger_price, second_trigger_price]
+                    orders = [
+                        {
+                            "exchange": "NSE",
+                            "tradingsymbol": trading_symbol,
+                            "product": "CNC",
+                            "order_type": "LIMIT",
+                            "transaction_type": transaction_type,
+                            "quantity": quantity,
+                            "price": limit_price
+                        },
+                        {
+                            "exchange": "NSE",
+                            "tradingsymbol": trading_symbol,
+                            "product": "CNC",
+                            "order_type": "LIMIT",
+                            "transaction_type": transaction_type,
+                            "quantity": quantity,
+                            "price": second_limit_price
+                        }
+                    ]
+                
+                logger.debug(f"Placing Zerodha GTT order - condition: {condition}\n Orders: {orders} \n Trigger type: {kite_trigger_type}")
+                try:
+                    response = api.place_gtt(
+                    
+                    trigger_type=kite_trigger_type,
+                    tradingsymbol=trading_symbol,
+                    exchange="NSE",
+                    trigger_values=condition["trigger_values"],
+                    last_price=condition["last_price"],
+                    orders=orders
+                )
+                except Exception as ze:
+                    # Log more details and rethrow for caller
+                    logger.error(f"Zerodha place_gtt error for {trading_symbol}: {ze!r}")
+                    raise
+                logger.info(f"GTT Order placed successfully - {response}")
+                gtt_id = str(response.get("trigger_id"))
+
+            # Derive gtt_type if possible
+            derived_gtt_type = "SINGLE"
+            try:
+                if rules and isinstance(rules, list) and len(rules) > 1:
+                    derived_gtt_type = "MULTIPLE"
+                elif trigger_type and str(trigger_type).lower() not in ("single", "two_leg"):
+                    # Map unknowns conservatively
+                    derived_gtt_type = "SINGLE"
+                elif trigger_type and str(trigger_type).lower() == "two_leg":
+                    derived_gtt_type = "MULTIPLE"
+            except Exception:
+                derived_gtt_type = "SINGLE"
 
             query = """
                 INSERT INTO gtt_orders (
                     gtt_order_id, instrument_token, trading_symbol, transaction_type, quantity,
                     trigger_type, trigger_price, limit_price, last_price, second_trigger_price, second_limit_price,
-                    status, broker, created_at, user_id
+                    status, broker, created_at, user_id, gtt_type, rules
                 ) VALUES (
                     :gtt_id, :instrument_token, :trading_symbol, :transaction_type, :quantity,
                     :trigger_type, :trigger_price, :limit_price, :last_price, :second_trigger_price,
-                    :second_limit_price, :status, :broker, :created_at, :user_id
+                    :second_limit_price, :status, :broker, :created_at, :user_id, :gtt_type, :rules
                 )
             """
             await async_execute_query(db, text(query), {
@@ -1054,7 +1440,9 @@ class OrderManager:
                 "status": "active",
                 "broker": broker,
                 "created_at": datetime.now(),
-                "user_id": user_id
+                "user_id": user_id,
+                "gtt_type": derived_gtt_type,
+                "rules": rules
             })
             result = await db.execute(select(User).filter(User.user_id == user_id))
             user = result.scalars().first()
@@ -1067,33 +1455,124 @@ class OrderManager:
 
     async def modify_gtt_order(self, api, gtt_id: str, trigger_type: str, trigger_price: float, limit_price: float,
                                last_price: float, quantity: int, second_trigger_price: Optional[float] = None,
-                               second_limit_price: Optional[float] = None, db: AsyncSession = None):
+                               second_limit_price: Optional[float] = None, rules: Optional[List[Dict[str, Any]]] = None,
+                               db: AsyncSession = None):
         try:
             stmt = select(GTTOrder).where(GTTOrder.gtt_order_id == gtt_id)
             result = await db.execute(stmt)
             gtt_order = result.scalars().first()
             if not gtt_order:
                 raise ValueError(f"GTT order {gtt_id} not found")
-            condition = {
-                "exchange": "NSE",
-                "tradingsymbol": gtt_order.trading_symbol,
-                "last_price": last_price
-            }
-            if trigger_type == "single":
-                condition["trigger_values"] = [trigger_price]
-                orders = [{
+            
+            # Handle Upstox GTT modification
+            if gtt_order.broker == "Upstox":
+                try:
+                    # Enhanced Upstox GTT modification based on API documentation
+                    provided_rules = rules if isinstance(rules, list) and len(rules) > 0 else None
+                    
+                    # Determine GTT type based on trigger_type and rules
+                    type_norm = (trigger_type or "SINGLE").upper()
+                    if type_norm == "OCO":
+                        type_norm = "MULTIPLE"
+                    elif type_norm not in ("SINGLE", "MULTIPLE"):
+                        type_norm = "SINGLE" if not provided_rules or len(provided_rules) == 1 else "MULTIPLE"
+
+                    # Build rules array for Upstox API
+                    if provided_rules:
+                        # Use provided rules directly (preferred method)
+                        normalized_rules = []
+                        for r in provided_rules[:3]:  # Upstox supports max 3 rules
+                            strat = str(r.get("strategy", "ENTRY")).upper()
+                            # Map UI STOP_LOSS to API STOPLOSS
+                            if strat == "STOP_LOSS":
+                                strat = "STOPLOSS"
+                            if strat not in ("ENTRY", "STOPLOSS", "TARGET"):
+                                raise ValueError(f"Invalid rule strategy: {strat}")
+                            
+                            ttype = str(r.get("trigger_type", "ABOVE")).upper()
+                            # Upstox supports ABOVE, BELOW, IMMEDIATE
+                            if ttype not in ("ABOVE", "BELOW", "IMMEDIATE"):
+                                raise ValueError(f"Invalid rule trigger_type: {ttype}")
+                            
+                            tprice = float(r.get("trigger_price"))
+                            if tprice <= 0:
+                                raise ValueError("trigger_price must be > 0 for each rule")
+                            
+                            rule_obj = {
+                                "strategy": strat,
+                                "trigger_type": ttype,
+                                "trigger_price": tprice,
+                            }
+                            
+                            # Add trailing_gap for STOPLOSS strategy if specified
+                            if strat == "STOPLOSS" and r.get("trailing_gap"):
+                                rule_obj["trailing_gap"] = float(r.get("trailing_gap"))
+                            
+                            normalized_rules.append(rule_obj)
+                        rules_to_send = normalized_rules
+                    else:
+                        # Backward-compatible build when no rules array is provided
+                        rules_to_send = [{
+                            "strategy": "ENTRY",
+                            "trigger_type": "ABOVE" if gtt_order.transaction_type == "BUY" else "BELOW",
+                            "trigger_price": float(trigger_price)
+                        }]
+                        
+                        if type_norm == "MULTIPLE" and second_trigger_price:
+                            rules_to_send.append({
+                                "strategy": "TARGET" if gtt_order.transaction_type == "BUY" else "STOPLOSS",
+                                "trigger_type": "ABOVE" if gtt_order.transaction_type == "BUY" else "BELOW",
+                                "trigger_price": float(second_trigger_price)
+                            })
+
+                    # Validate rules according to Upstox API requirements
+                    if not rules_to_send:
+                        raise ValueError("At least one rule is required for GTT order")
+                    
+                    if type_norm == "SINGLE" and len(rules_to_send) != 1:
+                        raise ValueError("SINGLE type GTT must have exactly one rule")
+                    
+                    if type_norm == "MULTIPLE" and (len(rules_to_send) < 2 or len(rules_to_send) > 3):
+                        raise ValueError("MULTIPLE type GTT must have 2-3 rules")
+                    
+                    # Ensure ENTRY strategy is present
+                    entry_rules = [r for r in rules_to_send if r["strategy"] == "ENTRY"]
+                    if not entry_rules:
+                        raise ValueError("ENTRY strategy is required for GTT order")
+                    
+                    # Check for duplicate strategies
+                    strategies = [r["strategy"] for r in rules_to_send]
+                    if len(strategies) != len(set(strategies)):
+                        raise ValueError("Duplicate strategies are not allowed in GTT rules")
+
+                    # Build request body according to Upstox API documentation
+                    body = {
+                        "type": type_norm,
+                        "quantity": int(quantity),
+                        "rules": rules_to_send,
+                        "gtt_order_id": gtt_id
+                    }
+
+                    logger.info(f"Modifying Upstox GTT order {gtt_id} with body: {body}")
+                    
+                    # Call Upstox API to modify GTT order
+                    response = api.modify_gtt_order(body=body)
+                    logger.info(f"Upstox GTT order {gtt_id} modified successfully: {response}")
+                    
+                except Exception as e:
+                    logger.error(f"Error modifying Upstox GTT order {gtt_id}: {str(e)}")
+                    raise Exception(f"Failed to modify Upstox GTT order: {str(e)}")
+            
+            # Handle Zerodha GTT modification  
+            elif gtt_order.broker == "Zerodha":
+                condition = {
                     "exchange": "NSE",
                     "tradingsymbol": gtt_order.trading_symbol,
-                    "product": "CNC",
-                    "order_type": "LIMIT",
-                    "transaction_type": gtt_order.transaction_type,
-                    "quantity": quantity,
-                    "price": limit_price
-                }]
-            else:
-                condition["trigger_values"] = [trigger_price, second_trigger_price]
-                orders = [
-                    {
+                    "last_price": last_price
+                }
+                if trigger_type == "single":
+                    condition["trigger_values"] = [trigger_price]
+                    orders = [{
                         "exchange": "NSE",
                         "tradingsymbol": gtt_order.trading_symbol,
                         "product": "CNC",
@@ -1101,34 +1580,70 @@ class OrderManager:
                         "transaction_type": gtt_order.transaction_type,
                         "quantity": quantity,
                         "price": limit_price
-                    },
-                    {
-                        "exchange": "NSE",
-                        "tradingsymbol": gtt_order.trading_symbol,
-                        "product": "CNC",
-                        "order_type": "LIMIT",
-                        "transaction_type": gtt_order.transaction_type,
-                        "quantity": quantity,
-                        "price": second_limit_price
-                    }
-                ]
-            api.modify_gtt(
-                trigger_id=gtt_id,
-                trigger_type=trigger_type,
-                tradingsymbol=gtt_order.trading_symbol,
-                exchange="NSE",
-                trigger_values=condition["trigger_values"],
-                last_price=condition["last_price"],
-                orders=orders
-            )
-            query = """
+                    }]
+                else:
+                    condition["trigger_values"] = [trigger_price, second_trigger_price]
+                    orders = [
+                        {
+                            "exchange": "NSE",
+                            "tradingsymbol": gtt_order.trading_symbol,
+                            "product": "CNC",
+                            "order_type": "LIMIT",
+                            "transaction_type": gtt_order.transaction_type,
+                            "quantity": quantity,
+                            "price": limit_price
+                        },
+                        {
+                            "exchange": "NSE",
+                            "tradingsymbol": gtt_order.trading_symbol,
+                            "product": "CNC",
+                            "order_type": "LIMIT",
+                            "transaction_type": gtt_order.transaction_type,
+                            "quantity": quantity,
+                            "price": second_limit_price
+                        }
+                    ]
+                api.modify_gtt(
+                    trigger_id=gtt_id,
+                    trigger_type=trigger_type,
+                    tradingsymbol=gtt_order.trading_symbol,
+                    exchange="NSE",
+                    trigger_values=condition["trigger_values"],
+                    last_price=condition["last_price"],
+                    orders=orders
+                )
+            
+            # Update database with modified values (including optional rules and gtt_type)
+            # Compute gtt_type if rules suggest multi-leg
+            derived_gtt_type = None
+            try:
+                if rules is not None:
+                    derived_gtt_type = "MULTIPLE" if isinstance(rules, list) and len(rules) > 1 else "SINGLE"
+                elif trigger_type is not None:
+                    derived_gtt_type = "MULTIPLE" if str(trigger_type).lower() == "two_leg" else "SINGLE"
+            except Exception:
+                derived_gtt_type = None
+
+            set_clauses = [
+                "trigger_type = :trigger_type",
+                "trigger_price = :trigger_price",
+                "limit_price = :limit_price",
+                "second_trigger_price = :second_trigger_price",
+                "second_limit_price = :second_limit_price",
+                "quantity = :quantity",
+                "last_price = :last_price"
+            ]
+            if rules is not None:
+                set_clauses.append("rules = :rules")
+            if derived_gtt_type is not None:
+                set_clauses.append("gtt_type = :gtt_type")
+
+            query = f"""
                 UPDATE gtt_orders
-                SET trigger_type = :trigger_type, trigger_price = :trigger_price, limit_price = :limit_price,
-                    second_trigger_price = :second_trigger_price, second_limit_price = :second_limit_price,
-                    quantity = :quantity, last_price = :last_price
+                SET {', '.join(set_clauses)}
                 WHERE gtt_order_id = :gtt_id
             """
-            await async_execute_query(db, text(query), {
+            params = {
                 "gtt_id": gtt_id,
                 "trigger_type": trigger_type,
                 "trigger_price": trigger_price,
@@ -1137,7 +1652,14 @@ class OrderManager:
                 "second_limit_price": second_limit_price,
                 "quantity": quantity,
                 "last_price": last_price
-            })
+            }
+            if rules is not None:
+                params["rules"] = rules
+            if derived_gtt_type is not None:
+                params["gtt_type"] = derived_gtt_type
+
+            await async_execute_query(db, text(query), params)
+            
             result = await db.execute(select(User).filter(User.user_id == gtt_order.user_id))
             user = result.scalars().first()
             if user:
@@ -1162,6 +1684,7 @@ async def init_upstox_api(db: AsyncSession, user_id: str, auth_code: Optional[st
             api_client = upstox_client.ApiClient(config)
             upstox_apis = {
                 "order": upstox_client.OrderApiV3(api_client),
+                "order_v2": upstox_client.OrderApi(api_client),
                 "portfolio": upstox_client.PortfolioApi(api_client),
                 "market_data": upstox_client.MarketQuoteApi(api_client),
                 "market_data_v3": upstox_client.MarketQuoteV3Api(api_client),
@@ -1266,7 +1789,7 @@ async def fetch_zerodha_access_token(db: AsyncSession, user_id: str, request_tok
         return None
 
 async def place_order(api, instrument_token, trading_symbol, transaction_type, quantity, price=0, order_type="MARKET",
-                      trigger_price=0, is_amo=False, product_type="D", validity='DAY', stop_loss=None, target=None,
+                      trigger_price=0, is_amo=False, product_type=None, validity='DAY', stop_loss=None, target=None,
                       broker="Upstox", db: AsyncSession = None, upstox_apis=None, kite_apis=None,
                       user_id: str = "default_user", order_monitor=None, is_trailing_stop_loss=False,
                       trailing_stop_loss_percent=None, trail_start_target_percent=None):
@@ -1276,6 +1799,10 @@ async def place_order(api, instrument_token, trading_symbol, transaction_type, q
         if price < 0 or trigger_price < 0:
             raise ValueError("Price and trigger price cannot be negative")
 
+        # Set default product type based on broker if not provided
+        if product_type is None:
+            product_type = "CNC" if broker == "Zerodha" else "D"
+
         # Validate trailing stop loss parameters
         if is_trailing_stop_loss:
             if not trailing_stop_loss_percent or trailing_stop_loss_percent <= 0:
@@ -1283,83 +1810,128 @@ async def place_order(api, instrument_token, trading_symbol, transaction_type, q
             if not trail_start_target_percent or trail_start_target_percent <= 0:
                 raise ValueError("Trail start target percentage must be greater than 0")
 
-        if broker == "Upstox":
-            order = upstox_client.PlaceOrderRequest(
-                quantity=quantity,
-                product=product_type,
-                validity=validity,
-                price=price,
-                tag="API Order",
-                instrument_token=instrument_token,
-                order_type=order_type,
-                transaction_type=transaction_type,
-                disclosed_quantity=0,
-                trigger_price=trigger_price,
-                is_amo=is_amo
-            )
-            response = api.place_order(order, api_version="v2")
-            primary_order_id = response.data.order_id
-        else:
-            zerodha_validity = "DAY" if validity == "DAY" else "IOC"
-            order_params = {
-                "tradingsymbol": trading_symbol,
-                "exchange": "NSE",
+        # CRITICAL SECURITY FIX: Wrap order placement and database save in transaction
+        primary_order_id = None
+        response = None
+
+        # Check if transaction is already active, if not start a new one
+        transaction_started_here = False
+        if not db.in_transaction():
+            await db.begin()
+            transaction_started_here = True
+
+        try:
+            # Step 1: Place order with broker
+            if broker == "Upstox":
+                order = upstox_client.PlaceOrderV3Request(
+                    quantity=quantity,
+                    product=product_type,
+                    validity=validity,
+                    price=price if order_type in ["LIMIT", "SL"] else 0,
+                    tag="API Order",
+                    instrument_token=instrument_token,
+                    order_type=order_type,
+                    transaction_type=transaction_type,
+                    disclosed_quantity=0,
+                    trigger_price=trigger_price if order_type in ["SL", "SL-M"] else 0,
+                    is_amo=is_amo,
+                    slice=True
+                )
+                response = api.place_order(order)
+                logger.debug(f"Placed order: {response}")
+
+                # Handle Upstox response which contains order_ids (plural) as an array
+                if hasattr(response.data, 'order_ids') and response.data.order_ids:
+                    primary_order_id = response.data.order_ids[0]  # Take the first order ID
+                elif hasattr(response.data, 'order_id'):
+                    primary_order_id = response.data.order_id  # Fallback for single order_id
+                else:
+                    raise ValueError("No order ID found in Upstox response")
+            else:
+                zerodha_validity = "DAY" if validity == "DAY" else "IOC"
+                order_params = {
+                    "tradingsymbol": trading_symbol,
+                    "exchange": "NSE",
+                    "transaction_type": transaction_type,
+                    "order_type": order_type,
+                    "quantity": quantity,
+                    "product": product_type,
+                    "validity": zerodha_validity,
+                    "price": price if order_type in ["LIMIT", "SL"] else 0,
+                    "trigger_price": trigger_price if order_type in ["SL", "SL-M"] else 0,
+                    "tag": "API Order"
+                }
+                response = api.place_order(
+                    variety=api.VARIETY_REGULAR if not is_amo else api.VARIETY_AMO,
+                    **order_params
+                )
+                primary_order_id = response
+
+            # Step 2: If broker order succeeds, prepare database record
+            if not primary_order_id:
+                raise ValueError("Order placement failed - no order ID received")
+
+            order_data_dict = {
+                "order_id": primary_order_id,
+                "broker": broker,
+                "trading_symbol": trading_symbol,
+                "instrument_token": instrument_token,
                 "transaction_type": transaction_type,
-                "order_type": order_type,
                 "quantity": quantity,
-                "product": product_type,
-                "validity": zerodha_validity,
-                "price": price if order_type in ["LIMIT", "SL"] else 0,
-                "trigger_price": trigger_price if order_type in ["SL", "SL-M"] else 0,
-                "tag": "StreamlitOrder"
+                "order_type": order_type,
+                "price": price,
+                "trigger_price": trigger_price,
+                "product_type": product_type,
+                "status": "PENDING",
+                "remarks": "Order placed via API",
+                "order_timestamp": datetime.now(),
+                "user_id": user_id,
+                "stop_loss": stop_loss if stop_loss is not None else 0,
+                "target": target if target is not None else 0,
+                "is_amo": is_amo
             }
-            response = api.place_order(
-                variety=api.VARIETY_REGULAR if not is_amo else api.VARIETY_AMO,
-                **order_params
-            )
-            primary_order_id = response
 
-        # Prepare order data for database
-        order_data_dict = {
-            "order_id": primary_order_id,
-            "broker": broker,
-            "trading_symbol": trading_symbol,
-            "instrument_token": instrument_token,
-            "transaction_type": transaction_type,
-            "quantity": quantity,
-            "order_type": order_type,
-            "price": price,
-            "trigger_price": trigger_price,
-            "product_type": product_type,
-            "status": "PENDING",
-            "remarks": "Order placed via API",
-            "order_timestamp": datetime.now(),
-            "user_id": user_id,
-            "stop_loss": stop_loss if stop_loss is not None else 0,
-            "target": target if target is not None else 0,
-            "is_amo": is_amo
-        }
+            # Add trailing stop loss information if enabled
+            if is_trailing_stop_loss:
+                order_data_dict.update({
+                    "is_trailing_stop_loss": True,
+                    "trailing_stop_loss_percent": trailing_stop_loss_percent,
+                    "trail_start_target_percent": trail_start_target_percent,
+                    "trailing_activated": False,
+                    "highest_price_achieved": None
+                })
+            else:
+                order_data_dict.update({
+                    "is_trailing_stop_loss": False,
+                    "trailing_stop_loss_percent": None,
+                    "trail_start_target_percent": None,
+                    "trailing_activated": None,
+                    "highest_price_achieved": None
+                })
 
-        # Add trailing stop loss information if enabled
-        if is_trailing_stop_loss:
-            order_data_dict.update({
-                "is_trailing_stop_loss": True,
-                "trailing_stop_loss_percent": trailing_stop_loss_percent,
-                "trail_start_target_percent": trail_start_target_percent,
-                "trailing_activated": False,  # Track if trailing has been activated
-                "highest_price_achieved": None  # Track highest price reached for trailing
-            })
-        else:
-            order_data_dict.update({
-                "is_trailing_stop_loss": False,
-                "trailing_stop_loss_percent": None,
-                "trail_start_target_percent": None,
-                "trailing_activated": None,
-                "highest_price_achieved": None
-            })
+            # Step 3: Save to database within the same transaction
+            order_data = pd.DataFrame([order_data_dict])
+            await load_sql_data(order_data, "orders", load_type="append", index_required=False, db=db)
 
-        order_data = pd.DataFrame([order_data_dict])
-        await load_sql_data(order_data, "orders", load_type="append", index_required=False, db=db)
+            # Commit transaction if we started it here
+            if transaction_started_here:
+                await db.commit()
+
+            logger.info(f"Order successfully placed and saved: {primary_order_id} for {trading_symbol}, user {user_id}")
+
+        except Exception as db_error:
+            logger.error(f"Transaction failed - order {primary_order_id} might need manual cleanup: {db_error}")
+            # Rollback transaction if we started it here
+            if transaction_started_here:
+                await db.rollback()
+            # But we need to consider if the broker order was already placed
+            if primary_order_id:
+                logger.critical(f"CRITICAL: Order {primary_order_id} was placed with {broker} but database save failed. Manual intervention required!")
+                # In production, you might want to:
+                # 1. Send alert to admin
+                # 2. Attempt order cancellation with broker
+                # 3. Log to special error table for manual processing
+            raise db_error
 
         result = await db.execute(select(User).filter(User.user_id == user_id))
         user = result.scalars().first()
@@ -1407,7 +1979,7 @@ async def modify_order(api, order_id: str, quantity: Optional[int] = None, order
                 trigger_price=modified_params["trigger_price"],
                 validity=modified_params["validity"]
             )
-            response = api.modify_order(order_id, modify_request, api_version="v2")
+            response = api.modify_order(order_id, modify_request)
         else:
             zerodha_validity = "DAY" if modified_params["validity"] == "DAY" else "IOC"
             response = api.modify_order(
@@ -1447,7 +2019,7 @@ async def get_order_book(upstox_api, kite_api):
     try:
         orders = []
         if upstox_api:
-            upstox_orders = upstox_api.get_order_book(api_version="v2").data
+            upstox_orders = upstox_api.get_order_book().data
             for order in upstox_orders:
                 order_dict = order.to_dict()
                 orders.append({
@@ -1556,6 +2128,7 @@ async def get_portfolio(upstox_api, zerodha_api):
                     "Broker": "Zerodha",
                     "Symbol": holding.get("tradingsymbol", ""),
                     "Exchange": holding.get("exchange", ""),
+                    "Product": holding.get("product", ""),
                     "Quantity": holding.get("quantity", 0),
                     "LastPrice": holding.get("last_price", 0),
                     "AvgPrice": holding.get("average_price", 0),
@@ -1651,19 +2224,39 @@ async def get_quotes(upstox_api, kite_api, instruments: List[str], db: AsyncSess
         try:
             return await get_quotes_from_nse(instruments, db)
         except Exception as e:
-            logger.error(f"Error fetching OHLC data from NSE: {str(e)}")
+            logger.error(f"Error fetching quotes from NSE: {str(e)}")
             raise HTTPException(status_code=400, detail="Upstox API required for quotes")
+
     try:
-        response = upstox_api.get_full_market_quote(",".join(instruments), api_version="v2").data
+        # Convert trading symbols to proper instrument keys
+        instruments_map = await fetch_symbols_for_instruments(db, instruments)
+        upstox_instrument_keys = [inst.instrument_token for inst in instruments_map]
+
+        if not upstox_instrument_keys:
+            logger.warning(f"No valid instrument keys found for: {instruments}")
+            return await get_quotes_from_nse(instruments, db)
+
+        logger.debug(f"Converting symbols {instruments} to instrument keys: {upstox_instrument_keys}")
+
+        response = upstox_api.get_full_market_quote(symbol=",".join(upstox_instrument_keys), api_version="v2").data
         quotes = []
+
         for instrument, quote in response.items():
             quote_dict = quote.to_dict()
+
+            # Find the corresponding trading symbol from our mapping
+            trading_symbol = ""
+            for inst_map in instruments_map:
+                if inst_map.instrument_token == instrument:
+                    trading_symbol = inst_map.trading_symbol
+                    break
+
             quotes.append(QuoteResponse(
-                instrument_token=quote_dict.get("instrument_token", quote_dict.get("symbol", "")),
-                trading_symbol=quote_dict.get("symbol", ""),
+                instrument_token=instrument,
+                trading_symbol=trading_symbol or instrument.split(":")[-1],
                 last_price=quote_dict.get("last_price", 0.0),
                 net_change=quote_dict.get("net_change", 0.0),
-                pct_change=round((quote_dict.get("net_change", 0.0)/quote_dict.get("last_price", 0.0))*100, 2),
+                pct_change=round((quote_dict.get("net_change", 0.0)/quote_dict.get("last_price", 1.0))*100, 2) if quote_dict.get("last_price", 0.0) > 0 else 0.0,
                 volume=quote_dict.get("volume", 0),
                 average_price=quote_dict.get("average_price"),
                 ohlc={
@@ -1680,7 +2273,7 @@ async def get_quotes(upstox_api, kite_api, instruments: List[str], db: AsyncSess
         try:
             return await get_quotes_from_nse(instruments, db)
         except Exception as e:
-            logger.error(f"Error fetching OHLC data from NSE: {str(e)}")
+            logger.error(f"Error fetching quotes from NSE fallback: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
 
 async def get_ohlc_from_nse(instruments: List[str], db: AsyncSession = None) -> List[OHLCResponse]:
@@ -1745,18 +2338,40 @@ async def get_ohlc(upstox_api, kite_api, instruments: List[str], db: AsyncSessio
             except Exception as e:
                 logger.error(f"Error fetching OHLC data from openchart: {str(e)}")
                 raise HTTPException(status_code=400, detail="Upstox API required for OHLC")
+
     try:
-        response = upstox_api.get_market_quote_ohlc(",".join(instruments), interval="1d", api_version="v2").data
+        # Convert trading symbols to proper instrument keys
+        instruments_map = await fetch_symbols_for_instruments(db, instruments)
+        upstox_instrument_keys = [inst.instrument_token for inst in instruments_map]
+
+        if not upstox_instrument_keys:
+            logger.warning(f"No valid instrument keys found for: {instruments}")
+            return await get_ohlc_from_nse(instruments, db)
+
+        logger.debug(f"Converting symbols {instruments} to instrument keys: {upstox_instrument_keys}")
+
+        response = upstox_api.get_market_quote_ohlc(interval="1d", instrument_key= ",".join(upstox_instrument_keys)).data
+        logger.debug("OHLC Response: " + str(response))
         ohlc_data = []
+
         for instrument, ohlc in response.items():
             ohlc_dict = ohlc.to_dict()
+
+            # Find the corresponding trading symbol from our mapping
+            trading_symbol = ""
+            for inst_map in instruments_map:
+                if inst_map.instrument_token == instrument:
+                    trading_symbol = inst_map.trading_symbol
+                    break
+
             ohlc_data.append(OHLCResponse(
                 instrument_token=instrument,
-                trading_symbol=instrument.split(":")[-1],
-                open=ohlc_dict.get("ohlc", {}).get("open", 0.0),
-                high=ohlc_dict.get("ohlc", {}).get("high", 0.0),
-                low=ohlc_dict.get("ohlc", {}).get("low", 0.0),
-                close=ohlc_dict.get("ohlc", {}).get("close", 0.0),
+                trading_symbol=trading_symbol or instrument.split(":")[-1],
+                open=ohlc_dict.get("live_ohlc", {}).get("open", 0.0),
+                high=ohlc_dict.get("live_ohlc", {}).get("high", 0.0),
+                low=ohlc_dict.get("live_ohlc", {}).get("low", 0.0),
+                close=ohlc_dict.get("live_ohlc", {}).get("close", 0.0),
+                previous_close=ohlc_dict.get("prev_ohlc", {}).get("close", 0.0) if ohlc_dict.get("prev_ohlc") else 0.0,
                 volume=ohlc_dict.get("volume")
             ))
         return ohlc_data
@@ -1783,7 +2398,7 @@ async def get_ltp_from_nse(instruments: List[str], db: AsyncSession = None) -> L
                 raw_data = live_data[instrument.trading_symbol]
             else:
                 logger.warning(f"No live data found for {instrument.trading_symbol}, fetching from NSE API")
-                raw_data = market_data.nse_get_quote(instrument.trading_symbol, security_type="NIFTY_500")
+                raw_data = market_data.nse_symbol_quote(instrument.trading_symbol)
 
             ohlc_data.append(LTPResponse(
                 instrument_token=instrument.instrument_token,
@@ -1828,57 +2443,81 @@ async def get_ltp(upstox_api, kite_api, instruments: List[str], db: AsyncSession
                 return await get_ltp_openchart(instruments, db)
             except Exception as e:
                 logger.error(f"Error fetching LTP data from openchart: {str(e)}")
-                raise HTTPException(status_code=400, detail="Upstox API required for OHLC")
+                raise HTTPException(status_code=400, detail="Upstox API required for LTP")
+
     try:
-        response = upstox_api.ltp(",".join(instruments), api_version="v2").data
+        # Convert trading symbols to proper instrument keys
+        instruments_map = await fetch_symbols_for_instruments(db, instruments)
+        upstox_instrument_keys = [inst.instrument_token for inst in instruments_map]
+
+        if not upstox_instrument_keys:
+            logger.warning(f"No valid instrument keys found for: {instruments}")
+            return await get_ltp_from_nse(instruments, db)
+
+        logger.debug(f"Converting symbols {instruments} to instrument keys: {upstox_instrument_keys}")
+
+        response = upstox_api.get_ltp(instrument_key=",".join(upstox_instrument_keys)).data
+        logger.debug("LTP Response: " + str(response))
         ltp_data = []
+
         for instrument, quote in response.items():
             quote_dict = quote.to_dict()
+
+            # Find the corresponding trading symbol from our mapping
+            trading_symbol = ""
+            for inst_map in instruments_map:
+                if inst_map.instrument_token == instrument:
+                    trading_symbol = inst_map.trading_symbol
+                    break
+
             ltp_data.append(LTPResponse(
-                instrument_token=quote_dict.get("instrument_token"),
-                trading_symbol=instrument.split(":")[-1],
-                last_price=quote_dict.get("last_price", 0.0)
+                instrument_token=instrument,
+                trading_symbol=trading_symbol or instrument.split(":")[-1],
+                last_price=quote_dict.get("last_price", 0.0),
+                volume=quote_dict.get("volume", 0),
+                previous_close=quote_dict.get("cp", 0.0),
             ))
         return ltp_data
     except Exception as e:
         logger.error(f"Error fetching LTP: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        try:
+            return await get_ltp_from_nse(instruments, db)
+        except Exception as e:
+            logger.error(f"Error fetching LTP data from NSE fallback: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
 
 async def get_historical_data(upstox_api, upstox_access_token, trading_symbol: str,
                               from_date: str, to_date: str, unit: str,
-                              interval: str, instrument: str = None, db: AsyncSession = None, nse_db: AsyncSession = None) -> HistoricalDataResponse:
-    logger.info(f"Fetching historical data for {trading_symbol} from {from_date} to {to_date}")
+                              interval: str, instrument: str = None, db: AsyncSession = None, nse_db: AsyncSession = None, source: str = "default") -> HistoricalDataResponse:
+    logger.info(f"Fetching historical data for {trading_symbol} from {from_date} to {to_date}, unit: {unit}, interval: {interval}, source: {source}")
     data_points = []
 
     # Convert dates to datetime objects for comparison
     from_date_dt = datetime.strptime(from_date, "%Y-%m-%d")
     to_date_dt = datetime.strptime(to_date, "%Y-%m-%d")
 
-    # Try openchart first for NSE stocks
-    try:
-        logger.info(f"Trying openchart for NSE stock: {trading_symbol}")
-        data = load_stock_history(trading_symbol, from_date_dt, to_date_dt, interval=interval, load=False)
+    # Define data fetching functions
+    async def fetch_from_db():
+        """Fetch data from database with interval-specific table handling"""
+        if not db or not nse_db:
+            return []
 
-        if not data.empty:
-            for _, row in data.iterrows():
-                data_points.append(HistoricalDataPoint(
-                    timestamp=row["timestamp"],
-                    open=float(row["open"]),
-                    high=float(row["high"]),
-                    low=float(row["low"]),
-                    close=float(row["close"]),
-                    volume=int(row["volume"])
-                ))
-            logger.info(f"Successfully fetched {len(data_points)} data points from openchart")
-    except Exception as e:
-        logger.warning(f"Failed to fetch data from openchart: {str(e)}")
-
-    # If both external sources failed, try the database
-    if not data_points and db and nse_db:
         try:
-            # Extract clean table name from instrument
-            table_name = trading_symbol.replace(" ", "_").replace("-", "_")
-            logger.info(f"Trying database table '{table_name}' for historical data")
+            # Determine table name based on interval type
+            base_table_name = trading_symbol.replace(" ", "_").replace("-", "_")
+
+            if unit.lower() == 'day' and interval == '1':
+                table_name = base_table_name  # Daily data in base table
+            elif unit.lower() == 'week':
+                table_name = f"{base_table_name}_W"  # Weekly data in _W table
+            elif unit.lower() == 'month':
+                table_name = f"{base_table_name}_M"  # Monthly data in _M table
+            else:
+                # For minute, hour or other intervals, only stored in day tables
+                logger.info(f"Unit '{unit}' with interval '{interval}' not available in database, skipping DB source")
+                return []
+
+            logger.info(f"Trying database table '{table_name}' for {unit} interval historical data")
 
             query = f"""
                 SELECT * FROM \"{table_name}\"
@@ -1886,21 +2525,20 @@ async def get_historical_data(upstox_api, upstox_access_token, trading_symbol: s
                 ORDER BY timestamp
             """
 
-            # Use parameterized query safely
             result = await async_fetch_query(
                 nse_db,
                 text(query),
                 {"from_date": from_date_dt, "to_date": to_date_dt}
             )
 
+            db_points = []
             if result:
                 for row in result:
-                    # Convert database row to HistoricalDataPoint
                     date_val = row.get('timestamp')
                     if isinstance(date_val, str):
                         date_val = datetime.strptime(date_val, "%Y-%m-%d")
 
-                    data_points.append(HistoricalDataPoint(
+                    db_points.append(HistoricalDataPoint(
                         timestamp=date_val,
                         open=float(row.get('open', 0)),
                         high=float(row.get('high', 0)),
@@ -1908,22 +2546,41 @@ async def get_historical_data(upstox_api, upstox_access_token, trading_symbol: s
                         close=float(row.get('close', 0)),
                         volume=int(row.get('volume', 0))
                     ))
-                logger.info(f"Successfully fetched {len(data_points)} data points from database")
+                logger.info(f"Successfully fetched {len(db_points)} data points from database")
+            return db_points
         except Exception as e:
             logger.error(f"Error fetching from database: {str(e)}")
+            return []
 
-    # If openchart didn't work, try Upstox API
-    if not data_points and upstox_api:
+    async def fetch_from_upstox():
+        """Fetch data from Upstox API with proper interval handling"""
+        if not upstox_api:
+            return []
+
         try:
-            logger.info(f"Trying Upstox API for {trading_symbol}")
+            logger.info(f"Trying Upstox API for {trading_symbol} with unit: {unit}, interval: {interval}")
             headers = {"Authorization": f"Bearer {upstox_access_token}"}
-            url = f"https://api.upstox.com/v3/historical-candle/{instrument}/{unit}/{interval}/{to_date}/{from_date}"
+
+            # Map unit to Upstox API format (Upstox uses plural forms)
+            upstox_unit_map = {
+                'day': 'days',
+                'minute': 'minutes',
+                'hour': 'hours',
+                'week': 'weeks',
+                'month': 'months'
+            }
+            upstox_unit = upstox_unit_map.get(unit.lower(), unit.lower())
+
+            # Use v3 API as per documentation reference (v2 doesn't support historical candles properly)
+            url = f"https://api.upstox.com/v3/historical-candle/{instrument}/{upstox_unit}/{interval}/{to_date}/{from_date}"
+            logger.info(f"Upstox API URL: {url}")
             response = requests.get(url, headers=headers)
 
+            upstox_points = []
             if response.status_code == 200:
                 candles = response.json().get("data", {}).get("candles", [])
                 for candle in candles:
-                    data_points.append(HistoricalDataPoint(
+                    upstox_points.append(HistoricalDataPoint(
                         timestamp=datetime.strptime(candle[0], "%Y-%m-%dT%H:%M:%S%z"),
                         open=float(candle[1]),
                         high=float(candle[2]),
@@ -1931,16 +2588,113 @@ async def get_historical_data(upstox_api, upstox_access_token, trading_symbol: s
                         close=float(candle[4]),
                         volume=int(candle[5])
                     ))
-                logger.info(f"Successfully fetched {len(data_points)} data points from Upstox API")
+                logger.info(f"Successfully fetched {len(upstox_points)} data points from Upstox API")
             else:
                 logger.error(f"Upstox API error: {response.text}")
+            return upstox_points
         except Exception as e:
             logger.warning(f"Failed to fetch data from Upstox API: {str(e)}")
+            return []
+
+    async def fetch_from_openchart():
+        """Fetch data from openchart with proper interval mapping"""
+        try:
+            logger.info(f"Trying openchart for NSE stock: {trading_symbol} with unit: {unit}, interval: {interval}")
+
+            # Map interval to openchart format
+            openchart_interval = interval
+            if unit.lower() == 'minute':
+                openchart_interval = f"{interval}m"  # e.g., 5m, 15m, 30m
+            elif unit.lower() == 'hour':
+                openchart_interval = f"{interval}h"  # e.g., 1h, 4h
+            elif unit.lower() == 'day':
+                openchart_interval = f"{interval}d"  # e.g., 1d
+            elif unit.lower() == 'week':
+                openchart_interval = f"{interval}w"  # e.g., 1w
+            elif unit.lower() == 'month':
+                openchart_interval = f"{interval}M"  # e.g., 1M
+
+            logger.info(f"Using openchart interval: {openchart_interval}")
+
+            # Use asyncio.to_thread to run the synchronous load_stock_history in a thread
+            import asyncio
+            data = await asyncio.to_thread(load_stock_history, trading_symbol, from_date_dt, to_date_dt, interval=openchart_interval, load=False)
+
+            openchart_points = []
+            # Check if data is a DataFrame and not empty
+            if hasattr(data, 'empty') and not data.empty:
+                for _, row in data.iterrows():
+                    openchart_points.append(HistoricalDataPoint(
+                        timestamp=row["timestamp"],
+                        open=float(row["open"]),
+                        high=float(row["high"]),
+                        low=float(row["low"]),
+                        close=float(row["close"]),
+                        volume=int(row["volume"])
+                    ))
+                logger.info(f"Successfully fetched {len(openchart_points)} data points from openchart")
+            else:
+                logger.warning(f"openchart returned no data or invalid data type: {type(data)}")
+            return openchart_points
+        except Exception as e:
+            logger.warning(f"Failed to fetch data from openchart: {str(e)}")
+            return []
+
+    # Enhanced data fetching logic based on source parameter and interval type
+    if source == "default":
+        # For day, week, month intervals: try database first
+        if unit.lower() in ['day', 'week', 'month']:
+            data_points = await fetch_from_db()
+            if not data_points:
+                data_points = await fetch_from_upstox()
+            if not data_points:
+                data_points = await fetch_from_openchart()
+        else:
+            # For minute, hour intervals: try Upstox first (better for intraday), then openchart
+            data_points = await fetch_from_upstox()
+            if not data_points:
+                data_points = await fetch_from_openchart()
+    elif source == "db":
+        # Try database first, then fallback to APIs if DB doesn't have the interval
+        data_points = await fetch_from_db()
+        if not data_points:
+            if unit.lower() in ['minute', 'hour'] or (unit.lower() == 'day' and interval != '1'):
+                # For non-daily intervals, prefer Upstox over openchart
+                data_points = await fetch_from_upstox()
+                if not data_points:
+                    data_points = await fetch_from_openchart()
+            else:
+                data_points = await fetch_from_upstox()
+                if not data_points:
+                    data_points = await fetch_from_openchart()
+    elif source == "upstox":
+        # Try Upstox first, then fallback to openchart if available
+        data_points = await fetch_from_upstox()
+        if not data_points:
+            data_points = await fetch_from_openchart()
+    elif source == "openchart":
+        # Try openchart first, then fallback to Upstox
+        data_points = await fetch_from_openchart()
+        if not data_points:
+            data_points = await fetch_from_upstox()
+    else:
+        logger.warning(f"Unknown source '{source}', using default order")
+        # Use the default logic
+        if unit.lower() in ['day', 'week', 'month']:
+            data_points = await fetch_from_db()
+            if not data_points:
+                data_points = await fetch_from_upstox()
+            if not data_points:
+                data_points = await fetch_from_openchart()
+        else:
+            data_points = await fetch_from_upstox()
+            if not data_points:
+                data_points = await fetch_from_openchart()
 
     # If we still don't have data, raise an error
     if not data_points:
-        logger.error(f"Could not retrieve historical data for {instrument} from any source")
-        raise HTTPException(status_code=404, detail=f"Historical data not available for {instrument}")
+        logger.error(f"Could not retrieve historical data for {trading_symbol} from any source")
+        raise HTTPException(status_code=404, detail=f"Historical data not available for {trading_symbol}")
 
     # Create the response with sorted data
     historical_data = HistoricalDataResponse(
@@ -1948,7 +2702,7 @@ async def get_historical_data(upstox_api, upstox_access_token, trading_symbol: s
         data=sorted(data_points, key=lambda x: x.timestamp)
     )
 
-    logger.info(f"Returning {len(data_points)} historical data points for {instrument}")
+    logger.info(f"Returning {len(data_points)} historical data points for {trading_symbol}")
     return historical_data
 
 
@@ -2003,7 +2757,12 @@ async def fetch_symbols_for_instruments(db: AsyncSession, instruments: List[str]
         if not instruments:
             raise HTTPException(status_code=400, detail="No instruments provided")
 
-        query = select(Instrument).where(Instrument.instrument_token.in_(instruments))
+        query = select(Instrument).where(
+            or_(
+                Instrument.instrument_token.in_(instruments),
+                Instrument.trading_symbol.in_(instruments)
+            )
+)
         result = await db.execute(query)
         instruments = result.scalars().all()
 
@@ -2028,7 +2787,7 @@ def get_order_history(upstox_api, kite_api, order_id: str, broker: str) -> List[
     try:
         history = []
         if broker == "Upstox" and upstox_api:
-            response = upstox_api.get_order_details(order_id=order_id, api_version="v2").data
+            response = upstox_api.get_order_details(order_id=order_id).data
             for entry in response:
                 entry_dict = entry.to_dict()
                 history.append(OrderHistory(
@@ -2059,7 +2818,7 @@ def get_order_trades(upstox_api, kite_api, order_id: str, broker: str) -> List[T
     try:
         trades = []
         if broker == "Upstox" and upstox_api:
-            response = upstox_api.get_trades_by_order(order_id=order_id, api_version="v2").data
+            response = upstox_api.get_trades_by_order(order_id=order_id).data
             for trade in response:
                 trade_dict = trade.to_dict()
                 trades.append(Trade(
@@ -2101,9 +2860,11 @@ async def execute_strategy(api, strategy: str, instrument_token: str, quantity: 
         else:
             strategy_name = strategy
             is_custom = False
-        data = await get_historical_data(upstox_api=api, upstox_access_token=None, instrument=instrument_token,
+        # Get trading symbol from instrument token
+        trading_symbol = get_symbol_for_instrument(instrument_token)
+        data = await get_historical_data(upstox_api=api, upstox_access_token=None, trading_symbol=trading_symbol,
                                          from_date=(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
-                                         to_date=datetime.now().strftime("%Y-%m-%d"), interval="day")
+                                         to_date=datetime.now().strftime("%Y-%m-%d"), unit="days", interval="1", source="default")
         if not data.data:
             raise ValueError("Failed to fetch historical data")
         df = pd.DataFrame([{
@@ -2138,7 +2899,7 @@ async def execute_strategy(api, strategy: str, instrument_token: str, quantity: 
             current_price = df["close"].iloc[-1]
             stop_loss_price = current_price * (1 - stop_loss / 100) if signal == "BUY" else current_price * (1 + stop_loss / 100)
             take_profit_price = current_price * (1 + take_profit / 100) if signal == "BUY" else current_price * (1 - take_profit / 100)
-            result = await place_order(
+            order_result = await place_order(
                 api=api,
                 instrument_token=instrument_token,
                 trading_symbol=trading_symbol,
@@ -2156,8 +2917,17 @@ async def execute_strategy(api, strategy: str, instrument_token: str, quantity: 
                 db=db,
                 user_id=user_id
             )
-            if result:
-                order_id = result.data.order_id if broker == "Upstox" else result
+            if order_result:
+                if broker == "Zerodha":
+                    order_id = order_result if order_result else None
+                else:
+                    if hasattr(order_result.data, 'order_ids') and order_result.data.order_ids:
+                        order_id = order_result.data.order_ids[0]
+                    elif hasattr(order_result.data, 'order_id'):
+                        order_id = order_result.data.order_id
+                    else:
+                        order_id = "unknown" if order_result else None
+
                 logger.info(f"Strategy {strategy} executed for {trading_symbol}, order ID {order_id}, user {user_id}")
                 result = await db.execute(select(User).filter(User.user_id == user_id))
                 user = result.scalars().first()
@@ -2947,7 +3717,8 @@ async def evaluate_custom_strategy(df: pd.DataFrame, strategy_conditions: List[D
             try:
                 # --- Get Column Names from pandas-ta conventions ---
                 def get_column_name(indicator, params):
-                    if indicator == 'SMA': return f"SMA_{params.get('period', 20)}"
+                    if indicator == 'SMA':
+                         return f"SMA_{params.get('period', 20)}"
                     if indicator == 'EMA': return f"EMA_{params.get('period', 14)}"
                     if indicator == 'RSI': return f"RSI_{params.get('period', 14)}"
                     if indicator == 'MACD': return f"MACD_{params.get('fast_period', 12)}_{params.get('slow_period', 26)}_{params.get('signal_period', 9)}"
@@ -3071,9 +3842,9 @@ def check_short_sell_signal(row, atr):
 
 # Helper functions to refactor backtest_strategy
 async def get_historical_dataframe(trading_symbol, instrument_token, timeframe, start_date, end_date, db, nse_db):
-    data = await get_historical_data(upstox_api=None, upstox_access_token=None, instrument=instrument_token,
-                                     trading_symbol=trading_symbol, from_date=start_date, to_date=end_date,
-                                     unit="days", interval=timeframe, db=db, nse_db=nse_db)
+    data = await get_historical_data(upstox_api=None, upstox_access_token=None, trading_symbol=trading_symbol,
+                                     from_date=start_date, to_date=end_date, unit="days", interval=timeframe,
+                                     instrument=instrument_token, db=db, nse_db=nse_db, source="default")
     if not data.data:
         raise ValueError(f"No historical data for {instrument_token}")
 
@@ -3142,3 +3913,106 @@ def evaluate_condition(left_value, right_value, comparison):
         return abs(left_value - right_value) < 1e-9
     return False
 
+async def calculate_portfolio_current_value(
+    portfolio_id: str,
+    symbols_data: List[Any],
+    upstox_api=None,
+    kite_api=None,
+    trading_db: AsyncSession = None,
+    fallback_price: float = 0.0
+) -> float:
+    """
+    Optimized function to calculate current portfolio value from LTP data.
+    This eliminates redundant code across multiple endpoints.
+    
+    Args:
+        portfolio_id: Portfolio ID to calculate value for
+        symbols_data: List of symbol configurations from portfolio
+        upstox_api: Upstox API client (optional)
+        kite_api: Zerodha API client (optional)
+        trading_db: Database session
+        fallback_price: Default price if LTP is unavailable
+        
+    Returns:
+        float: Calculated current portfolio value
+    """
+    try:
+        # Extract symbols from the portfolio
+        portfolio_symbols = []
+        for symbol_config in symbols_data:
+            if isinstance(symbol_config, dict):
+                symbol = symbol_config.get('symbol')
+            else:
+                symbol = symbol_config
+            if symbol:
+                portfolio_symbols.append(symbol)
+        
+        if not portfolio_symbols:
+            logger.warning(f"No symbols found for portfolio {portfolio_id}")
+            return 0.0
+        
+        # Get current market prices for all portfolio symbols
+        logger.info(f"Requesting LTP for symbols: {portfolio_symbols}")
+        ltp_data = await get_ltp(upstox_api.get("market_data_v3"), kite_api, portfolio_symbols, trading_db)
+        logger.info(f"Received LTP data: {[f'{item.trading_symbol}:{item.last_price}' for item in ltp_data] if ltp_data else 'None'}")
+        
+        # Calculate current value based on units held and current prices
+        calculated_current_value = 0.0
+        
+        # Get current units for each symbol from sip_actual_trades (only executed trades)
+        for symbol in portfolio_symbols:
+            # Get total units held for this symbol (only from executed trades)
+            units_query = text("""
+                SELECT COALESCE(SUM(units), 0) as total_units
+                FROM sip_actual_trades 
+                WHERE portfolio_id = :portfolio_id AND symbol = :symbol AND execution_status = 'EXECUTED'
+            """)
+            
+            units_result = await trading_db.execute(units_query, {
+                'portfolio_id': portfolio_id,
+                'symbol': symbol
+            })
+            symbol_units = units_result.scalar() or 0.0
+            
+            # Get current price for this symbol with enhanced matching
+            symbol_price = fallback_price
+            if ltp_data:
+                for ltp_item in ltp_data:
+                    # Try exact match first
+                    if ltp_item.trading_symbol == symbol:
+                        symbol_price = ltp_item.last_price
+                        break
+                    # Try case-insensitive match
+                    elif ltp_item.trading_symbol.upper() == symbol.upper():
+                        symbol_price = ltp_item.last_price
+                        break
+                    # Try removing any suffix (like .NS)
+                    elif ltp_item.trading_symbol.split('.')[0].upper() == symbol.upper():
+                        symbol_price = ltp_item.last_price
+                        break
+            
+            # Add to total portfolio value
+            calculated_current_value += symbol_units * symbol_price
+            logger.info(f"Symbol: {symbol}, Units: {symbol_units}, Price: {symbol_price}, Value: {symbol_units * symbol_price}")
+        
+        logger.info(f"Total calculated current value for portfolio {portfolio_id}: {calculated_current_value}")
+        return calculated_current_value
+        
+    except Exception as value_error:
+        logger.warning(f"Error calculating current value for portfolio {portfolio_id}: {value_error}, using fallback calculation")
+        # Fallback: calculate based on stored units with fallback price (only executed trades)
+        try:
+            fallback_query = text("""
+                SELECT COALESCE(SUM(units), 0) as total_units
+                FROM sip_actual_trades 
+                WHERE portfolio_id = :portfolio_id AND execution_status = 'EXECUTED'
+            """)
+            
+            fallback_result = await trading_db.execute(fallback_query, {
+                'portfolio_id': portfolio_id
+            })
+            total_units = fallback_result.scalar() or 0.0
+            return total_units * fallback_price
+        except Exception as fallback_error:
+            logger.error(f"Fallback calculation also failed for portfolio {portfolio_id}: {fallback_error}")
+            return 0.0
