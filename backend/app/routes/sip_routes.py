@@ -2684,7 +2684,7 @@ async def get_sip_portfolios(
                 # Skip this portfolio but continue processing others
                 continue
 
-        logger.info(f"✅ Successfully fetched {len(enhanced_portfolios)} portfolios for user {user_id}")
+        logger.info(f"Successfully fetched {len(enhanced_portfolios)} portfolios for user {user_id}")
         return enhanced_portfolios
 
     except Exception as e:
@@ -4472,7 +4472,7 @@ async def get_investment_report_history(
                 # Skip this report but continue processing others
                 continue
 
-        logger.info(f"✅ Successfully fetched {len(report_list)} reports for user {user_id}")
+        logger.info(f"Successfully fetched {len(report_list)} reports for user {user_id}")
         return report_list
 
     except Exception as e:

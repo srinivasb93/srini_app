@@ -198,6 +198,7 @@ class Instrument(Base):
 
     instrument_token = Column(String(50), primary_key=True)
     trading_symbol = Column(String(50), nullable=False, index=True)
+    name = Column(String(50), nullable=False)
     exchange = Column(String(20), nullable=False)
     instrument_type = Column(String(20), nullable=False)
     segment = Column(String(20))

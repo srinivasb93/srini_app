@@ -4,7 +4,7 @@ import logging
 import inspect
 import os
 import sys
-from datetime import datetime, time as date_time, timedelta
+from datetime import datetime, date, time as date_time, timedelta
 from typing import Optional, Dict, Any, List, Callable
 import pandas as pd
 import numpy as np
@@ -1442,7 +1442,7 @@ class OrderManager:
                 "created_at": datetime.now(),
                 "user_id": user_id,
                 "gtt_type": derived_gtt_type,
-                "rules": rules
+                "rules": json.dumps(rules) if rules is not None else None
             })
             result = await db.execute(select(User).filter(User.user_id == user_id))
             user = result.scalars().first()
@@ -1654,7 +1654,7 @@ class OrderManager:
                 "last_price": last_price
             }
             if rules is not None:
-                params["rules"] = rules
+                params["rules"] = json.dumps(rules)  # Convert list to JSON string
             if derived_gtt_type is not None:
                 params["gtt_type"] = derived_gtt_type
 
@@ -1977,13 +1977,14 @@ async def modify_order(api, order_id: str, quantity: Optional[int] = None, order
                 order_type=modified_params["order_type"],
                 price=modified_params["price"],
                 trigger_price=modified_params["trigger_price"],
-                validity=modified_params["validity"]
+                validity=modified_params["validity"],
+                order_id=order_id  # Add order_id to the request
             )
-            response = api.modify_order(order_id, modify_request)
+            response = api.modify_order(modify_request)  # Pass only the request object
         else:
             zerodha_validity = "DAY" if modified_params["validity"] == "DAY" else "IOC"
             response = api.modify_order(
-                variety=api.VARIETY_REGULAR,
+                variety=api.VARIETY_REGULAR if not order.is_amo else api.VARIETY_AMO,
                 order_id=order_id,
                 quantity=modified_params["quantity"],
                 order_type=modified_params["order_type"],
@@ -1991,9 +1992,10 @@ async def modify_order(api, order_id: str, quantity: Optional[int] = None, order
                 trigger_price=modified_params["trigger_price"] if modified_params["order_type"] in ["SL", "SL-M"] else 0,
                 validity=zerodha_validity
             )
+        logger.info(f"Modified order: {response}")
         query = """
             UPDATE orders
-            SET quantity = :quantity, order_type = :order_type, price = :price, trigger_price = :trigger_price, validity = :validity
+            SET quantity = :quantity, order_type = :order_type, price = :price, trigger_price = :trigger_price
             WHERE order_id = :order_id AND broker = :broker
         """
         await async_execute_query(db, text(query), {
@@ -2002,8 +2004,7 @@ async def modify_order(api, order_id: str, quantity: Optional[int] = None, order
             "quantity": modified_params["quantity"],
             "order_type": modified_params["order_type"],
             "price": modified_params["price"],
-            "trigger_price": modified_params["trigger_price"],
-            # "validity": modified_params["validity"]
+            "trigger_price": modified_params["trigger_price"]
         })
         result = await db.execute(select(User).filter(User.user_id == order.user_id))
         user = result.scalars().first()
@@ -2496,6 +2497,24 @@ async def get_historical_data(upstox_api, upstox_access_token, trading_symbol: s
     from_date_dt = datetime.strptime(from_date, "%Y-%m-%d")
     to_date_dt = datetime.strptime(to_date, "%Y-%m-%d")
 
+    def normalize_timestamp(value):
+        """Convert pandas/numpy timestamps to serializable datetime objects."""
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return datetime.combine(value, datetime.min.time())
+        if isinstance(value, pd.Timestamp):
+            return value.to_pydatetime()
+        if isinstance(value, np.datetime64):
+            return pd.Timestamp(value).to_pydatetime()
+        if isinstance(value, str):
+            for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(value, fmt)
+                except ValueError:
+                    continue
+        return value
+
     # Define data fetching functions
     async def fetch_from_db():
         """Fetch data from database with interval-specific table handling"""
@@ -2539,7 +2558,7 @@ async def get_historical_data(upstox_api, upstox_access_token, trading_symbol: s
                         date_val = datetime.strptime(date_val, "%Y-%m-%d")
 
                     db_points.append(HistoricalDataPoint(
-                        timestamp=date_val,
+                        timestamp=normalize_timestamp(date_val),
                         open=float(row.get('open', 0)),
                         high=float(row.get('high', 0)),
                         low=float(row.get('low', 0)),
@@ -2625,7 +2644,7 @@ async def get_historical_data(upstox_api, upstox_access_token, trading_symbol: s
             if hasattr(data, 'empty') and not data.empty:
                 for _, row in data.iterrows():
                     openchart_points.append(HistoricalDataPoint(
-                        timestamp=row["timestamp"],
+                        timestamp=normalize_timestamp(row["timestamp"]),
                         open=float(row["open"]),
                         high=float(row["high"]),
                         low=float(row["low"]),
@@ -2712,15 +2731,20 @@ async def fetch_instruments(db: AsyncSession, refresh: bool = False) -> List[Ins
             path = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
             instruments_df = pd.read_json(path)
             instruments_df = instruments_df[
-                ['trading_symbol', 'instrument_key', 'exchange', 'instrument_type', 'segment']
-            ][(instruments_df['segment'] == 'NSE_EQ') & (instruments_df['instrument_type'] == 'EQ') &
-              (~instruments_df['name'].str.contains('TEST', case=False, na=False))]
+                ['trading_symbol', 'name', 'instrument_key', 'exchange', 'instrument_type', 'segment']
+            ][((instruments_df['segment'] == 'NSE_EQ') & (instruments_df['instrument_type'] == 'EQ') &
+              (~instruments_df['name'].str.contains('TEST', case=False, na=False))) | (instruments_df['segment'] == 'NSE_INDEX') & (instruments_df['instrument_type'] == 'INDEX')
+               | ((instruments_df['segment']=='NSE_COM') & (instruments_df['instrument_type']=='COM'))]
 
-            await db.execute(text("DELETE FROM instruments"))
+            #  check if instruments table exists and delete entries from it
+            await db.execute(text("DROP TABLE IF EXISTS instruments"))
+            await db.execute(text("CREATE TABLE instruments (instrument_token VARCHAR PRIMARY KEY, trading_symbol VARCHAR, name VARCHAR, exchange VARCHAR, instrument_type VARCHAR, segment VARCHAR)"))
+
             for _, row in instruments_df.iterrows():
                 instrument = Instrument(
                     instrument_token=row["instrument_key"],
                     trading_symbol=row["trading_symbol"],
+                    name=row["name"],
                     exchange=row["exchange"],
                     instrument_type=row["instrument_type"],
                     segment=row["segment"]
@@ -2740,6 +2764,7 @@ async def fetch_instruments(db: AsyncSession, refresh: bool = False) -> List[Ins
                 instrument_token=inst.instrument_token,
                 exchange=inst.exchange,
                 trading_symbol=inst.trading_symbol,
+                name=inst.name,
                 instrument_type=inst.instrument_type,
                 segment=inst.segment
             )

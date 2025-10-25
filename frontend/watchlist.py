@@ -227,9 +227,12 @@ async def render_watchlist_page(fetch_api, user_storage, get_cached_instruments,
 
         with watchlist_container:
             # Table header
-            with ui.row().classes("watchlist-header w-full p-3 text-sm font-semibold text-gray-400 border-b border-gray-700 mb-2"):
-                ui.label("Symbol").classes("flex-1")
+            with ui.row().classes("watchlist-header w-full p-3 text-sm font-semibold theme-text-secondary border-b mb-2").style("border-color: var(--border-color)"):
+                ui.label("Symbol").classes("w-32")
+                ui.label("OHLC").classes("w-48 text-center")
+                ui.label("Prev Close").classes("w-24 text-right")
                 ui.label("LTP").classes("w-24 text-right")
+                ui.label("Market Depth").classes("w-80 text-center").style("min-width: 320px; max-width: 320px; width: 320px; margin-left: 1.5rem;")
                 ui.label("Change").classes("w-24 text-right")
                 ui.label("Change %").classes("w-24 text-right")
                 ui.label("Volume").classes("w-24 text-right")
@@ -291,30 +294,30 @@ async def render_watchlist_page(fetch_api, user_storage, get_cached_instruments,
                 # Delete watchlist button
                 ui.button("Delete Watchlist", icon="delete", on_click=lambda: show_delete_watchlist_dialog()).classes("text-red-400")
 
-        # Main content layout (same structure, updated add function)
+        # Main content layout (optimized for better space utilization)
         with ui.row().classes("w-full gap-4 p-4"):
 
-            # Left side - Enhanced Add Instrument Card
-            with ui.card().classes("dashboard-card w-1/3"):
+            # Left side - Optimized Add Instrument Card (narrower)
+            with ui.card().classes("dashboard-card").style("min-width: 320px; max-width: 380px"):
                 with ui.row().classes("card-header w-full items-center p-4"):
                     ui.icon("add_circle", size="1.5rem").classes("text-cyan-400")
                     ui.label("Add Instrument").classes("card-title")
 
                 ui.separator().classes("card-separator")
 
-                # Add instrument form with enhanced filtering
-                with ui.column().classes("p-4 gap-4"):
+                # Streamlined add instrument form
+                with ui.column().classes("p-4 gap-3"):
 
-                    # FIXED: Radio button for selection type
-                    with ui.column().classes("gap-2"):
-                        ui.label("Selection Type").classes("text-sm font-medium text-gray-300")
+                    # Selection type with compact radio buttons
+                    with ui.column().classes("gap-1"):
+                        ui.label("Search Method").classes("text-xs font-semibold theme-text-primary")
                         selection_type = ui.radio(
-                            options=["Index/Sector", "Direct Search"],
-                            value="Index/Sector"
-                        ).classes("text-gray-300")
+                            options=["By Index", "Direct Search"],
+                            value="By Index"
+                        ).props("dense inline").classes("theme-text-primary text-sm")
 
                     # Container for dynamic content
-                    selection_container = ui.column().classes("gap-4 mt-2")
+                    selection_container = ui.column().classes("gap-3 mt-1")
 
                     # State variables
                     current_indices = []
@@ -327,10 +330,8 @@ async def render_watchlist_page(fetch_api, user_storage, get_cached_instruments,
                         selection_container.clear()
 
                         with selection_container:
-                            if selection_type.value == "Index/Sector":
-                                # Index/Sector selection mode
-                                ui.label("Select Index/Sector").classes("text-sm font-medium text-gray-300")
-
+                            if selection_type.value == "By Index":
+                                # Index-based selection mode
                                 # Fetch and populate indices
                                 nonlocal current_indices, index_select, stock_select
                                 current_indices = await fetch_indices_sectors(fetch_api)
@@ -338,45 +339,45 @@ async def render_watchlist_page(fetch_api, user_storage, get_cached_instruments,
                                 index_select = ui.select(
                                     options=current_indices,
                                     label="Index/Sector"
-                                ).classes("w-full")
+                                ).props("dense").classes("w-full")
 
-                                ui.label("Select Stock Symbol").classes("text-sm font-medium text-gray-300 mt-2")
                                 stock_select = ui.select(
                                     options=[],
-                                    label="Stock Symbol",
+                                    label="Select Stocks",
                                     with_input=True,
-                                    multiple=True  # Enable multiple selection
-                                ).classes("w-full").props("use-input input-debounce=300")
+                                    multiple=True
+                                ).props("dense use-input input-debounce=300 use-chips").classes("w-full")
 
-                                # FIXED: Set up the event handler after the dropdown is created
+                                # Set up the event handler after the dropdown is created
                                 index_select.on_value_change(handle_index_change)
 
                             else:
-                                # Direct search mode (fallback to original)
-                                ui.label("Search & Select Instrument").classes("text-sm font-medium text-gray-300")
+                                # Direct search mode
                                 try:
                                     all_instruments_map = await get_cached_instruments(broker)
 
                                     if isinstance(all_instruments_map, dict):
-                                        instrument_options = [symbol for symbol in list(all_instruments_map.keys())[:500]]
+                                        instrument_options = [symbol for symbol in list(all_instruments_map.keys())[:1000]]
                                     else:
-                                        instrument_options = [inst.trading_symbol for inst in all_instruments_map[:500]]
+                                        instrument_options = [inst.trading_symbol for inst in all_instruments_map[:1000]]
 
                                     nonlocal direct_search_select
                                     direct_search_select = ui.select(
                                         options=instrument_options,
-                                        label="Search Instrument",
+                                        label="Search & Select",
                                         with_input=True,
+                                        multiple=True,
                                         new_value_mode="add-unique",
-                                    ).classes("w-full").props("use-input input-debounce=300 hide-selected")
+                                    ).props("dense use-input input-debounce=300 use-chips").classes("w-full")
 
                                 except Exception as e:
                                     logger.error(f"Error loading instruments: {e}")
                                     direct_search_select = ui.select(
                                         options=["RELIANCE", "TCS", "HDFCBANK", "INFY", "ITC"],
-                                        label="Select Instrument",
-                                        with_input=True
-                                    ).classes("w-full")
+                                        label="Search Instrument",
+                                        with_input=True,
+                                        multiple=True
+                                    ).props("dense").classes("w-full")
 
                     async def update_stocks_dropdown():
                         """Update stocks dropdown based on selected index"""
@@ -408,11 +409,11 @@ async def render_watchlist_page(fetch_api, user_storage, get_cached_instruments,
                     # Update UI when selection type changes
                     selection_type.on_value_change(lambda: update_selection_ui())
 
-                    # Add to watchlist button
+                    # Compact add button with better styling
                     async def add_to_current_watchlist():
                         symbols = None
 
-                        if selection_type.value == "Index/Sector":
+                        if selection_type.value == "By Index":
                             symbols = stock_select.value if stock_select else None
                         else:
                             symbols = direct_search_select.value if direct_search_select else None
@@ -450,9 +451,9 @@ async def render_watchlist_page(fetch_api, user_storage, get_cached_instruments,
 
                     ui.button(
                         "Add to Watchlist",
-                        icon="add",
+                        icon="add_circle_outline",
                         on_click=add_to_current_watchlist,
-                    ).props("color=primary size=md").classes("w-full mt-4")
+                    ).props("color=primary").classes("w-full mt-2")
 
             # Right side - Watchlist Display (FIXED: removed delete button from here)
             with ui.card().classes("dashboard-card flex-1"):
@@ -509,9 +510,12 @@ async def render_watchlist_page(fetch_api, user_storage, get_cached_instruments,
 
         with watchlist_container:
             # Table header
-            with ui.row().classes("watchlist-header w-full p-3 text-sm font-semibold text-gray-400 border-b border-gray-700 mb-2"):
-                ui.label("Symbol").classes("flex-1")
+            with ui.row().classes("watchlist-header w-full p-3 text-sm font-semibold theme-text-secondary border-b mb-2").style("border-color: var(--border-color)"):
+                ui.label("Symbol").classes("w-32")
+                ui.label("OHLC").classes("w-48 text-center")
+                ui.label("Prev Close").classes("w-24 text-right")
                 ui.label("LTP").classes("w-24 text-right")
+                ui.label("Market Depth").classes("w-80 text-center").style("min-width: 320px; max-width: 320px; width: 320px; margin-left: 1.5rem;")
                 ui.label("Change").classes("w-24 text-right")
                 ui.label("Change %").classes("w-24 text-right")
                 ui.label("Volume").classes("w-24 text-right")
@@ -543,17 +547,28 @@ async def render_watchlist_page(fetch_api, user_storage, get_cached_instruments,
 
 
 async def render_watchlist_item(symbol, ltp_data_map, watchlist_manager, refresh_callback):
-    """Render individual watchlist item"""
+    """Render individual watchlist item with OHLC slider"""
     try:
         # Get live data
         ltp_data = ltp_data_map.get(symbol, {})
         ltp = ltp_data.get("last_price", 0.0)
         volume = ltp_data.get("volume", 0)
         previous_close = ltp_data.get("previous_close", 0.0)
+        
+        # OHLC data
+        open_price = ltp_data.get("open", 0.0)
+        high_price = ltp_data.get("high", 0.0)
+        low_price = ltp_data.get("low", 0.0)
+        close_price = ltp_data.get("close", ltp)
 
         # Calculate change
-        change = ltp - previous_close if previous_close > 0 else 0.0
-        change_pct = (change / previous_close) * 100 if previous_close > 0 else 0.0
+        change = ltp_data.get("change", 0.0)
+        change_pct = ltp_data.get("change_percent", 0.0)
+        
+        # Fallback calculation if not provided
+        if change == 0.0 and previous_close > 0:
+            change = ltp - previous_close
+            change_pct = (change / previous_close) * 100
 
         # Styling based on change
         if change > 0:
@@ -572,25 +587,84 @@ async def render_watchlist_item(symbol, ltp_data_map, watchlist_manager, refresh
             bg_color = "hover:bg-gray-800/50"
             trend_icon = "trending_flat"
 
-        # Render item row
-        with ui.row().classes(f"watchlist-item w-full p-3 {bg_color} transition-all duration-200 border-l-2 {border_color} mb-1 rounded-r-lg"):
+        # Render item row with theme support
+        with ui.row().classes(f"watchlist-item w-full p-3 theme-surface-card transition-all duration-200 border-l-2 {border_color} mb-1 rounded-r-lg items-center").style("border-left-width: 4px"):
             # Symbol column
-            with ui.column().classes("flex-1"):
+            with ui.column().classes("w-32"):
                 with ui.row().classes("items-center gap-2"):
                     ui.icon(trend_icon, size="1rem").classes(change_color)
-                    ui.label(symbol).classes("text-white font-semibold")
+                    ui.label(symbol).classes("theme-text-primary font-semibold text-sm")
+
+            # OHLC Slider column
+            with ui.column().classes("w-48 gap-1"):
+                # Create expansion panel for OHLC
+                with ui.expansion("OHLC", icon="candlestick_chart").classes("watchlist-expansion theme-surface-card text-xs").props("dense"):
+                    with ui.column().classes("gap-1 p-2 text-xs"):
+                        with ui.row().classes("justify-between w-full"):
+                            ui.label("Open:").classes("theme-text-secondary")
+                            ui.label(f"₹{open_price:,.2f}").classes("text-cyan-400 font-mono")
+                        with ui.row().classes("justify-between w-full"):
+                            ui.label("High:").classes("theme-text-secondary")
+                            ui.label(f"₹{high_price:,.2f}").classes("text-green-400 font-mono")
+                        with ui.row().classes("justify-between w-full"):
+                            ui.label("Low:").classes("theme-text-secondary")
+                            ui.label(f"₹{low_price:,.2f}").classes("text-red-400 font-mono")
+                        with ui.row().classes("justify-between w-full"):
+                            ui.label("Close:").classes("theme-text-secondary")
+                            ui.label(f"₹{close_price:,.2f}").classes("theme-text-primary font-mono")
+
+            # Prev Close
+            ui.label(f"₹{previous_close:,.2f}").classes("w-24 text-right theme-text-primary font-mono text-sm")
 
             # LTP
-            ui.label(f"₹{ltp:,.2f}").classes("w-24 text-right text-white font-mono")
+            ui.label(f"₹{ltp:,.2f}").classes("w-24 text-right theme-text-primary font-mono text-sm")
+
+            # Market Depth column (increased width for large volume numbers)
+            with ui.column().classes("w-80 gap-1").style("min-width: 320px; max-width: 320px; width: 320px; margin-left: 1.5rem;"):
+                # Get depth data from ltp_data
+                depth_data = ltp_data.get("depth", {})
+                buy_orders = depth_data.get("buy", []) if depth_data else []
+                sell_orders = depth_data.get("sell", []) if depth_data else []
+                
+                # Create expansion panel for Market Depth (centered)
+                with ui.row().classes("w-full justify-center"):
+                    with ui.expansion("Depth", icon="layers").classes("watchlist-expansion theme-surface-card text-xs").props("dense"):
+                        # Force horizontal layout with explicit grid
+                        with ui.element('div').classes("depth-container").style("display: grid; grid-template-columns: 1fr auto 1fr; gap: 0.5rem; padding: 0.5rem; width: 100%;"):
+                            # Buy orders column
+                            with ui.element('div').classes("buy-column").style("min-width: 0;"):
+                                ui.label("Buy Orders").classes("theme-text-success font-semibold text-xs mb-1 text-center")
+                                if buy_orders:
+                                    for i, order in enumerate(buy_orders[:5]):  # Show top 5
+                                        with ui.row().classes("justify-between w-full"):
+                                            ui.label(f"₹{order.get('price', 0):,.2f}").classes("text-green-400 font-mono text-xs")
+                                            ui.label(f"{order.get('quantity', 0):,}").classes("theme-text-secondary text-xs")
+                                else:
+                                    ui.label("No orders").classes("theme-text-secondary text-xs italic text-center")
+                            
+                            # Vertical separator
+                            with ui.element('div').style("width: 1px; background: var(--border-color); height: 100%;"):
+                                pass
+                            
+                            # Sell orders column
+                            with ui.element('div').classes("sell-column").style("min-width: 0;"):
+                                ui.label("Sell Orders").classes("theme-text-error font-semibold text-xs mb-1 text-center")
+                                if sell_orders:
+                                    for i, order in enumerate(sell_orders[:5]):  # Show top 5
+                                        with ui.row().classes("justify-between w-full"):
+                                            ui.label(f"₹{order.get('price', 0):,.2f}").classes("text-red-400 font-mono text-xs")
+                                            ui.label(f"{order.get('quantity', 0):,}").classes("theme-text-secondary text-xs")
+                                else:
+                                    ui.label("No orders").classes("theme-text-secondary text-xs italic text-center")
 
             # Change
-            ui.label(f"₹{change:+,.2f}").classes(f"w-24 text-right {change_color} font-mono")
+            ui.label(f"₹{change:+,.2f}").classes(f"w-24 text-right {change_color} font-mono text-sm")
 
             # Change %
-            ui.label(f"{change_pct:+.2f}%").classes(f"w-24 text-right {change_color} font-mono")
+            ui.label(f"{change_pct:+.2f}%").classes(f"w-24 text-right {change_color} font-mono text-sm")
 
             # Volume
-            ui.label(f"{volume:,}").classes("w-24 text-right text-gray-300 font-mono text-sm")
+            ui.label(f"{volume:,}").classes("w-24 text-right theme-text-secondary font-mono text-xs")
 
             # Actions
             with ui.row().classes("w-24 justify-center gap-1"):
@@ -609,9 +683,9 @@ async def render_watchlist_item(symbol, ltp_data_map, watchlist_manager, refresh
                 ui.button(icon="delete", on_click=lambda s=symbol: remove_symbol(s)).props("flat round size=sm").classes("text-red-400")
 
     except Exception as e:
-        logger.error(f"Error rendering watchlist item {symbol}: {e}")
+        logger.error(f"Error rendering watchlist item {symbol}: {e}", exc_info=True)
 
 def handle_trade_action(symbol):
     """Handle trade action for a symbol"""
     ui.notify(f"Opening trade for {symbol}", type="info")
-    ui.navigate.to(f'/order-management')
+    ui.navigate.to('/order-management')

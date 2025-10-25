@@ -208,6 +208,23 @@ class ModifyOrderRequest(BaseModel):
     trigger_price: Optional[float] = None
     validity: Optional[str] = "DAY"
 
+class ConvertPositionRequest(BaseModel):
+    symbol: str
+    exchange: str
+    current_product: str
+    target_product: str
+    quantity: float
+    instrument_token: Optional[str] = None
+    transaction_type: Optional[str] = None
+
+    @field_validator("target_product")
+    def products_must_differ(cls, v, values):
+        current = (values.get("current_product") or "").upper()
+        target = (v or "").upper()
+        if current and target and current == target:
+            raise ValueError("Target product must differ from current product")
+        return v
+
 class ProfileResponse(BaseModel):
     user_id: str
     email: EmailStr

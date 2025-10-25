@@ -286,6 +286,24 @@ class TradingDataCache:
         
         for pattern in patterns:
             frontend_cache.delete_pattern(pattern)
+    
+    @staticmethod
+    def invalidate_broker_data(broker: str):
+        """Invalidate broker-specific cache entries"""
+        patterns = [
+            f"fetch_api:*/profile/{broker}*",
+            f"fetch_api:*/positions/{broker}*",
+            f"fetch_api:*/orders/{broker}*",
+            f"fetch_api:*/portfolio/{broker}*",
+            f"fetch_api:*/margins/{broker}*",
+            f"positions:*{broker}*",
+            f"orders:*{broker}*"
+        ]
+        
+        for pattern in patterns:
+            frontend_cache.delete_pattern(pattern)
+        
+        logger.info(f"Invalidated cache for broker: {broker}")
 
 def get_cache_stats():
     """Get cache statistics for monitoring"""

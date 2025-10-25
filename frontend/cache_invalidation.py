@@ -25,7 +25,8 @@ class CacheInvalidationManager:
             'market_data_updated': self._invalidate_market_data,
             'execution_completed': self._invalidate_execution_completed,
             'portfolio_rebalanced': self._invalidate_portfolio_rebalanced,
-            'risk_limits_changed': self._invalidate_risk_limits_changed
+            'risk_limits_changed': self._invalidate_risk_limits_changed,
+            'broker_changed': self._invalidate_broker_changed
         }
     
     def invalidate(self, event_type: str, context: dict = None):
@@ -206,8 +207,23 @@ class CacheInvalidationManager:
         if user_id:
             frontend_cache.delete_pattern(f"risk_metrics:{user_id}*")
             frontend_cache.delete_pattern(f"fetch_api:*/preferences/{user_id}*")
+    
+    def _invalidate_broker_changed(self, context: dict):
+        """Invalidate caches when broker is changed"""
+        new_broker = context.get('new_broker')
         
-        logger.info(f"Invalidated caches for risk limits change (user: {user_id})")
+        # Invalidate broker-specific caches
+        frontend_cache.delete_pattern("fetch_api:*/profile*")
+        frontend_cache.delete_pattern("fetch_api:*/positions*")
+        frontend_cache.delete_pattern("fetch_api:*/orders*")
+        frontend_cache.delete_pattern("fetch_api:*/portfolio*")
+        frontend_cache.delete_pattern("fetch_api:*/margins*")
+        
+        # Clear trading data cache for the new broker
+        if new_broker:
+            TradingDataCache.invalidate_broker_data(new_broker)
+        
+        logger.info(f"Cache invalidated for broker change to: {new_broker}")
 
 
 # Global cache invalidation manager
@@ -257,6 +273,13 @@ def invalidate_on_market_update(symbols: List[str] = None):
         'symbols': symbols or []
     }
     cache_invalidation_manager.invalidate('market_data_updated', context)
+
+def invalidate_on_broker_change(new_broker: str):
+    """Invalidate caches when broker is changed"""
+    context = {
+        'new_broker': new_broker
+    }
+    cache_invalidation_manager.invalidate('broker_changed', context)
 
 def emergency_cache_clear():
     """Emergency function to clear all caches"""

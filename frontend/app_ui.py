@@ -82,6 +82,100 @@ STORAGE_INSTRUMENTS_CACHE_KEY_PREFIX = 'instruments_cache_'
 # WebSocket message queue
 websocket_messages = deque()
 
+# Global broker change tracking
+current_broker = None
+broker_change_handlers = []
+
+# Global aiohttp session with proper timeout configuration
+# This prevents creating new sessions for every request and avoids timeout issues
+_global_session = None
+
+async def get_http_session():
+    """Get or create a global aiohttp session with proper timeout configuration"""
+    global _global_session
+    if _global_session is None or _global_session.closed:
+        # Configure timeout for all HTTP requests
+        timeout = aiohttp.ClientTimeout(
+            total=60,  # Total timeout for entire request
+            connect=10,  # Connection timeout
+            sock_read=30,  # Socket read timeout
+            sock_connect=10  # Socket connection timeout
+        )
+        # Create TCPConnector with keepalive
+        connector = aiohttp.TCPConnector(
+            limit=100,  # Connection pool limit
+            ttl_dns_cache=300,  # DNS cache TTL
+            keepalive_timeout=30,  # Keep connections alive for 30 seconds
+            force_close=False,  # Reuse connections
+            enable_cleanup_closed=True
+        )
+        _global_session = aiohttp.ClientSession(
+            timeout=timeout,
+            connector=connector
+        )
+    return _global_session
+
+async def cleanup_http_session():
+    """Cleanup global HTTP session"""
+    global _global_session
+    if _global_session and not _global_session.closed:
+        await _global_session.close()
+        _global_session = None
+
+def register_broker_change_handler(handler):
+    """Register a handler to be called when broker changes"""
+    broker_change_handlers.append(handler)
+
+def trigger_broker_change(new_broker):
+    """Trigger all registered broker change handlers and update global state"""
+    global current_broker
+    current_broker = new_broker
+    
+    # Clear relevant caches when broker changes
+    try:
+        from cache_invalidation import invalidate_on_broker_change
+        invalidate_on_broker_change(new_broker)
+    except Exception as e:
+        logger.error(f"Error invalidating caches on broker change: {e}")
+    
+    # Trigger registered handlers
+    for handler in broker_change_handlers:
+        try:
+            handler(new_broker)
+        except Exception as e:
+            logger.error(f"Error in broker change handler: {e}")
+    
+    # Note: UI notifications are handled by individual pages to avoid context issues
+
+def get_current_broker():
+    """Get the current broker from storage"""
+    return app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
+
+def create_broker_monitor(refresh_function, check_interval=2):
+    """Create a broker monitor that calls refresh_function when broker changes"""
+    last_broker = get_current_broker()
+    
+    def check_broker_change():
+        nonlocal last_broker
+        current = get_current_broker()
+        if current != last_broker:
+            logger.info(f"Broker changed from {last_broker} to {current}")
+            last_broker = current
+            try:
+                # Check if the function is async and handle accordingly
+                import asyncio
+                import inspect
+                if inspect.iscoroutinefunction(refresh_function):
+                    asyncio.create_task(refresh_function())
+                else:
+                    refresh_function()
+            except Exception as e:
+                logger.error(f"Error in broker change refresh: {e}")
+    
+    # Start monitoring
+    ui.timer(check_interval, check_broker_change)
+    return check_broker_change
+
 # Admin users configuration - in production, this should come from database
 ADMIN_USERS = {
     "admin@example.com",
@@ -138,8 +232,9 @@ async def fetch_api(endpoint, method="GET", data=None, params=None, retries=3, b
 
     for attempt in range(retries):
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.request(method, url, **request_kwargs) as response:
+            # Use global session instead of creating new one every time
+            session = await get_http_session()
+            async with session.request(method, url, **request_kwargs) as response:
                     logger.debug(f"API call: {method} {url}, Status: {response.status}")
                     if response.status == 401:
                         if hasattr(app, 'storage') and hasattr(app.storage, 'user'):
@@ -297,8 +392,15 @@ async def connect_websocket(max_retries=5, initial_backoff=2):
 
     while retry_count < max_retries:
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(ws_url) as ws:
+            # Use global session with proper keepalive settings
+            session = await get_http_session()
+            # Configure WebSocket with timeout and heartbeat
+            async with session.ws_connect(
+                ws_url,
+                timeout=30.0,  # Connection timeout
+                heartbeat=10.0,  # Send ping every 10 seconds to keep connection alive
+                autoping=True  # Automatically respond to pings
+            ) as ws:
                     logger.info(f"WebSocket connected to {ws_url}")
                     websocket_messages.append("Real-time order updates connected.")
                     ui.notify("WebSocket connected", type="positive")
@@ -448,8 +550,70 @@ def render_header():
             # Connection Status
             with ui.row().classes("status-indicator connection-status"):
                 ui.icon("wifi", size="1rem").classes("text-cyan-400")
-                ui.label(f"Connected: {app.storage.user.get(STORAGE_BROKER_KEY)}").classes("text-sm theme-text-primary") if app.storage.user.get(
-                    STORAGE_BROKER_KEY) else ui.label("Not Connected").classes("text-sm text-red-400")
+                connection_status_label = ui.label().classes("text-sm theme-text-primary")
+                
+                def update_connection_status():
+                    broker = app.storage.user.get(STORAGE_BROKER_KEY)
+                    if broker:
+                        connection_status_label.text = f"Connected: {broker}"
+                        connection_status_label.classes("text-sm theme-text-primary")
+                    else:
+                        connection_status_label.text = "Not Connected"
+                        connection_status_label.classes("text-sm text-red-400")
+                
+                # Initial status
+                update_connection_status()
+                
+                # Make it reactive by checking periodically
+                ui.timer(5, update_connection_status)
+
+            # Broker Switcher
+            broker_switcher_container = ui.row().classes("items-center gap-2")
+            
+            async def load_broker_config():
+                """Load user's broker configuration"""
+                try:
+                    api_keys_response = await fetch_api("/users/me/api-keys")
+                    if api_keys_response and api_keys_response.get("configured_brokers"):
+                        return api_keys_response
+                except Exception as e:
+                    logger.error(f"Error loading broker config: {e}")
+                return None
+
+            async def render_broker_switcher():
+                """Render broker switcher based on user configuration"""
+                broker_config = await load_broker_config()
+                broker_switcher_container.clear()
+                
+                with broker_switcher_container:
+                    if broker_config and broker_config.get("has_multiple_brokers"):
+                        # Multiple brokers - show dropdown
+                        configured_brokers = broker_config.get("configured_brokers", [])
+                        current_broker = app.storage.user.get(STORAGE_BROKER_KEY, configured_brokers[0] if configured_brokers else "Zerodha")
+                        
+                        ui.select(
+                            options=configured_brokers,
+                            value=current_broker,
+                            on_change=lambda e: (
+                                app.storage.user.update({STORAGE_BROKER_KEY: e.value}),
+                                ui.notify(f"Switched to {e.value} - Portfolio/Positions will auto-refresh, Dashboard may need manual refresh", type="info"),
+                                # Trigger connection status update
+                                update_connection_status(),
+                                # Trigger broker change event
+                                trigger_broker_change(e.value)
+                            )
+                        ).classes("text-sm").props("dense outlined")
+                    elif broker_config and broker_config.get("configured_brokers"):
+                        # Single broker - show static label
+                        broker = broker_config.get("configured_brokers")[0]
+                        ui.chip(broker, color="blue").classes("text-xs")
+                    else:
+                        # No brokers configured
+                        ui.chip("No Broker", color="red").classes("text-xs")
+            
+            # Render broker switcher asynchronously
+            import asyncio
+            asyncio.create_task(render_broker_switcher())
 
             # Current Time
             time_label = ui.label().classes("text-sm theme-text-secondary font-mono")
@@ -544,13 +708,24 @@ async def login_page(client: Client):
                                                                              "default_user_id") if user_profile else "default_user_id"
 
                 ui.notify("Login successful!", type="positive")
-                primary_broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
-                profile_response = await fetch_api(f"/profile/{primary_broker}")
-                if not profile_response or not profile_response.get("name"):
-                    ui.notify(f"{primary_broker} not connected or profile incomplete. Please check Settings.",
+                
+                # Check which brokers are connected and set the first connected one as default
+                connected_broker = None
+                for broker in ["Zerodha", "Upstox"]:
+                    try:
+                        profile_response = await fetch_api(f"/profile/{broker}")
+                        if profile_response and profile_response.get("name"):
+                            connected_broker = broker
+                            app.storage.user[STORAGE_BROKER_KEY] = broker
+                            ui.notify(f"{broker} connected: {profile_response.get('name', '')}", type="info")
+                            break
+                    except Exception as e:
+                        logger.error(f"Error checking {broker} connection: {e}")
+                        continue
+                
+                if not connected_broker:
+                    ui.notify("No brokers connected. Please check Settings to connect your broker.",
                               type="warning", multi_line=True)
-                else:
-                    ui.notify(f"{primary_broker} connected: {profile_response.get('name', '')}", type="info")
 
                 ui.navigate.to("/dashboard")
                 create_safe_task(connect_websocket())
@@ -576,6 +751,32 @@ async def login_page(client: Client):
         }
         response = await fetch_api("/auth/register", method="POST", data=data)
         if response:
+            # Set default preferences for new user
+            try:
+                default_preferences = {
+                    'default_order_type': 'MARKET',
+                    'default_product_type': 'CNC',
+                    'refresh_interval': 5,
+                    'order_alerts': True,
+                    'pnl_alerts': True,
+                    'strategy_alerts': True,
+                    'daily_loss_limit': 10000,
+                    'position_size_limit': 50000,
+                    'auto_stop_trading': True,
+                    'max_open_positions': 10,
+                    'risk_per_trade': 2.0,
+                    'max_portfolio_risk': 20.0,
+                    'max_orders_per_minute': 10,
+                    'request_timeout': 30,
+                    'enable_rate_limiting': True,
+                    'auto_retry_requests': True
+                }
+                await fetch_api("/user/preferences", method="POST", data=default_preferences)
+                logger.info("Default preferences set for new user")
+            except Exception as e:
+                logger.error(f"Error setting default preferences: {e}")
+                # Don't fail registration if preferences setting fails
+            
             ui.notify("Registration successful! Please log in.", type="positive")
             tabs.set_value("Login")
 
@@ -886,10 +1087,31 @@ async def strategy_performance_page(client: Client):
 
 @app.on_connect
 async def on_client_connect(client: Client):
+    """Handle client connection - apply theme and setup session"""
     try:
         apply_theme_from_storage()
+        logger.info(f"Client connected: {client.id}")
     except Exception as e:
         logger.error(f"Error applying theme on client connect: {e}")
+
+@app.on_disconnect
+async def on_client_disconnect(client: Client):
+    """Handle client disconnection - cleanup resources"""
+    try:
+        logger.info(f"Client disconnected: {client.id}")
+        # Note: Don't clear storage here as it will cause logouts
+        # Only cleanup temporary resources
+    except Exception as e:
+        logger.error(f"Error handling client disconnect: {e}")
+
+@app.on_shutdown
+async def on_app_shutdown():
+    """Cleanup resources on application shutdown"""
+    try:
+        logger.info("Application shutting down - cleaning up resources")
+        await cleanup_http_session()
+    except Exception as e:
+        logger.error(f"Error during app shutdown: {e}")
 
 
 # Cache utility functions for application-wide use
@@ -928,14 +1150,22 @@ def clear_all_caches():
 
 
 if __name__ in {"__main__", "__mp_main__"}:
-    storage_secret_key = "my_super_secret_key_for_testing_123_please_change_for_prod"
+    # Generate a strong storage secret key - in production, use environment variable
+    storage_secret_key = secrets.token_urlsafe(32)  # Generate strong random key
     # Add static files support for CSS
     # ui.add_css('static/styles.css')
 
-    ui.run(title="AlgoTrade Pro - Advanced Trading Platform",
-           port=8080,
-           reload=True,
-           uvicorn_reload_dirs='.',
-           uvicorn_reload_includes='*.py',
-           storage_secret=storage_secret_key,
-           favicon="🚀")
+    ui.run(
+        title="AlgoTrade Pro - Advanced Trading Platform",
+        port=8081,
+        reload=True,
+        uvicorn_reload_dirs='.',
+        uvicorn_reload_includes='*.py',
+        storage_secret=storage_secret_key,
+        favicon="🚀",
+        # NiceGUI 3.1.0+ session configuration
+        reconnect_timeout=30.0,  # Allow 30 seconds for reconnection
+        # Uvicorn configuration for better stability
+        uvicorn_logging_level="info",
+        show=False,  # Don't auto-open browser
+    )

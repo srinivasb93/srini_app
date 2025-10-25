@@ -3237,8 +3237,11 @@ class EnhancedSIPStrategy:
                 if df.empty:
                     ui.notify("No historical data available", type="warning")
                     return
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce', utc=True)
+                df = df.dropna(subset=['timestamp'])
+                df['timestamp'] = df['timestamp'].dt.tz_convert(None)
                 df = df.sort_values('timestamp')
+                candle_x = df['timestamp'].dt.to_pydatetime().tolist()
                 # Ensure required OHLC columns exist (service returns open/high/low/close at top-level)
                 required_cols = {'open', 'high', 'low', 'close'}
                 if not required_cols.issubset(df.columns):
@@ -3251,7 +3254,7 @@ class EnhancedSIPStrategy:
             # Create candlestick chart
             fig = go.Figure()
             fig.add_trace(go.Candlestick(
-                x=df['timestamp'],
+                x=candle_x,
                 open=df['open'],
                 high=df['high'],
                 low=df['low'],
@@ -3267,7 +3270,11 @@ class EnhancedSIPStrategy:
                     d = extract_trade_date(t)
                     p = t.get('price')
                     if d and p is not None:
-                        s_dates.append(pd.to_datetime(d))
+                        ts = pd.to_datetime(d, errors='coerce', utc=True)
+                        if pd.isna(ts):
+                            continue
+                        ts = ts.tz_convert(None)
+                        s_dates.append(ts.to_pydatetime())
                         s_prices.append(float(p))
                         s_amounts.append(t.get('amount', 0))
 
@@ -3292,7 +3299,11 @@ class EnhancedSIPStrategy:
                     d = extract_trade_date(t)
                     p = t.get('price')
                     if d and p is not None:
-                        b_dates.append(pd.to_datetime(d))
+                        ts = pd.to_datetime(d, errors='coerce', utc=True)
+                        if pd.isna(ts):
+                            continue
+                        ts = ts.tz_convert(None)
+                        b_dates.append(ts.to_pydatetime())
                         b_prices.append(float(p))
                         b_amounts.append(t.get('amount', 0))
 
@@ -3368,20 +3379,20 @@ class EnhancedSIPStrategy:
                 ui.notify("Insufficient ROI data for comparison", type="warning")
                 return
 
-            # Ensure date columns are datetime
-            strategy_df['date'] = pd.to_datetime(strategy_df['date'])
-            benchmark_df['date'] = pd.to_datetime(benchmark_df['date'])
-
-            # Sort by date
-            strategy_df = strategy_df.sort_values('date')
-            benchmark_df = benchmark_df.sort_values('date')
+            # Ensure date columns are timezone-naive python datetimes for JSON serialization
+            strategy_df['date'] = pd.to_datetime(strategy_df['date'], errors='coerce', utc=True)
+            benchmark_df['date'] = pd.to_datetime(benchmark_df['date'], errors='coerce', utc=True)
+            strategy_df = strategy_df.dropna(subset=['date']).sort_values('date')
+            benchmark_df = benchmark_df.dropna(subset=['date']).sort_values('date')
+            strategy_dates = strategy_df['date'].dt.tz_convert(None).dt.to_pydatetime().tolist()
+            benchmark_dates = benchmark_df['date'].dt.tz_convert(None).dt.to_pydatetime().tolist()
 
             # Create enhanced comparison chart
             fig = go.Figure()
 
             # Add strategy performance line
             fig.add_trace(go.Scatter(
-                x=strategy_df['date'],
+                x=strategy_dates,
                 y=strategy_df['portfolio_value'],
                 name='Strategy Portfolio',
                 line=dict(color='#1f77b4', width=3),
@@ -3393,7 +3404,7 @@ class EnhancedSIPStrategy:
 
             # Add benchmark performance line
             fig.add_trace(go.Scatter(
-                x=benchmark_df['date'],
+                x=benchmark_dates,
                 y=benchmark_df['portfolio_value'],
                 name='Benchmark Portfolio',
                 line=dict(color='#ff7f0e', width=3, dash='dash'),
@@ -3513,7 +3524,9 @@ class EnhancedSIPStrategy:
                 return
 
             price_df = pd.DataFrame(points)
-            price_df['timestamp'] = pd.to_datetime(price_df['timestamp'])
+            price_df['timestamp'] = pd.to_datetime(price_df['timestamp'], errors='coerce', utc=True)
+            price_df = price_df.dropna(subset=['timestamp'])
+            price_df['timestamp'] = price_df['timestamp'].dt.tz_convert(None)
             price_df = price_df.sort_values('timestamp')
 
             # Index trades by date for quick accumulation
@@ -3550,7 +3563,7 @@ class EnhancedSIPStrategy:
                 if d in bench_by_date:
                     b_units += bench_by_date[d]['units']
 
-                dates.append(row['timestamp'])
+                dates.append(row['timestamp'].to_pydatetime())
                 s_values.append(s_units * close)
                 b_values.append(b_units * close)
 

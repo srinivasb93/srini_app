@@ -77,6 +77,8 @@ async def render_dashboard_page(fetch_api, user_storage, get_cached_instruments)
                 await render_market_data_tables_section(fetch_api, user_storage, broker, market_data)
 
     # Real-time updates handled by individual widgets
+    # Note: Broker switching shows notification in menu bar
+    # Dashboard doesn't auto-refresh - users can manually refresh or navigate to portfolio/positions
 
 
 async def render_enhanced_dashboard_title(broker, market_data):

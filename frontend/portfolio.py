@@ -14,8 +14,19 @@ async def render_portfolio_page(fetch_api, user_storage, broker):
             with ui.column().classes("gap-2"):
                 with ui.row().classes("items-center gap-2"):
                     ui.icon("account_balance_wallet", size="2rem").classes("text-purple-400")
-                    ui.label(f"Portfolio Overview - {broker}").classes("text-1xl font-bold theme-text-primary dashboard-title")
+                    # Create dynamic title that updates with broker changes
+                    title_label = ui.label(f"Portfolio Overview - {broker}").classes("text-1xl font-bold theme-text-primary dashboard-title")
                     ui.chip("LIVE", color="green").classes("text-xs status-chip")
+                    
+                    # Update title when broker changes
+                    def update_title():
+                        current_broker = user_storage.get('default_broker', broker)
+                        title_label.text = f"Portfolio Overview - {current_broker}"
+                        title_label.update()
+                    
+                    # Monitor broker changes for title update
+                    from app_ui import create_broker_monitor
+                    create_broker_monitor(update_title)
 
                 ui.label("Monitor your investment portfolio and track performance").classes(
                     "text-gray-400 dashboard-subtitle")
@@ -99,9 +110,12 @@ async def render_portfolio_page(fetch_api, user_storage, broker):
         portfolio_table.rows.clear()
         # portfolio_table.update()
 
+        # Get current broker from storage
+        current_broker = user_storage.get('default_broker', broker)
+        
         try:
-            response = await fetch_api(f"/portfolio/{broker}")
-            logger.info(f"Portfolio API response for broker {broker}: {response}")
+            response = await fetch_api(f"/portfolio/{current_broker}")
+            logger.info(f"Portfolio API response for broker {current_broker}: {response}")
 
             if isinstance(response, dict) and response.get("error"):
                 status_label.text = f"Error fetching portfolio: {response['error']}"
@@ -274,3 +288,7 @@ async def render_portfolio_page(fetch_api, user_storage, broker):
 
     # Add refresh button functionality
     ui.button("Refresh Portfolio", icon="refresh", on_click=refresh_portfolio).classes("m-4")
+    
+    # Monitor broker changes and refresh portfolio data
+    from app_ui import create_broker_monitor
+    create_broker_monitor(refresh_portfolio)

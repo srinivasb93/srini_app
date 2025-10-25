@@ -40,6 +40,10 @@ scheduled_status_filter = "All"
 gtt_status_filter = "All"
 auto_status_filter = "All"
 
+# Source selection state (database vs broker) - Only for Regular and GTT orders
+placed_source = "database"
+gtt_source = "database"
+
 ORDERS_PER_PAGE = 10
 
 # UI component references for updates
@@ -74,8 +78,8 @@ def get_unique_statuses(orders):
     statuses = set(order.get('status', '').upper() for order in orders if order.get('status'))
     return ["All"] + sorted(list(statuses))
 
-def create_header_with_controls(title, refresh_callback, cancel_all_callback, filter_select):
-    """Create a header with title, filter, refresh icon, and cancel all icon"""
+def create_header_with_controls(title, refresh_callback, cancel_all_callback, filter_select, source_selector=None):
+    """Create a header with title, filter, source selector, refresh icon, and cancel all icon"""
     with ui.row().classes("w-full justify-between items-center"):
         ui.label(title).classes("text-h6 font-bold theme-text-primary")
         
@@ -83,6 +87,10 @@ def create_header_with_controls(title, refresh_callback, cancel_all_callback, fi
             # Filter by Status (positioned left of refresh icon)
             if filter_select:
                 filter_select.classes("w-32")
+            
+            # Source selector (database vs broker)
+            if source_selector:
+                source_selector
             
             # Refresh icon  
             ui.button(icon="refresh", on_click=refresh_callback).props("flat round size=sm color=primary").tooltip("Refresh Orders")
@@ -155,14 +163,25 @@ def create_status_filter(current_value, on_change, label="Filter by Status"):
         on_change=on_change
     ).classes("w-32").props("dense outlined color=primary size=sm")
 
+def create_source_selector(current_value, on_change, label="Data Source"):
+    """Create source selection radio buttons for database vs broker"""
+    with ui.column().classes("gap-1"):
+        ui.label(label).classes("text-caption text-grey-600")
+        ui.radio(
+            options=["database", "broker"],
+            value=current_value,
+            on_change=on_change
+        ).props("dense inline")
+    return None
+
 async def refresh_placed_orders_with_pagination(fetch_api, broker):
     """Refresh placed orders with pagination support"""
-    global placed_orders_data, placed_current_page, placed_status_filter, placed_orders_table
+    global placed_orders_data, placed_current_page, placed_status_filter, placed_orders_table, placed_source
     
     try:
-        # Fetch all orders
-        orders_data = await fetch_api(f"/orders/{broker}")
-        logger.debug(f"Fetched placed orders: {orders_data}")
+        # Fetch all orders with source parameter
+        orders_data = await fetch_api(f"/orders/{broker}?source={placed_source}")
+        logger.debug(f"Fetched placed orders from {placed_source}: {orders_data}")
         
         if orders_data and isinstance(orders_data, list):
             # Format orders
@@ -272,6 +291,25 @@ def on_placed_status_change(e):
     placed_current_page = 1  # Reset to first page
     update_placed_orders_table()
 
+def on_placed_source_change(e):
+    """Handle placed orders source change"""
+    global placed_source, placed_current_page
+    placed_source = e.value
+    placed_current_page = 1  # Reset to first page
+    # Trigger refresh to fetch from new source
+    if hasattr(ui, '_current_fetch_api') and hasattr(ui, '_current_broker'):
+        create_safe_task(refresh_placed_orders_with_pagination(ui._current_fetch_api, ui._current_broker))
+
+def on_gtt_source_change(e):
+    """Handle GTT orders source change"""
+    global gtt_source, gtt_current_page
+    gtt_source = e.value
+    gtt_current_page = 1  # Reset to first page
+    # Trigger refresh to fetch from new source
+    if hasattr(ui, '_current_fetch_api') and hasattr(ui, '_current_broker'):
+        create_safe_task(refresh_gtt_orders_with_pagination(ui._current_fetch_api, ui._current_broker))
+
+
 def on_placed_page_change(page):
     """Handle page change for placed orders"""
     global placed_current_page
@@ -281,6 +319,10 @@ def on_placed_page_change(page):
 async def render_placed_orders(fetch_api, user_storage, broker):
     """Render enhanced placed orders with filters and pagination"""
     global placed_orders_table, placed_filter_select, placed_pagination_info
+    
+    # Store fetch_api and broker for source change callback
+    ui._current_fetch_api = fetch_api
+    ui._current_broker = broker
     
     # Clean container with proper spacing
     with ui.column().classes("w-full"):
@@ -324,6 +366,15 @@ async def render_placed_orders(fetch_api, user_storage, broker):
                         "height: 40px; "
                         "align-self: center;"
                     )
+                    
+                    # Source selector (Database vs Broker) - Horizontal layout
+                    with ui.column().classes("gap-1"):
+                        ui.label("Data Source").classes("text-caption text-grey-600")
+                        ui.radio(
+                            options=["database", "broker"],
+                            value=placed_source,
+                            on_change=on_placed_source_change
+                        ).props("dense inline")
                     
                     # Modern refresh button
                     ui.button(
@@ -373,21 +424,18 @@ async def render_placed_orders(fetch_api, user_storage, broker):
     # Create enhanced table
     placed_orders_table = create_enhanced_table(columns, [], 'order_id')
 
-    # Add action buttons
+    # Add action buttons for rows that doesn't contain 'COMPLETE', 'REJECTED','CANCELLED'
     placed_orders_table.add_slot('body-cell-actions', '''
         <q-td :props="props">
-            <q-btn v-if="props.row.status && props.row.status !== 'COMPLETE' && props.row.status !== 'CANCELLED' && props.row.status !== 'REJECTED'"
-                   dense flat round color="primary" icon="edit" size="sm"
-                   @click="() => $parent.$emit('modify_order', props.row)">
+            <q-btn v-if="props.row.status && props.row.status !== 'COMPLETE' && props.row.status !== 'REJECTED' && !props.row.status.includes('CANCELLED')" 
+                   dense flat round color="primary" icon="edit" size="sm" @click="() => $parent.$emit('modify_order', props.row)">
                 <q-tooltip>Modify Order</q-tooltip>
             </q-btn>
-            <q-btn v-if="props.row.status && props.row.status !== 'COMPLETE' && props.row.status !== 'CANCELLED' && props.row.status !== 'REJECTED'"
-                   dense flat round color="negative" icon="cancel" size="sm"
-                   @click="() => $parent.$emit('cancel_order', props.row.order_id)">
+            <q-btn v-if="props.row.status && props.row.status !== 'COMPLETE' && props.row.status !== 'REJECTED' && !props.row.status.includes('CANCELLED')" dense flat round color="negative" icon="cancel" size="sm" @click="() => $parent.$emit('cancel_order', props.row.order_id)">
                 <q-tooltip>Cancel Order</q-tooltip>
             </q-btn>
-        </q-td>
-    ''')
+            </q-td>
+        ''')
 
     # Pagination controls with info on the left
     with ui.row().classes("w-full justify-between items-center mt-3"):
@@ -403,51 +451,124 @@ async def render_placed_orders(fetch_api, user_storage, broker):
             ui.button(icon="last_page", on_click=lambda: on_placed_page_change(get_total_pages(len(filter_orders_by_status(placed_orders_data, placed_status_filter))))).props("flat dense size=sm color=primary")
 
     # Event handlers
-    async def handle_modify_order(order):
-        with ui.dialog() as dialog, ui.card().classes("w-96"):
-            ui.label(f"Modify Order {order['order_id']}").classes("text-h6 mb-1")
+    def handle_modify_order(order):
+        # Validate order_id before proceeding
+        order_id = order.get('order_id')
+        if not order_id or order_id == 'N/A':
+            ui.notify("Invalid order ID. Cannot modify this order.", type="negative")
+            return
+            
+        def create_dialog():
+            with ui.dialog() as dialog, ui.card().classes("w-96"):
+                ui.label(f"Modify Order {order_id}").classes("text-h6 mb-1")
 
-            with ui.column().classes('w-full gap-2'):
-                quantity_input = ui.number(label="Quantity", value=order.get('quantity', 0), min=1, format='%d').classes("w-full")
-                price_input = ui.number(label="Price", value=float(order.get('price', 0)) if order.get('price') != 'N/A' else 0, min=0, step=0.05, format='%.2f').classes("w-full")
-                trigger_price_input = ui.number(label="Trigger Price", value=float(order.get('trigger_price', 0)) if order.get('trigger_price') != 'N/A' else 0, min=0, step=0.05, format='%.2f').classes("w-full")
-                validity_select = ui.select(options=['DAY', 'IOC'], value=order.get('validity', 'DAY'), label="Validity").classes("w-full")
+                with ui.column().classes('w-full gap-2'):
+                    quantity_input = ui.number(label="Quantity", value=order.get('quantity', 0), min=1, format='%d').classes("w-full")
+                    price_input = ui.number(label="Price", value=float(order.get('price', 0)) if order.get('price') != 'N/A' else 0, min=0, step=0.05, format='%.2f').classes("w-full")
+                    trigger_price_input = ui.number(label="Trigger Price", value=float(order.get('trigger_price', 0)) if order.get('trigger_price') != 'N/A' else 0, min=0, step=0.05, format='%.2f').classes("w-full")
+                    validity_select = ui.select(options=['DAY', 'IOC'], value=order.get('validity', 'DAY'), label="Validity").classes("w-full")
 
-            with ui.row().classes("w-full justify-end gap-2 mt-4"):
-                ui.button("Cancel", on_click=dialog.close).props("flat")
+                with ui.row().classes("w-full justify-end gap-2 mt-4"):
+                    ui.button("Cancel", on_click=dialog.close).props("flat")
 
-                async def confirm_modify():
-                    modify_data = {
-                        "quantity": int(quantity_input.value),
-                        "price": float(price_input.value),
-                        "trigger_price": float(trigger_price_input.value),
-                        "validity": validity_select.value
-                    }
-                    response = await fetch_api(f"/orders/{order['order_id']}/modify", method="PUT", data=modify_data)
-                    if response and response.get("status") == "success":
-                        ui.notify(f"Order {order['order_id']} modified successfully.", type="positive")
-                        await refresh_placed_orders_with_pagination(fetch_api, broker)
-                    else:
-                        ui.notify(f"Failed to modify order {order['order_id']}.", type="negative")
-                    dialog.close()
+                    async def confirm_modify():
+                        try:
+                            # Validate inputs
+                            quantity = int(quantity_input.value)
+                            price = float(price_input.value)
+                            trigger_price = float(trigger_price_input.value)
+                            order_type = order.get('order_type', 'MARKET')
+                            
+                            # Business logic validation
+                            if quantity <= 0:
+                                ui.notify("Quantity must be greater than 0", type="negative")
+                                return
+                            
+                            # For LIMIT orders, price must be > 0
+                            if order_type == 'LIMIT' and price <= 0:
+                                ui.notify("Price must be greater than 0 for LIMIT orders", type="negative")
+                                return
+                            
+                            # For SL orders, trigger_price must be > 0
+                            if order_type in ['SL', 'SL-M'] and trigger_price <= 0:
+                                ui.notify("Trigger price must be greater than 0 for SL orders", type="negative")
+                                return
+                            
+                            modify_data = {
+                                "quantity": quantity,
+                                "order_type": order_type,
+                                "price": price,
+                                "trigger_price": trigger_price,
+                                "validity": validity_select.value
+                            }
+                            
+                            # Debug logging
+                            logger.info(f"Modifying order {order_id} with data: {modify_data}")
+                            
+                            response = await fetch_api(f"/orders/{order_id}/modify", method="PUT", data=modify_data)
+                            
+                            if response and response.get("status") == "success":
+                                ui.notify(f"Order {order_id} modified successfully.", type="positive")
+                                await refresh_placed_orders_with_pagination(fetch_api, broker)
+                            else:
+                                error_msg = response.get("detail", "Unknown error") if response else "No response"
+                                ui.notify(f"Failed to modify order {order_id}: {error_msg}", type="negative")
+                        except ValueError as e:
+                            ui.notify(f"Invalid input values: {str(e)}", type="negative")
+                        except Exception as e:
+                            logger.error(f"Error modifying order {order_id}: {str(e)}")
+                            ui.notify(f"Error modifying order: {str(e)}", type="negative")
+                        finally:
+                            dialog.close()
 
-                ui.button("Modify", on_click=lambda: create_safe_task(confirm_modify())).props("color=primary")
-            dialog.open()
+                    ui.button("Modify", on_click=confirm_modify).props("color=primary")
+                dialog.open()
+        
+        create_dialog()
 
-    async def handle_cancel_order(order_id):
-        try:
-            response = await fetch_api(f"/orders/{order_id}", method="DELETE")
-            if response and response.get("status") == "success":
-                ui.notify(f"Order {order_id} cancelled successfully.", type="positive")
-            else:
-                ui.notify(f"Failed to cancel order {order_id}.", type="negative")
-            await refresh_placed_orders_with_pagination(fetch_api, broker)
-        except Exception as e:
-            ui.notify(f"Error cancelling order: {str(e)}", type="negative")
-            logger.error(f"Exception in handle_cancel_order: {str(e)}")
+    def handle_cancel_order(order_id):
+        # Validate order_id before proceeding
+        if not order_id or order_id == 'N/A':
+            ui.notify("Invalid order ID. Cannot cancel this order.", type="negative")
+            return
+            
+        def create_confirmation_dialog():
+            with ui.dialog() as dialog, ui.card().classes("w-96"):
+                ui.label("Confirm Order Cancellation").classes("text-h6 mb-4")
+                
+                with ui.column().classes('w-full gap-2'):
+                    ui.label(f"Are you sure you want to cancel order {order_id}?")
+                    ui.label("This action cannot be undone.").classes("text-red-600 font-medium")
+                
+                with ui.row().classes("w-full justify-end gap-2 mt-4"):
+                    ui.button("Cancel", on_click=dialog.close).props("flat")
+                    
+                    async def confirm_cancel():
+                        try:
+                            logger.info(f"Cancelling order {order_id}")
+                            response = await fetch_api(f"/orders/{order_id}", method="DELETE")
+                            
+                            if response and response.get("status") == "success":
+                                ui.notify(f"Order {order_id} cancelled successfully.", type="positive")
+                            else:
+                                error_msg = response.get("detail", "Unknown error") if response else "No response"
+                                ui.notify(f"Failed to cancel order {order_id}: {error_msg}", type="negative")
+                            
+                            await refresh_placed_orders_with_pagination(fetch_api, broker)
+                        except Exception as e:
+                            logger.error(f"Exception in handle_cancel_order: {str(e)}")
+                            ui.notify(f"Error cancelling order: {str(e)}", type="negative")
+                        finally:
+                            dialog.close()
+                    
+                    ui.button("Confirm Cancel", on_click=confirm_cancel).props("color=negative")
+                
+                dialog.open()
+        
+        create_confirmation_dialog()
 
-    placed_orders_table.on('modify_order', lambda e: create_safe_task(handle_modify_order(e.args)))
-    placed_orders_table.on('cancel_order', lambda e: create_safe_task(handle_cancel_order(e.args)))
+    placed_orders_table.on('modify_order', lambda e: handle_modify_order(e.args))
+    placed_orders_table.on('cancel_order', lambda e: handle_cancel_order(e.args))
 
     # Register WS callback to auto-refresh on placed order events
     def _on_order_event(data: dict):
@@ -500,6 +621,7 @@ async def refresh_scheduled_orders_with_pagination(fetch_api, broker):
     global scheduled_orders_data, scheduled_current_page, scheduled_status_filter, scheduled_orders_table, scheduled_filter_select, scheduled_pagination_info
     
     try:
+        # Scheduled orders are application-specific and only stored in database
         orders_data = await fetch_api(f"/scheduled-orders/{broker}")
         logger.debug(f"Fetched scheduled orders: {orders_data}")
         
@@ -735,18 +857,38 @@ async def render_scheduled_orders(fetch_api, user_storage, broker):
             ui.button(icon="chevron_right", on_click=lambda: on_scheduled_page_change(scheduled_current_page + 1)).props("flat dense size=sm color=primary")
             ui.button(icon="last_page", on_click=lambda: on_scheduled_page_change(get_total_pages(len(filter_orders_by_status(scheduled_orders_data, scheduled_status_filter))))).props("flat dense size=sm color=primary")
     
-    async def handle_cancel_order(order_id):
-        try:
-            response = await fetch_api(f"/scheduled-orders/{order_id}?broker={broker}", method="DELETE")
-            if response and response.get("status") == "success":
-                ui.notify(f"Order {order_id} cancelled successfully.", type="positive")
-            else:
-                ui.notify(f"Failed to cancel order {order_id}.", type="negative")
-            await refresh_scheduled_orders_with_pagination(fetch_api, broker)
-        except Exception as e:
-            ui.notify(f"Error cancelling order: {str(e)}", type="negative")
+    def handle_cancel_order(order_id):
+        def create_confirmation_dialog():
+            with ui.dialog() as dialog, ui.card().classes("w-96"):
+                ui.label("Confirm Scheduled Order Cancellation").classes("text-h6 mb-4")
+                
+                with ui.column().classes('w-full gap-2'):
+                    ui.label(f"Are you sure you want to cancel scheduled order {order_id}?")
+                    ui.label("This action cannot be undone.").classes("text-red-600 font-medium")
+                
+                with ui.row().classes("w-full justify-end gap-2 mt-4"):
+                    ui.button("Cancel", on_click=dialog.close).props("flat")
+                    
+                    async def confirm_cancel():
+                        try:
+                            response = await fetch_api(f"/scheduled-orders/{order_id}?broker={broker}", method="DELETE")
+                            if response and response.get("status") == "success":
+                                ui.notify(f"Order {order_id} cancelled successfully.", type="positive")
+                            else:
+                                ui.notify(f"Failed to cancel order {order_id}.", type="negative")
+                            await refresh_scheduled_orders_with_pagination(fetch_api, broker)
+                        except Exception as e:
+                            ui.notify(f"Error cancelling order: {str(e)}", type="negative")
+                        finally:
+                            dialog.close()
+                    
+                    ui.button("Confirm Cancel", on_click=confirm_cancel).props("color=negative")
+                
+                dialog.open()
+        
+        create_confirmation_dialog()
     
-    scheduled_orders_table.on('cancel_order', lambda e: create_safe_task(handle_cancel_order(e.args)))
+    scheduled_orders_table.on('cancel_order', lambda e: handle_cancel_order(e.args))
 
     # Register WS callback to auto-refresh on scheduled order events
     def _on_sched_event(data: dict):
@@ -761,11 +903,11 @@ async def render_scheduled_orders(fetch_api, user_storage, broker):
 
 async def refresh_gtt_orders_with_pagination(fetch_api, broker, attempt: int = 1):
     """Refresh GTT orders with pagination support"""
-    global gtt_orders_data, gtt_current_page, gtt_status_filter, gtt_orders_table, gtt_filter_select, gtt_pagination_info
+    global gtt_orders_data, gtt_current_page, gtt_status_filter, gtt_orders_table, gtt_filter_select, gtt_pagination_info, gtt_source
     
     try:
-        orders_data = await fetch_api(f"/gtt-orders/{broker}")
-        logger.debug(f"Fetched GTT orders: {orders_data}")
+        orders_data = await fetch_api(f"/gtt-orders/{broker}?source={gtt_source}")
+        logger.debug(f"Fetched GTT orders from {gtt_source}: {orders_data}")
         
         if orders_data and isinstance(orders_data, list):
             formatted_orders = []
@@ -937,6 +1079,15 @@ async def render_gtt_orders(fetch_api, user_storage, broker):
                     "height: 40px; "
                     "align-self: center;"
                 )
+                
+                # Source selector (Database vs Broker) - Horizontal layout
+                with ui.column().classes("gap-1"):
+                    ui.label("Data Source").classes("text-caption text-grey-600")
+                    ui.radio(
+                        options=["database", "broker"],
+                        value=gtt_source,
+                        on_change=on_gtt_source_change
+                    ).props("dense inline")
                 
                 # Modern refresh button
                 ui.button(
@@ -1485,18 +1636,38 @@ async def render_auto_orders(fetch_api, user_storage, broker):
             ui.button(icon="chevron_right", on_click=lambda: on_auto_page_change(auto_current_page + 1)).props("flat dense size=sm color=primary")
             ui.button(icon="last_page", on_click=lambda: on_auto_page_change(get_total_pages(len(filter_orders_by_status(auto_orders_data, auto_status_filter))))).props("flat dense size=sm color=primary")
 
-    async def handle_cancel_order(order_id):
-        try:
-            response = await fetch_api(f"/auto-orders/{order_id}", method="DELETE")
-            if response and response.get("status") == "success":
-                ui.notify(f"Auto order {order_id} cancelled successfully.", type="positive")
-            else:
-                ui.notify(f"Failed to cancel auto order {order_id}.", type="negative")
-            await refresh_auto_orders_with_pagination(fetch_api, broker)
-        except Exception as e:
-            ui.notify(f"Error cancelling auto order: {str(e)}", type="negative")
+    def handle_cancel_order(order_id):
+        def create_confirmation_dialog():
+            with ui.dialog() as dialog, ui.card().classes("w-96"):
+                ui.label("Confirm Auto Order Cancellation").classes("text-h6 mb-4")
+                
+                with ui.column().classes('w-full gap-2'):
+                    ui.label(f"Are you sure you want to cancel auto order {order_id}?")
+                    ui.label("This action cannot be undone.").classes("text-red-600 font-medium")
+                
+                with ui.row().classes("w-full justify-end gap-2 mt-4"):
+                    ui.button("Cancel", on_click=dialog.close).props("flat")
+                    
+                    async def confirm_cancel():
+                        try:
+                            response = await fetch_api(f"/auto-orders/{order_id}", method="DELETE")
+                            if response and response.get("status") == "success":
+                                ui.notify(f"Auto order {order_id} cancelled successfully.", type="positive")
+                            else:
+                                ui.notify(f"Failed to cancel auto order {order_id}.", type="negative")
+                            await refresh_auto_orders_with_pagination(fetch_api, broker)
+                        except Exception as e:
+                            ui.notify(f"Error cancelling auto order: {str(e)}", type="negative")
+                        finally:
+                            dialog.close()
+                    
+                    ui.button("Confirm Cancel", on_click=confirm_cancel).props("color=negative")
+                
+                dialog.open()
+        
+        create_confirmation_dialog()
 
-    auto_orders_table.on('cancel_order', lambda e: create_safe_task(handle_cancel_order(e.args)))
+    auto_orders_table.on('cancel_order', lambda e: handle_cancel_order(e.args))
     await refresh_auto_orders_with_pagination(fetch_api, broker)
 
 async def render_order_book_page(fetch_api, user_storage, broker):

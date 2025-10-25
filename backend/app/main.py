@@ -2,11 +2,92 @@ import sys
 import os
 import logging
 import asyncio
+import signal
+import time
+from sqlalchemy.future import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import text, func
+from sqlalchemy import and_
+import aiohttp
+from fastapi import FastAPI, Depends, HTTPException, Request, WebSocket, Query
+from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+from typing import List, Optional
+from datetime import datetime, timedelta
+import uuid
+import pandas as pd
+import bcrypt
+from collections import defaultdict
+from uuid import uuid4
+import upstox_client
 
 # Ensure consistent import path - add this RIGHT after your existing path manipulation
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+
+from backend.app.database import (
+    init_databases,
+    cleanup_databases,
+    db_manager,
+    get_db,
+    get_nsedata_db
+)
+
+from backend.app.api_manager import initialize_user_apis
+from backend.app.routes.sip_routes import sip_router
+from backend.app.ws_events import register_client, unregister_client
+from backend.app.routes.watchlist import watchlist_router
+from backend.app.routes.equity_data_routes import equity_router, nse_openchart
+from backend.app.routes.mutual_fund_routes import mf_router
+from backend.app.routes.scanner_routes import router as scanner_router
+from backend.app.routes import data
+
+# Rest of your imports exactly as they were
+# For standalone debugging - add this check
+try:
+    from .models import Order, ScheduledOrder as ScheduledOrderModel, AutoOrder as AutoOrderModel, GTTOrder as GTTOrderModel, User, Strategy, Position, StrategyExecution
+    from .services import (
+    OrderManager, OrderMonitor, fetch_upstox_access_token, fetch_zerodha_access_token, place_order,
+    get_order_book, get_positions, get_portfolio, get_funds_data, get_quotes, get_ohlc, get_ltp,
+    get_historical_data, fetch_instruments, get_order_history, get_order_trades, modify_order, TokenExpiredError,
+    execute_strategy, backtest_strategy, get_mf_sips, schedule_strategy_execution, stop_strategy_execution
+    )
+    from .schemas import (
+        PlaceOrderRequest, UserCreate, UserResponse, ScheduledOrder, ScheduledOrderRequest, AutoOrder, AutoOrderRequest,
+        GTTOrder, GTTOrderRequest, ProfileResponse, MarginResponse, QuoteResponse, OHLCResponse, LTPResponse,
+        HistoricalDataResponse, Instrument, OrderHistory, Trade, ModifyOrderRequest, StrategyRequest, StrategyResponse,
+        BacktestRequest, MFSIPResponse, StrategyExecutionRequest, ConvertPositionRequest
+    )
+except ImportError:
+    # Fallback to absolute imports for standalone debugging
+    from backend.app.models import Order, ScheduledOrder as ScheduledOrderModel, AutoOrder as AutoOrderModel, GTTOrder as GTTOrderModel, User, Strategy, Position, StrategyExecution
+    from backend.app.services import (
+        OrderManager, OrderMonitor, fetch_upstox_access_token, fetch_zerodha_access_token, place_order,
+        get_order_book, get_positions, get_portfolio, get_funds_data, get_quotes, get_ohlc, get_ltp,
+        get_historical_data, fetch_instruments, get_order_history, get_order_trades, modify_order, TokenExpiredError,
+        execute_strategy, backtest_strategy, get_mf_sips, schedule_strategy_execution, stop_strategy_execution
+    )
+    from backend.app.schemas import (
+        PlaceOrderRequest, UserCreate, UserResponse, ScheduledOrder, ScheduledOrderRequest, AutoOrder, AutoOrderRequest,
+        GTTOrder, GTTOrderRequest, ProfileResponse, MarginResponse, QuoteResponse, OHLCResponse, LTPResponse,
+        HistoricalDataResponse, Instrument, OrderHistory, Trade, ModifyOrderRequest, StrategyRequest, StrategyResponse,
+        BacktestRequest, MFSIPResponse, StrategyExecutionRequest, ConvertPositionRequest
+    )
+from backend.app.strategy_engine import StrategyExecutionEngine
+from backend.app.risk_manager import RiskManager
+from backend.app.cache_manager import cache_manager, cache_user_data, cache_portfolio_data, CacheConfig, invalidate_user_cache
+from common_utils.upstox_utils import get_symbol_for_instrument
+from common_utils.db_utils import async_fetch_query
+from common_utils.utils import sanitize_floats
+from common_utils.read_write_sql_data import load_sql_data
+from common_utils.market_data import MarketData
+# Auth import with fallback
+try:
+    from .auth import UserManager, oauth2_scheme
+except ImportError:
+    from backend.app.auth import UserManager, oauth2_scheme
 
 # Create logs directory if it doesn't exist (use absolute path)
 app_dir = os.path.dirname(os.path.abspath(__file__))
@@ -66,99 +147,136 @@ logger.info(f"Project root: {project_root}")
 logger.info(f"Backend log file: {backend_log_file}")
 logger.info("="*50)
 
-# Now import everything else in the same order as before
-import aiohttp
-from fastapi import FastAPI, Depends, HTTPException, Request, WebSocket, Query
-from fastapi.security import OAuth2PasswordRequestForm
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-from typing import List, Optional
-from datetime import datetime, timedelta
-import uuid
-import pandas as pd
-import bcrypt
-from collections import defaultdict
-from uuid import uuid4
-
-from backend.app.database import (
-    init_databases,
-    cleanup_databases,
-    db_manager,
-    get_db,
-    get_nsedata_db
-)
-
-from backend.app.api_manager import initialize_user_apis
-from backend.app.routes.sip_routes import sip_router
-from backend.app.routes.watchlist import watchlist_router
-from backend.app.routes.equity_data_routes import equity_router, nse_openchart
-from backend.app.routes.mutual_fund_routes import mf_router
-from backend.app.routes.scanner_routes import router as scanner_router
-from backend.app.routes import data
-
-# Continue with your other imports...
-from sqlalchemy.future import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql import text, func
-from sqlalchemy import and_, or_
-
-# Rest of your imports exactly as they were
-# For standalone debugging - add this check
-try:
-    from .models import Order, ScheduledOrder as ScheduledOrderModel, AutoOrder as AutoOrderModel, GTTOrder as GTTOrderModel, User, Strategy, Position, StrategyExecution
-    from .services import (
-    OrderManager, OrderMonitor, fetch_upstox_access_token, fetch_zerodha_access_token, place_order,
-    get_order_book, get_positions, get_portfolio, get_funds_data, get_quotes, get_ohlc, get_ltp,
-    get_historical_data, fetch_instruments, get_order_history, get_order_trades, modify_order, TokenExpiredError,
-    execute_strategy, backtest_strategy, get_mf_sips, schedule_strategy_execution, stop_strategy_execution,
-        get_quotes_from_nse, get_ltp_openchart, get_ltp_from_nse, get_ohlc_openchart, get_ohlc_from_nse
-    )
-    from .schemas import (
-        PlaceOrderRequest, UserCreate, UserResponse, ScheduledOrder, ScheduledOrderRequest, AutoOrder, AutoOrderRequest,
-        GTTOrder, GTTOrderRequest, ProfileResponse, MarginResponse, QuoteResponse, OHLCResponse, LTPResponse,
-        HistoricalDataResponse, Instrument, OrderHistory, Trade, ModifyOrderRequest, StrategyRequest, StrategyResponse,
-        BacktestRequest, MFSIPResponse, StrategyExecutionRequest, PartialExit, MarketDataRequest, HistoricalDataRequest
-    )
-except ImportError:
-    # Fallback to absolute imports for standalone debugging
-    from backend.app.models import Order, ScheduledOrder as ScheduledOrderModel, AutoOrder as AutoOrderModel, GTTOrder as GTTOrderModel, User, Strategy, Position, StrategyExecution
-    from backend.app.services import (
-        OrderManager, OrderMonitor, fetch_upstox_access_token, fetch_zerodha_access_token, place_order,
-        get_order_book, get_positions, get_portfolio, get_funds_data, get_quotes, get_ohlc, get_ltp,
-        get_historical_data, fetch_instruments, get_order_history, get_order_trades, modify_order, TokenExpiredError,
-        execute_strategy, backtest_strategy, get_mf_sips, schedule_strategy_execution, stop_strategy_execution,
-        get_quotes_from_nse, get_ltp_openchart, get_ltp_from_nse, get_ohlc_openchart, get_ohlc_from_nse
-    )
-    from backend.app.schemas import (
-        PlaceOrderRequest, UserCreate, UserResponse, ScheduledOrder, ScheduledOrderRequest, AutoOrder, AutoOrderRequest,
-        GTTOrder, GTTOrderRequest, ProfileResponse, MarginResponse, QuoteResponse, OHLCResponse, LTPResponse,
-        HistoricalDataResponse, Instrument, OrderHistory, Trade, ModifyOrderRequest, StrategyRequest, StrategyResponse,
-        BacktestRequest, MFSIPResponse, StrategyExecutionRequest, PartialExit, MarketDataRequest, HistoricalDataRequest
-    )
-from backend.app.strategy_engine import StrategyExecutionEngine
-from backend.app.risk_manager import RiskManager
-from backend.app.cache_manager import cache_manager, cache_user_data, cache_portfolio_data, CacheConfig, invalidate_user_cache
-from common_utils.upstox_utils import get_symbol_for_instrument
-from common_utils.db_utils import async_fetch_query
-from common_utils.utils import sanitize_floats
-from common_utils.read_write_sql_data import load_sql_data
-from common_utils.market_data import MarketData
-# Auth import with fallback
-try:
-    from .auth import UserManager, oauth2_scheme
-except ImportError:
-    from backend.app.auth import UserManager, oauth2_scheme
-
 # Initialize global variables that existing functions depend on
 order_monitor = None
 order_manager = None
 background_tasks = []
 
+# Helper function for WebSocket cleanup
+async def _cleanup_websockets(_order_ws_clients, _lock):
+    """Clean up WebSocket connections with proper error handling"""
+    async with _lock:
+        for user_id, clients in list(_order_ws_clients.items()):
+            for websocket in list(clients):
+                try:
+                    if not websocket.closed:
+                        await websocket.close(code=1000, reason="Server shutdown")
+                    logger.info(f"Closed WebSocket for user {user_id}")
+                except Exception as e:
+                    logger.warning(f"Error closing WebSocket for user {user_id}: {e}")
+            _order_ws_clients[user_id].clear()
+        _order_ws_clients.clear()
+
+# Global shutdown flag and graceful shutdown tuning
+_shutdown_requested = False
+_shutdown_completed = False
+_FORCE_EXIT_SIGNAL_THRESHOLD = 3
+_FORCE_EXIT_GRACE_SECONDS = 10.0
+_FORCE_EXIT_BURST_WINDOW = 2.0
+
+_original_sigint_handler = signal.getsignal(signal.SIGINT)
+try:
+    _original_sigterm_handler = signal.getsignal(signal.SIGTERM)
+except AttributeError:
+    _original_sigterm_handler = None
+
+
+def _delegate_to_original(signum, frame):
+    """Call the original uvicorn signal handler if available."""
+    handler = None
+    if signum == signal.SIGINT:
+        handler = _original_sigint_handler
+    elif signum == signal.SIGTERM:
+        handler = _original_sigterm_handler
+
+    if callable(handler) and handler is not signal_handler:
+        try:
+            handler(signum, frame)
+        except Exception as exc:
+            logger.debug(f"Original signal handler raised exception: {exc}")
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully, only forcing exit after repeated attempts"""
+    global _shutdown_requested, _shutdown_completed
+
+    now = time.monotonic()
+    signal_count = getattr(signal_handler, "_signal_count", 0) + 1
+    signal_handler._signal_count = signal_count
+
+    first_signal_time = getattr(signal_handler, "_first_signal_time", None)
+    if first_signal_time is None:
+        first_signal_time = now
+        signal_handler._first_signal_time = now
+
+    last_signal_time = getattr(signal_handler, "_last_signal_time", None)
+    time_since_last = None
+    if last_signal_time is not None:
+        time_since_last = now - last_signal_time
+    signal_handler._last_signal_time = now
+
+    if signal_count == 1:
+        logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+        _shutdown_requested = True
+        _delegate_to_original(signum, frame)
+        return
+
+    elapsed = now - first_signal_time
+
+    if _shutdown_completed:
+        logger.info(
+            "Received shutdown signal %s (count=%d) after cleanup completed; waiting for process exit.",
+            signum,
+            signal_count
+        )
+        return
+
+    if signal_count < _FORCE_EXIT_SIGNAL_THRESHOLD:
+        logger.info(
+            "Received additional shutdown signal %s (count=%d, %.1fs since first); cleanup still in progress.",
+            signum,
+            signal_count,
+            elapsed
+        )
+        return
+
+    if elapsed < _FORCE_EXIT_GRACE_SECONDS:
+        logger.info(
+            "Received %d shutdown signals within %.1fs; waiting for grace period before forcing exit.",
+            signal_count,
+            elapsed
+        )
+        return
+
+    if time_since_last is not None and time_since_last <= _FORCE_EXIT_BURST_WINDOW:
+        logger.warning(
+            "Received %d shutdown signals in quick succession (%.2fs since last) over %.1fs total - forcing exit",
+            signal_count,
+            time_since_last,
+            elapsed
+        )
+        os._exit(1)
+
+    logger.info(
+        "Received %d shutdown signals over %.1fs; cleanup still running. "
+        "Send another interrupt quickly to force exit if required.",
+        signal_count,
+        elapsed
+    )
+
+# Register signal handlers
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Simplified lifespan with reliable startup and shutdown"""
-    global order_monitor, order_manager, user_apis, background_tasks
+    """Enhanced lifespan with reliable startup and shutdown"""
+    global order_monitor, order_manager, user_apis, background_tasks, _shutdown_requested, _shutdown_completed
+
+    _shutdown_requested = False
+    _shutdown_completed = False
+    signal_handler._signal_count = 0
+    signal_handler._first_signal_time = None
+    signal_handler._last_signal_time = None
 
     logger.info("Starting Modern Trading Platform...")
     
@@ -217,12 +335,18 @@ async def lifespan(app: FastAPI):
         async def safe_monitor_task():
             try:
                 await order_monitor.run_scheduled_tasks(user_apis=user_apis)
+            except asyncio.CancelledError:
+                logger.info("OrderMonitor cancelled during shutdown")
+                raise
             except Exception as e:
                 logger.error(f"OrderMonitor error: {e}")
 
         async def safe_manager_task():
             try:
                 await order_manager.start(user_apis=user_apis)
+            except asyncio.CancelledError:
+                logger.info("OrderManager cancelled during shutdown")
+                raise
             except Exception as e:
                 logger.error(f"OrderManager error: {e}")
 
@@ -269,38 +393,89 @@ async def lifespan(app: FastAPI):
                 task.cancel()
         raise
     finally:
-        # Simple, reliable shutdown
+        # Enhanced shutdown with aggressive cleanup and timeout
         logger.info("Shutting down...")
 
         try:
-            # Step 1: Stop services
-            if order_monitor:
-                order_monitor.running = False
-            if order_manager:
-                order_manager.running = False
-
-            # Step 2: Cancel background tasks quickly
-            for task in background_tasks:
-                if not task.done():
-                    task.cancel()
-
-            # Step 3: Wait briefly for cancellation (don't hang)
-            if background_tasks:
-                try:
-                    await asyncio.wait_for(
-                        asyncio.gather(*background_tasks, return_exceptions=True),
-                        timeout=2.0  # Short timeout
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning("Tasks didn't cancel in time - proceeding")
-
-            # Step 4: Close databases
-            await cleanup_databases()
-
-            logger.info("Shutdown completed")
-
+            # Wrap entire shutdown in a timeout
+            await asyncio.wait_for(_perform_shutdown(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.error("Shutdown timed out - forcing exit")
+            import os
+            os._exit(1)
         except Exception as e:
             logger.error(f"Shutdown error: {e}")
+            import os
+            os._exit(1)
+
+async def _perform_shutdown():
+    """Perform the actual shutdown operations"""
+    global _shutdown_completed
+    try:
+        # Step 1: Stop services immediately
+        logger.info("Stopping services...")
+        if order_monitor:
+            order_monitor.running = False
+            logger.info("OrderMonitor stopped")
+        if order_manager:
+            order_manager.running = False
+            logger.info("OrderManager stopped")
+
+        # Step 2: Close WebSocket connections with timeout
+        logger.info("Closing WebSocket connections...")
+        try:
+            from .ws_events import _order_ws_clients, _lock
+            # Use timeout for WebSocket cleanup
+            await asyncio.wait_for(
+                _cleanup_websockets(_order_ws_clients, _lock),
+                timeout=2.0
+            )
+            logger.info("All WebSocket connections closed")
+        except asyncio.TimeoutError:
+            logger.warning("WebSocket cleanup timed out - proceeding")
+        except Exception as e:
+            logger.warning(f"Error closing WebSocket connections: {e}")
+
+        # Step 3: Cancel background tasks aggressively
+        logger.info("Cancelling background tasks...")
+        for task in background_tasks:
+            if not task.done():
+                task.cancel()
+                logger.info(f"Cancelled task: {task.get_name()}")
+
+        # Step 4: Wait for task cancellation with shorter timeout
+        if background_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*background_tasks, return_exceptions=True),
+                    timeout=1.0  # Shorter timeout
+                )
+                logger.info("Background tasks cancelled successfully")
+            except asyncio.TimeoutError:
+                logger.warning("Tasks didn't cancel in time - forcing shutdown")
+            except Exception as e:
+                logger.warning(f"Error during task cancellation: {e}")
+
+        # Step 5: Close databases with timeout
+        logger.info("Closing databases...")
+        try:
+            await asyncio.wait_for(cleanup_databases(), timeout=2.0)
+            logger.info("Databases closed successfully")
+        except asyncio.TimeoutError:
+            logger.warning("Database cleanup timed out - proceeding")
+        except Exception as e:
+            logger.warning(f"Error closing databases: {e}")
+
+        logger.info("Shutdown completed successfully")
+        _shutdown_completed = True
+
+    except Exception as e:
+        logger.error(f"Shutdown error: {e}")
+        # Force cleanup even if there are errors
+        try:
+            await asyncio.wait_for(cleanup_databases(), timeout=1.0)
+        except:
+            pass
 
 app = FastAPI(
     title="Modern Algorithmic Trading Platform",
@@ -638,7 +813,8 @@ async def revoke_token(broker: str, user_id: str = Depends(get_current_user), db
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        if broker == "Zerodha":
+        if broker == "Zerodha":            
+            # Clear token from database
             user.zerodha_access_token = None
             user.zerodha_access_token_expiry = None
         else:  # Upstox
@@ -693,6 +869,32 @@ async def get_profile(broker: str, user_id: str = Depends(get_current_user), db:
         logger.error(f"Error fetching {broker} profile: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/users/me/api-keys", tags=["users"])
+async def get_user_api_keys(user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Get user's API keys for broker authentication"""
+    try:
+        result = await db.execute(select(User).filter(User.user_id == user_id))
+        user = result.scalars().first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Determine which brokers are configured
+        configured_brokers = []
+        if user.zerodha_api_key:
+            configured_brokers.append("Zerodha")
+        if user.upstox_api_key:
+            configured_brokers.append("Upstox")
+        
+        return {
+            "zerodha_api_key": user.zerodha_api_key,
+            "upstox_api_key": user.upstox_api_key,
+            "configured_brokers": configured_brokers,
+            "has_multiple_brokers": len(configured_brokers) > 1
+        }
+    except Exception as e:
+        logger.error(f"Error fetching user API keys: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/margins/{broker}", response_model=MarginResponse, tags=["portfolio"], dependencies=[Depends(portfolio_limiter)])
 async def get_margins(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if broker not in ["Upstox", "Zerodha"]:
@@ -739,7 +941,9 @@ async def place_new_order(order: PlaceOrderRequest, user_id: str = Depends(get_c
     api = user_apis_dict["upstox"]["order"] if order.broker == "Upstox" else user_apis_dict["zerodha"]["kite"]
     if not api:
         raise HTTPException(status_code=400, detail=f"{order.broker} API not initialized")
-    
+
+    app.state.risk_manager = RiskManager()
+    logger.debug(f"Placing order for user {user_id} with broker {order.broker}: {order.dict()}")
     # CRITICAL SECURITY FIX: Add comprehensive risk validation for all manual orders
     if hasattr(app.state, 'risk_manager'):
         try:
@@ -758,12 +962,37 @@ async def place_new_order(order: PlaceOrderRequest, user_id: str = Depends(get_c
                 )
             
             # Validate the specific trade parameters
-            trade_value = abs(order.quantity * (order.price if order.price > 0 else 100.0))  # Use price or estimate
+            effective_price = order.price if order.price and order.price > 0 else 0.0
+            if effective_price <= 0:
+                try:
+                    ltp_response = await get_ltp(
+                        user_apis_dict["upstox"].get("market_data_v3"),
+                        user_apis_dict["zerodha"].get("kite"),
+                        [order.instrument_token],
+                        db,
+                    )
+                    if ltp_response:
+                        effective_price = ltp_response[0].last_price or effective_price
+                        logger.debug(
+                            f"Resolved market price for {order.instrument_token}: {effective_price}"
+                        )
+                except Exception as price_fetch_error:
+                    logger.warning(
+                        f"Failed to fetch LTP for {order.instrument_token}: {price_fetch_error}"
+                    )
+
+            if effective_price <= 0:
+                effective_price = 100.0
+                logger.warning(
+                    f"Using fallback price of INR {effective_price:.2f} for {order.instrument_token} risk checks"
+                )
+
+            trade_value = abs(order.quantity * effective_price)
             is_valid, validation_msg = await app.state.risk_manager.validate_trade(
                 user_id, 
                 order.instrument_token, 
                 order.quantity, 
-                order.price if order.price > 0 else 100.0,  # Use provided price or estimate for market orders
+                effective_price,
                 order.transaction_type, 
                 db
             )
@@ -882,59 +1111,127 @@ async def place_new_order(order: PlaceOrderRequest, user_id: str = Depends(get_c
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/orders/{broker}", tags=["orders"])
-async def get_orders(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_orders(broker: str, source: str = "database", user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail="Invalid broker")
     
-    # Check cache first
-    cache_key = cache_manager.generate_cache_key("orders", user_id, broker)
-    cached_orders = await cache_manager.get(cache_key)
-    if cached_orders:
-        return cached_orders
+    if source not in ["database", "broker"]:
+        raise HTTPException(status_code=400, detail="Invalid source. Must be 'database' or 'broker'")
+    
+    # Check cache first (only for database source)
+    if source == "database":
+        cache_key = cache_manager.generate_cache_key("orders", user_id, broker)
+        cached_orders = await cache_manager.get(cache_key)
+        if cached_orders:
+            return cached_orders
     
     try:
-        query = """
-            SELECT * FROM orders 
-            WHERE user_id = :user_id AND broker = :broker
-        """
-        orders = pd.DataFrame(await async_fetch_query(db, text(query), {"user_id": user_id, "broker": broker}))
-
-        # Handle NaN, infinity, and negative infinity values for JSON compliance
-        if not orders.empty:
-            # Replace infinite values with None
-            orders = orders.replace([float('inf'), float('-inf')], None)
-
-            # Handle NaN values by converting to None
-            import numpy as np
-            orders = orders.replace([np.nan], None)
-
-            # Additional safety: convert to native Python types and handle any remaining problematic values
-            orders_dict = orders.to_dict(orient="records")
-
-            # Clean the dictionary to ensure JSON compliance
-            cleaned_orders = []
-            for order in orders_dict:
-                cleaned_order = {}
-                for key, value in order.items():
-                    if pd.isna(value) or value is np.nan or value == float('inf') or value == float('-inf'):
-                        cleaned_order[key] = None
-                    elif isinstance(value, (np.integer, np.floating)):
-                        # Convert numpy types to native Python types
-                        if np.isfinite(value):
-                            cleaned_order[key] = value.item()
-                        else:
-                            cleaned_order[key] = None
-                    else:
-                        cleaned_order[key] = value
-                cleaned_orders.append(cleaned_order)
-
-            # Cache the cleaned orders for 30 seconds (orders change frequently)
-            await cache_manager.set(cache_key, cleaned_orders, CacheConfig.ORDERS)
-            return cleaned_orders
+        if source == "broker":
+            # Fetch orders directly from broker API
+            user_apis_dict = await initialize_user_apis(user_id, db)
+            upstox_api = user_apis_dict["upstox"]["order_v2"] if broker == "Upstox" else None
+            kite_api = user_apis_dict["zerodha"]["kite"] if broker == "Zerodha" else None
+            
+            if not (upstox_api or kite_api):
+                raise HTTPException(status_code=400, detail=f"{broker} API not initialized")
+            
+            # Get orders from broker API
+            orders_df = await get_order_book(upstox_api, kite_api)
+            
+            if not orders_df.empty:
+                # Filter orders for the specific broker
+                broker_orders = orders_df[orders_df['Broker'] == broker]
+                orders_dict = broker_orders.to_dict(orient="records")
+                
+                # Normalize broker response to match database format
+                normalized_orders = []
+                for order in orders_dict:
+                    # Convert broker format to database format
+                    normalized_order = {
+                        'order_id': order.get('OrderID', ''),
+                        'broker': order.get('Broker', ''),
+                        'trading_symbol': order.get('Symbol', ''),
+                        'instrument_token': '',  # Not available in broker response
+                        'transaction_type': order.get('TransType', ''),
+                        'quantity': order.get('Quantity', 0),
+                        'order_type': order.get('OrderType', ''),
+                        'price': order.get('Price', 0.0),
+                        'trigger_price': order.get('TriggerPrice', 0.0),
+                        'product_type': order.get('Product', ''),
+                        'status': order.get('Status', '').lower(),
+                        'remarks': order.get('Remarks', ''),
+                        'order_timestamp': order.get('OrderTime', ''),
+                        'user_id': user_id,  # Add user_id for consistency
+                        'is_trailing_stop_loss': False,
+                        'trailing_stop_loss_percent': None,
+                        'trail_start_target_percent': None,
+                        'trailing_activated': False,
+                        'highest_price_achieved': None,
+                        'trailing_stop_price': None,
+                        'stop_loss': None,
+                        'target': None,
+                        'is_amo': False,
+                        'lowest_price_achieved': None,
+                        'exit_order_id': None,
+                        'status_updated_at': None,
+                        'broker_message': None,
+                        'trailing_activated_at': None,
+                        'trailing_stop_triggered_at': None,
+                        'stop_loss_triggered_at': None,
+                        'exit_triggered_at': None,
+                        'avg_price': order.get('AvgPrice', 0.0),
+                        'filled_quantity': order.get('FilledQty', 0)
+                    }
+                    normalized_orders.append(normalized_order)
+                
+                return normalized_orders
+            else:
+                return []
         else:
-            empty_result = []
-            await cache_manager.set(cache_key, empty_result, CacheConfig.ORDERS)
-            return empty_result
+            # Fetch orders from database (existing logic)
+            query = """
+                SELECT * FROM orders 
+                WHERE user_id = :user_id AND broker = :broker
+            """
+            orders = pd.DataFrame(await async_fetch_query(db, text(query), {"user_id": user_id, "broker": broker}))
+
+            # Handle NaN, infinity, and negative infinity values for JSON compliance
+            if not orders.empty:
+                # Replace infinite values with None
+                orders = orders.replace([float('inf'), float('-inf')], None)
+
+                # Handle NaN values by converting to None
+                import numpy as np
+                orders = orders.replace([np.nan], None)
+
+                # Additional safety: convert to native Python types and handle any remaining problematic values
+                orders_dict = orders.to_dict(orient="records")
+
+                # Clean the dictionary to ensure JSON compliance
+                cleaned_orders = []
+                for order in orders_dict:
+                    cleaned_order = {}
+                    for key, value in order.items():
+                        import numpy as np
+                        if pd.isna(value) or value is np.nan or value == float('inf') or value == float('-inf'):
+                            cleaned_order[key] = None
+                        elif isinstance(value, (np.integer, np.floating)):
+                            # Convert numpy types to native Python types
+                            if np.isfinite(value):
+                                cleaned_order[key] = value.item()
+                            else:
+                                cleaned_order[key] = None
+                        else:
+                            cleaned_order[key] = value
+                    cleaned_orders.append(cleaned_order)
+
+                # Cache the cleaned orders for 30 seconds (orders change frequently)
+                await cache_manager.set(cache_key, cleaned_orders, CacheConfig.ORDERS)
+                return cleaned_orders
+            else:
+                empty_result = []
+                await cache_manager.set(cache_key, empty_result, CacheConfig.ORDERS)
+                return empty_result
     except Exception as e:
         logger.error(f"Error fetching {broker} orders: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -953,7 +1250,7 @@ async def cancel_order(order_id: str, user_id: str = Depends(get_current_user), 
         if order.broker == "Upstox":
             api.cancel_order(order_id=order_id)
         else:
-            api.cancel_order(order_id=order_id, variety="regular" if "amo" not in order.status else "amo")
+            api.cancel_order(order_id=order_id, variety="regular" if not order.is_amo else "amo")
         order.status = "cancelled"
         await db.commit()
         return {"status": "success", "message": f"Order {order_id} cancelled"}
@@ -1566,6 +1863,81 @@ async def get_positions_data(broker: str, user_id: str = Depends(get_current_use
         logger.error(f"Error fetching {broker} positions: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/positions/{broker}/convert", tags=["portfolio"])
+async def convert_position_product(
+    broker: str,
+    request: ConvertPositionRequest,
+    user_id: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    broker_normalized = broker.strip().title()
+    if broker_normalized not in ["Upstox", "Zerodha"]:
+        raise HTTPException(status_code=400, detail="Invalid broker")
+
+    user_apis_dict = await initialize_user_apis(user_id, db)
+    quantity_value = abs(request.quantity)
+    if quantity_value <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be greater than zero for conversion")
+    quantity = int(round(quantity_value))
+    if quantity == 0:
+        raise HTTPException(status_code=400, detail="Quantity too small to convert")
+
+    current_product = (request.current_product or "").upper()
+    target_product = (request.target_product or "").upper()
+    transaction_type = (request.transaction_type or ("BUY" if request.quantity >= 0 else "SELL")).upper()
+
+    if current_product == target_product:
+        raise HTTPException(status_code=400, detail="Target product must differ from current product")
+
+    try:
+        if broker_normalized == "Zerodha":
+            kite_api = user_apis_dict["zerodha"].get("kite")
+            if not kite_api:
+                raise HTTPException(status_code=400, detail="Zerodha API not initialized")
+
+            position_type = "overnight" if current_product == "CNC" else "day"
+            response = kite_api.convert_position(
+                exchange=request.exchange,
+                tradingsymbol=request.symbol,
+                transaction_type=transaction_type,
+                position_type=position_type,
+                quantity=quantity,
+                old_product=current_product,
+                new_product=target_product,
+            )
+        else:
+            portfolio_api = user_apis_dict["upstox"].get("portfolio")
+            if not portfolio_api:
+                raise HTTPException(status_code=400, detail="Upstox API not initialized")
+            if not request.instrument_token:
+                raise HTTPException(status_code=400, detail="Instrument token required for Upstox conversions")
+
+            body = upstox_client.ConvertPositionRequest(
+                instrument_token=request.instrument_token,
+                old_product=current_product,
+                new_product=target_product,
+                quantity=quantity,
+                transaction_type=transaction_type,
+            )
+            response = portfolio_api.convert_positions(body=body, api_version="v2")
+            if hasattr(response, "to_dict"):
+                response = response.to_dict()
+
+        # Invalidate cached positions so UI refreshes with latest data
+        await cache_manager.delete_pattern(f"positions:*{user_id}*{broker_normalized}*")
+
+        return {
+            "status": "success",
+            "message": f"Converted {request.symbol} to {target_product}",
+            "data": response,
+            "target_product": target_product,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error converting position for {broker_normalized}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/portfolio/{broker}", tags=["portfolio"])
 async def get_portfolio_data(broker: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if broker not in ["Upstox", "Zerodha"]:
@@ -1862,16 +2234,20 @@ async def get_instruments_list(
     broker: str,
     exchange: Optional[str] = None,
     refresh: bool = False,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    nse_db: AsyncSession = Depends(get_nsedata_db)
 ):
     if broker not in ["Upstox", "Zerodha"]:
         raise HTTPException(status_code=400, detail="Invalid broker")
     try:
         instruments = await fetch_instruments(db, refresh=refresh)
+        if refresh:
+            instruments = await fetch_instruments(nse_db, refresh=refresh)
+            logger.info(f"Refreshed {len(instruments)} instruments in NSE database")
         if exchange:
             instruments = [inst for inst in instruments if inst.exchange == exchange]
         logger.info(f"Fetched {len(instruments)} instruments for broker {broker}, exchange {exchange}")
-        return instruments
+        return instruments if not refresh else []
     except Exception as e:
         logger.error(f"Error fetching instruments: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2529,15 +2905,18 @@ async def get_system_health(user_id: str = Depends(get_current_user), db: AsyncS
         logger.error(f"Error getting system health: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/user/preferences", response_model=dict, tags=["user"])
-async def get_user_preferences(user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_user_preferences(user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db), force_refresh: bool = False):
     """Get user preferences including risk management settings"""
     try:
-        # Check cache first
-        cache_key = cache_manager.generate_cache_key("user_preferences", user_id)
-        cached_preferences = await cache_manager.get(cache_key)
-        if cached_preferences:
-            return cached_preferences
+        # Force refresh bypasses cache
+        if not force_refresh:
+            # Check cache first
+            cache_key = cache_manager.generate_cache_key("user_preferences", user_id)
+            cached_preferences = await cache_manager.get(cache_key)
+            if cached_preferences:
+                return cached_preferences
         
         result = await db.execute(select(User).filter(User.user_id == user_id))
         user = result.scalars().first()
@@ -2549,8 +2928,10 @@ async def get_user_preferences(user_id: str = Depends(get_current_user), db: Asy
             "preferences": user.preferences or {}
         }
         
-        # Cache preferences for 30 minutes
-        await cache_manager.set(cache_key, preferences_result, CacheConfig.USER_PREFERENCES)
+        # Cache preferences for 30 minutes (unless force refresh)
+        if not force_refresh:
+            cache_key = cache_manager.generate_cache_key("user_preferences", user_id)
+            await cache_manager.set(cache_key, preferences_result, CacheConfig.USER_PREFERENCES)
         
         return preferences_result
     except Exception as e:
@@ -2566,62 +2947,81 @@ def validate_risk_preferences(preferences: dict) -> tuple[bool, str]:
         # Daily loss limit validation
         if 'daily_loss_limit' in preferences:
             daily_loss_limit = float(preferences['daily_loss_limit'])
-            if daily_loss_limit < 1000:
-                return False, "Daily loss limit must be at least ₹1,000"
-            if daily_loss_limit > 10000000:  # 1 crore limit
-                return False, "Daily loss limit cannot exceed ₹1,00,00,000"
-        
-        # Position size limit validation  
+            if daily_loss_limit < 500:
+                return False, "Daily loss limit must be at least INR 500"
+            if daily_loss_limit > 10000:
+                return False, "Daily loss limit cannot exceed INR 10000"
+
+        # Portfolio size (overall exposure base) validation
+        portfolio_size_limit = None
+        if 'portfolio_size_limit' in preferences:
+            portfolio_size_limit = float(preferences['portfolio_size_limit'])
+            if portfolio_size_limit < 5000:
+                return False, "Portfolio size limit must be at least INR 5000"
+            if portfolio_size_limit > 500000:
+                return False, "Portfolio size limit cannot exceed INR 500000"
+
+        # Position size (single trade) validation
         if 'position_size_limit' in preferences:
             position_size_limit = float(preferences['position_size_limit'])
             if position_size_limit < 5000:
-                return False, "Position size limit must be at least ₹5,000"
-            if position_size_limit > 50000000:  # 5 crore limit
-                return False, "Position size limit cannot exceed ₹5,00,00,000"
-        
+                return False, "Position size limit must be at least INR 5000"
+            if position_size_limit > 500000:
+                return False, "Position size limit cannot exceed INR 500000"
+            if portfolio_size_limit is not None and position_size_limit > portfolio_size_limit:
+                return False, "Position size limit cannot exceed portfolio size limit"
+
         # Max open positions validation
         if 'max_open_positions' in preferences:
             max_open_positions = int(preferences['max_open_positions'])
             if max_open_positions < 1:
                 return False, "Maximum open positions must be at least 1"
-            if max_open_positions > 100:
-                return False, "Maximum open positions cannot exceed 100"
-        
+            if max_open_positions > 20:
+                return False, "Maximum open positions cannot exceed 20"
+
         # Risk per trade validation
         if 'risk_per_trade' in preferences:
             risk_per_trade = float(preferences['risk_per_trade'])
             if risk_per_trade < 0.1:
                 return False, "Risk per trade must be at least 0.1%"
-            if risk_per_trade > 25.0:
-                return False, "Risk per trade cannot exceed 25%"
-        
+            if risk_per_trade > 12.0:
+                return False, "Risk per trade cannot exceed 12%"
+
         # Max portfolio risk validation
         if 'max_portfolio_risk' in preferences:
             max_portfolio_risk = float(preferences['max_portfolio_risk'])
             if max_portfolio_risk < 1.0:
                 return False, "Maximum portfolio risk must be at least 1%"
-            if max_portfolio_risk > 100.0:
-                return False, "Maximum portfolio risk cannot exceed 100%"
-                
+            if max_portfolio_risk > 50.0:
+                return False, "Maximum portfolio risk cannot exceed 50%"
+
+        # Max orders per minute validation
+        if 'max_orders_per_minute' in preferences:
+            max_orders_per_minute = int(preferences['max_orders_per_minute'])
+            if max_orders_per_minute < 1:
+                return False, "Maximum orders per minute must be at least 1"
+            if max_orders_per_minute > 100:
+                return False, "Maximum orders per minute cannot exceed 100"
+
         # Auto-stop trading validation (must be boolean and cannot be disabled if loss limit exceeded)
         if 'auto_stop_trading' in preferences:
             if not isinstance(preferences['auto_stop_trading'], bool):
                 return False, "Auto-stop trading must be true or false"
-        
+
         # Validate order type preferences
         if 'default_order_type' in preferences:
             valid_order_types = ['MARKET', 'LIMIT', 'SL', 'SL-M']
             if preferences['default_order_type'] not in valid_order_types:
                 return False, f"Default order type must be one of: {', '.join(valid_order_types)}"
-        
-        # Validate product type preferences  
+
+        # Validate product type preferences
         if 'default_product_type' in preferences:
-            valid_product_types = ['CNC', 'MIS', 'NRML', 'D']
+            valid_product_types = ['CNC', 'MIS', 'NRML', 'D', 'I']
             if preferences['default_product_type'] not in valid_product_types:
                 return False, f"Default product type must be one of: {', '.join(valid_product_types)}"
-        
+
         return True, "Validation passed"
-        
+
     except (ValueError, TypeError) as e:
         return False, f"Invalid preference value format: {str(e)}"
     except Exception as e:
@@ -2674,7 +3074,13 @@ async def update_user_preferences(preferences: dict, user_id: str = Depends(get_
         # Merge with existing preferences
         current_prefs = user.preferences or {}
         current_prefs.update(preferences)
-        user.preferences = current_prefs
+        
+        # Use direct SQL update to ensure the change is persisted
+        await db.execute(
+            User.__table__.update()
+            .where(User.user_id == user_id)
+            .values(preferences=current_prefs)
+        )
         
         await db.commit()
         
@@ -3184,23 +3590,25 @@ async def websocket_backtest(websocket: WebSocket, user_id: str):
 @app.websocket("/ws/orders/{user_id}")
 async def websocket_orders(websocket: WebSocket, user_id: str):
     await websocket.accept()
-    await ws_register_client(user_id, websocket)
+    await register_client(user_id, websocket)
     logger.info(f"Orders WebSocket connected for user {user_id}")
     try:
         while True:
             await asyncio.sleep(30)
     except asyncio.CancelledError:
-        # Graceful shutdown without error logging
-        pass
+        # Graceful shutdown - this is expected during server shutdown
+        logger.info(f"Orders WebSocket cancelled for user {user_id} (server shutdown)")
+        raise  # Re-raise to properly handle the cancellation
     except Exception as e:
-        logger.warning(f"Orders WebSocket closed for user {user_id}: {e}")
+        logger.warning(f"Orders WebSocket error for user {user_id}: {e}")
     finally:
         try:
-            await ws_unregister_client(user_id, websocket)
+            await unregister_client(user_id, websocket)
             if not websocket.closed:
-                await websocket.close()
-        except Exception:
-            pass
+                await websocket.close(code=1000, reason="Connection closed")
+                logger.info(f"Orders WebSocket closed for user {user_id}")
+        except Exception as e:
+            logger.debug(f"Error during WebSocket cleanup for user {user_id}: {e}")
 
 # Test endpoint for main.py database access
 @app.get("/debug/test-main-db")
@@ -3525,7 +3933,7 @@ if __name__ == "__main__":
         # await get_quote(symbol='RELIANCE', source='nsepython', fallback_sources=['nsetools', 'openchart'],
         #                         user_id="4fbba468-6a86-4516-8236-2f8abcbfd2ef", db=db)
         # await get_historical_data(upstox_api=None, upstox_access_token='None', instrument='RELIANCE', from_date='2023-01-01', to_date='2023-10-01', unit='days', interval='1', db=nsedata_db)
-        print(await get_ohlc_data(broker='Zerodha', instruments='NSE_EQ|INE002A01018,NSE_EQ|INE669E01016,NSE_EQ|INE176A01028', user_id="4fbba468-6a86-4516-8236-2f8abcbfd2ef", db=db))
+        # print(await get_ohlc_data(broker='Zerodha', instruments='NSE_EQ|INE002A01018,NSE_EQ|INE669E01016,NSE_EQ|INE176A01028', user_id="4fbba468-6a86-4516-8236-2f8abcbfd2ef", db=db))
         # print(await get_ltp_openchart(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
         # print(await get_ltp_from_nse(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
         # print(await get_ohlc_openchart(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
@@ -3533,34 +3941,33 @@ if __name__ == "__main__":
         # print(await get_ohlc_from_nse(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
         # print(await get_quotes_from_nse(instruments=['NSE_EQ|INE002A01018', 'NSE_EQ|INE669E01016'], db=db))
         # Call place_new_order with appropriate parameters
-        # order_payload = PlaceOrderRequest(
-        #     trading_symbol='IDEA',
-        #     instrument_token="NSE_EQ|INE002A01018",
-        #     transaction_type="BUY",
-        #     quantity=1,
-        #     order_type="LIMIT",
-        #     product_type="CNC",
-        #     validity="DAY",
-        #     price=6.58,
-        #     trigger_price=0.0,
-        #     stop_loss=6.54,
-        #     target=6.75,
-        #     is_trailing_stop_loss=True,
-        #     is_amo=True,
-        #     trailing_stop_loss_percent=2,
-        #     trail_start_target_percent=3,
-        #     broker="Zerodha"
-        # )
-        # order_status = await place_new_order(
-        #     order=order_payload,
-        #     user_id="e4269837-0ccd-484f-af70-a5dfa2abe230",
-        #     db=db
-        # )
-        # print(f"Order Status: {order_status}")
+        order_payload = PlaceOrderRequest(
+            trading_symbol='SHRIRAMFIN',
+            instrument_token="NSE_EQ|INE721A01047",
+            transaction_type="BUY",
+            quantity=35,
+            order_type="LIMIT",
+            product_type="CNC",
+            validity="DAY",
+            price=672.1,
+            trigger_price=0.0,
+            stop_loss=662,
+            target=692,
+            is_trailing_stop_loss=True,
+            is_amo=False,
+            trailing_stop_loss_percent=0,
+            trail_start_target_percent=0,
+            broker="Zerodha"
+        )
+        order_status = await place_new_order(
+            order=order_payload,
+            user_id="4fbba468-6a86-4516-8236-2f8abcbfd2ef",
+            db=db
+        )
+        print(f"Order Status: {order_status}")
         # await get_ohlc()
         # Debug execute_strategy endpoint
         # await debug_execute_strategy_endpoint(db)
         # print(await get_portfolio_performance(portfolio_id="pf_e4269837-0ccd-484f-af70-a5dfa2abe230_GOLDBEES_1755439421", user_id="e4269837-0ccd-484f-af70-a5dfa2abe230", trading_db=db))
         # print(await fetch_table_data(table_name='ALL_STOCKS', filters="\"STK_INDEX\" LIKE '%NIFTY%'", required_db='nsedata', trading_db=db, nsedata_db=nsedata_db))
     asyncio.run(main())
-

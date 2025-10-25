@@ -5,7 +5,8 @@ import datetime
 import json
 import pandas as pd
 import requests
-import sys, os
+import sys
+import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -34,14 +35,22 @@ headers = {
         }
 
 
-def fetch_nse_data(payload):
+def fetch_nse_data(payload, custom_headers=None, session=None):
     try:
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=headers, timeout=10)
-        s.get("https://www.nseindia.com/option-chain", headers=headers, timeout=10)
-        output = s.get(payload, headers=headers, timeout=10).json()
+        s = session or requests.Session()
+        warmup_headers = custom_headers or headers
+        s.get("https://www.nseindia.com", headers=warmup_headers, timeout=10)
+        s.get("https://www.nseindia.com/option-chain", headers=warmup_headers, timeout=10)
+        request_headers = custom_headers or headers
+        response = s.get(payload, headers=request_headers, timeout=10)
+        response.raise_for_status()
+        output = response.json()
     except ValueError:
         output = {}
+        logger.warning(f"Failed to decode JSON for {payload}")
+    except requests.HTTPError as err:
+        output = {}
+        logger.error(f"HTTP error {err} for {payload}")
     return output
 
 
@@ -66,7 +75,7 @@ class MarketData:
             "NIFTY SERVICES SECTOR", "NIFTY INDIA DIGITAL", "NIFTY INDIA MANUFACTURING"]
 
     @staticmethod
-    def get_corporate_actions(symbol, event_type='corporate_actions'):
+    def get_corporate_actions_data(symbol, event_type='corporate_actions'):
         """
         Get corporate actions for a given symbol and event type
         :param symbol: Stock symbol
@@ -86,7 +95,7 @@ class MarketData:
     def fetch_and_load_nse_events():
         output = fetch_nse_data('https://www.nseindia.com/api/event-calendar')
         if not output or 'data' not in output:
-            logger.info(f"No NSE events found ")
+            logger.info("No NSE events found ")
             return "No data found"
         else:
             # Load data to SQL
@@ -117,25 +126,38 @@ class MarketData:
     def nse_symbol_quote(symbol):
         price_data = {}
         try:
-            payload = fetch_nse_data('https://www.nseindia.com/api/quote-equity?symbol=' + symbol)
+            quote_headers = {
+                "accept": "application/json, text/plain, */*",
+                "user-agent": headers["user-agent"],
+            }
+            payload = fetch_nse_data(
+                f'https://www.nseindia.com/api/quote-equity?symbol={symbol}',
+                custom_headers=quote_headers
+            )
+            if not payload or 'priceInfo' not in payload:
+                raise ValueError("Price information missing in quote response")
             price_data = payload['priceInfo']
-            trade_info = fetch_nse_data('https://www.nseindia.com/api/quote-equity?symbol=' + symbol + '&section=trade_info')
-            price_data['totalTradedVolume'] = trade_info['securityWiseDP']['quantityTraded']
-            price_data['deliveryQuantity'] = trade_info['securityWiseDP']['deliveryQuantity']
-            price_data['deliveryToTradedQuantity'] = trade_info['securityWiseDP']['deliveryToTradedQuantity']
-            price_data['totalMarketCap'] = trade_info['marketDeptOrderBook']['tradeInfo']['totalMarketCap']
-        except KeyError:
-            print("Getting Error While Fetching.")
+            trade_info = fetch_nse_data(
+                f'https://www.nseindia.com/api/quote-equity?symbol={symbol}&section=trade_info',
+                custom_headers=quote_headers
+            )
+            if not trade_info or 'securityWiseDP' not in trade_info:
+                raise ValueError("Trade information missing in quote response")
+            security_dp = trade_info.get('securityWiseDP', {})
+            order_book = trade_info.get('marketDeptOrderBook', {})
+            trade_details = order_book.get('tradeInfo', {})
+            price_data['totalTradedVolume'] = security_dp.get('quantityTraded')
+            price_data['deliveryQuantity'] = security_dp.get('deliveryQuantity')
+            price_data['deliveryToTradedQuantity'] = security_dp.get('deliveryToTradedQuantity')
+            price_data['totalMarketCap'] = trade_details.get('totalMarketCap')
+            price_data['depth'] = {
+                'buy': order_book.get('bid', []),
+                'sell': order_book.get('ask', []),
+            }
+        except Exception as e:
+            logger.error(f"Error fetching NSE symbol quote for {symbol}: {str(e)}")
+            return {}
         return price_data
-
-    @staticmethod
-    def nse_fno_quote(symbol):
-        payload = {}
-        try:
-            payload = fetch_nse_data('https://www.nseindia.com/api/quote-derivative?symbol=' + symbol)
-        except KeyError:
-            print("Getting Error While Fetching.")
-        return payload
 
     def equity_history_virgin(self, symbol, series, start_date, end_date):
         url = 'https://www.nseindia.com/api/historical/cm/equity?symbol=' + symbol + '&series=["' + series + '"]&from=' + start_date + '&to=' + end_date
@@ -423,10 +445,11 @@ if __name__ == "__main__":
     # indices_list = broad_indices_list + sector_indices_list + thematic_indices_list
     md = MarketData()
     # print(md.fetch_and_load_etf_data())
-    # print(md.get_corporate_actions_data())
+    print(md.get_corporate_actions_data('TCS'))
     # print(md.nse_events())
     # print(md.nse_get_fno_snapshot_live())
-    print(md.nse_symbol_quote('GOLDBEES'))
+    # print(md.nse_symbol_quote('TCS'))
+    # print(md.nse_get_quote('TCS', security_type='NIFTY_500'))
     # print(md.equity_history_virgin('BATAINDIA', 'EQ', '01-01-2023', '01-02-2023'))
     # print(md.security_wise_archive('01-01-2023', '01-01-2024', 'SBIN', series='EQ'))
     # print(md.nse_get_advances_declines())

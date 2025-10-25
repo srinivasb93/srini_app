@@ -333,14 +333,14 @@ async def render_tradingview_page(fetch_api, user_storage, instruments: Dict[str
             chart_dom_id = f"tv_chart_{uuid.uuid4().hex}"
             iframe_id = f"{chart_dom_id}_frame"
             with container:
-                ui.html(f'<iframe id="{iframe_id}" style="height:100%; width:100%; border:0; display:block;"></iframe>').style('height:100%; width:100%; display:block;')
+                ui.html(f'<iframe id="{iframe_id}" style="height:100%; width:100%; border:0; display:block;"></iframe>', sanitize=False).style('height:100%; width:100%; display:block;')
 
     # Chart container (increase default height for better visibility)
     container = ui.element('div').style('height: 78vh; min-height: 520px; width: 100%;').classes('p-2')
     chart_dom_id = f"tv_chart_{uuid.uuid4().hex}"
     iframe_id = f"{chart_dom_id}_frame"
     with container:
-        ui.html(f'<iframe id="{iframe_id}" style="height:100%; width:100%; border:0; display:block;"></iframe>').style('height:100%; width:100%; display:block;')
+        ui.html(f'<iframe id="{iframe_id}" style="height:100%; width:100%; border:0; display:block;"></iframe>', sanitize=False).style('height:100%; width:100%; display:block;')
 
     async def update_chart():
         symbol = symbol_select.value

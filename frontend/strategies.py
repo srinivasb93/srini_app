@@ -1121,15 +1121,15 @@ async def render_strategies_page(fetch_api, user_storage, instruments):
     # Position Calculator Modal
     def open_position_calculator():
         """Open position size calculator modal"""
-        with ui.dialog() as calc_dialog, ui.card().classes("w-full max-w-2xl"):
+        with ui.dialog() as calc_dialog, ui.card().classes("w-full max-w-2xl max-h-screen overflow-y-auto"):
             with ui.card_section().classes("p-6"):
                 ui.label("🧮 Position Size Calculator").classes("text-xl font-bold theme-text-primary mb-4")
                 
                 # Input fields
                 with ui.grid(columns=2).classes("w-full gap-4 mb-4"):
-                    calc_capital = ui.number("Capital (\u20b9)", value=execute_refs["total_capital"].value, min=1000).classes("w-full")
+                    calc_capital = ui.number("Capital (₹)", value=execute_refs["total_capital"].value, min=1000).classes("w-full")
                     calc_risk_pct = ui.number("Risk (%)", value=execute_refs["risk_per_trade"].value, min=0.1, max=20).classes("w-full")
-                    calc_entry_price = ui.number("Entry Price (\u20b9)", value=100, min=0.01, step=0.01).classes("w-full")
+                    calc_entry_price = ui.number("Entry Price (₹)", value=100, min=0.01, step=0.01).classes("w-full")
                     calc_stop_loss_pct = ui.number("Stop Loss (%)", value=execute_refs["stop_loss"].value or 2.0, min=0.1, max=50).classes("w-full")
                 
                 ui.separator().classes("my-4")

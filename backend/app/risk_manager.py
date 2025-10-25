@@ -38,13 +38,40 @@ class RiskManager:
             
             # Extract risk settings from user preferences or use defaults
             preferences = user.preferences or {}
+
+            raw_position_limit = preferences.get('position_size_limit')
+            raw_portfolio_limit = preferences.get('portfolio_size_limit', raw_position_limit)
+
+            if raw_position_limit is None and raw_portfolio_limit is None:
+                raw_position_limit = raw_portfolio_limit = 50000.0
+
+            if raw_position_limit is None:
+                raw_position_limit = raw_portfolio_limit
+            if raw_portfolio_limit is None:
+                raw_portfolio_limit = raw_position_limit
+
+            try:
+                position_limit = float(raw_position_limit)
+            except (TypeError, ValueError):
+                position_limit = 50000.0
+
+            try:
+                portfolio_limit = float(raw_portfolio_limit)
+            except (TypeError, ValueError):
+                portfolio_limit = position_limit
+
+            # Ensure both limits stay in sync if one ends up invalid
+            if portfolio_limit < position_limit:
+                portfolio_limit = position_limit
+
             return {
                 'daily_loss_limit': preferences.get('daily_loss_limit', 10000),
-                'position_size_limit': preferences.get('position_size_limit', 50000),
+                'position_size_limit': position_limit,
+                'portfolio_size_limit': portfolio_limit,
                 'auto_stop_trading': preferences.get('auto_stop_trading', True),
                 'max_open_positions': preferences.get('max_open_positions', 10),
                 'risk_per_trade': preferences.get('risk_per_trade', 2.0),
-                'max_portfolio_risk': preferences.get('max_portfolio_risk', 20.0)
+                'max_portfolio_risk': preferences.get('max_portfolio_risk', 20.0),
             }
         except Exception as e:
             self.logger.error(f"Error fetching risk settings for user {user_id}: {e}")
@@ -55,10 +82,12 @@ class RiskManager:
         return {
             'daily_loss_limit': 10000,
             'position_size_limit': 50000,
+            'portfolio_size_limit': 50000,
             'auto_stop_trading': True,
             'max_open_positions': 10,
             'risk_per_trade': 2.0,
-            'max_portfolio_risk': 20.0
+            'max_portfolio_risk': 20.0,
+            'max_orders_per_minute': 10
         }
     
     async def get_daily_pnl(self, user_id: str, db: AsyncSession) -> float:
@@ -145,10 +174,13 @@ class RiskManager:
                 if risk_settings['auto_stop_trading']:
                     return False, f"Trading stopped: Daily loss limit of INR {risk_settings['daily_loss_limit']:,.2f} exceeded"
             
+            position_limit = float(risk_settings.get('position_size_limit', 0.0) or 0.0)
+            portfolio_capital = float(risk_settings.get('portfolio_size_limit', position_limit) or position_limit)
+
             # Check position size limit
             trade_value = abs(quantity * price)
-            if trade_value > risk_settings['position_size_limit']:
-                return False, f"Trade rejected: Position size INR {trade_value:,.2f} exceeds limit of INR {risk_settings['position_size_limit']:,.2f}"
+            if position_limit > 0 and trade_value > position_limit:
+                return False, f"Trade rejected: Position size INR {trade_value:,.2f} exceeds limit of INR {position_limit:,.2f}"
             
             # Check maximum open positions with current data (race condition safe)
             position_info = await self.get_current_positions(user_id, db)
@@ -179,9 +211,9 @@ class RiskManager:
             
             # Total exposure including this new trade
             new_total_exposure = current_exposure + pending_exposure + trade_value
-            portfolio_limit = risk_settings['position_size_limit'] * (risk_settings['max_portfolio_risk'] / 100)
-            
-            if new_total_exposure > portfolio_limit:
+            portfolio_limit = portfolio_capital * (risk_settings['max_portfolio_risk'] / 100)
+
+            if portfolio_limit > 0 and new_total_exposure > portfolio_limit:
                 return False, f"Trade rejected: Total exposure (including pending orders) INR {new_total_exposure:,.2f} would exceed limit of INR {portfolio_limit:,.2f}"
             
             # Check if user has reached trade frequency limits (prevent spam trading)
@@ -216,8 +248,8 @@ class RiskManager:
         try:
             risk_settings = await self.get_user_risk_settings(user_id, db)
             
-            # Get available capital (assume from position limits for now)
-            available_capital = risk_settings['position_size_limit']
+            # Get available capital (assume from portfolio limits for now)
+            available_capital = float(risk_settings.get('portfolio_size_limit', risk_settings.get('position_size_limit', 0)) or 0)
             
             # Calculate risk amount
             risk_amount = available_capital * (risk_per_trade / 100)
@@ -235,8 +267,11 @@ class RiskManager:
             position_size = max(1, position_size)
             
             # Ensure doesn't exceed position limit
-            max_quantity = int(risk_settings['position_size_limit'] / entry_price)
-            position_size = min(position_size, max_quantity)
+            if entry_price > 0:
+                max_position_value = risk_settings.get('position_size_limit', 0)
+                max_quantity = int(max_position_value / entry_price) if max_position_value > 0 else position_size
+                if max_quantity > 0:
+                    position_size = min(position_size, max_quantity)
             
             return position_size
             
@@ -277,7 +312,11 @@ class RiskManager:
                 'daily_loss_used_pct': abs(daily_pnl / risk_settings['daily_loss_limit']) * 100 if daily_pnl < 0 else 0,
                 'total_exposure': position_info['total_exposure'],
                 'position_size_limit': risk_settings['position_size_limit'],
-                'exposure_used_pct': (position_info['total_exposure'] / risk_settings['position_size_limit']) * 100,
+                'portfolio_size_limit': risk_settings['portfolio_size_limit'],
+                'exposure_used_pct': (
+                    (position_info['total_exposure'] / risk_settings['portfolio_size_limit']) * 100
+                    if risk_settings['portfolio_size_limit'] else 0
+                ),
                 'open_positions': position_info['position_count'],
                 'max_open_positions': risk_settings['max_open_positions'],
                 'trading_allowed': trading_allowed,

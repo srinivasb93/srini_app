@@ -161,7 +161,7 @@ class BenchmarkSIPCalculator:
         """FIXED: Calculate benchmark SIP with consistent monthly investments"""
         try:
             logger.info(
-                f"🎯 Calculating FIXED benchmark SIP for {symbol}: ₹{self.monthly_amount} on {self.investment_day}th")
+                f"🎯 Calculating FIXED benchmark SIP for {symbol}: Rs.{self.monthly_amount} on {self.investment_day}th")
 
             # Fetch data using same method as enhanced strategy
             strategy = EnhancedSIPStrategy(nsedata_session=nsedata_db)
@@ -227,7 +227,7 @@ class BenchmarkSIPCalculator:
                     invested_months.add(month_key)
 
                     logger.debug(f"📅 Benchmark SIP: {investment_date.strftime('%Y-%m-%d')} "
-                                 f"₹{self.monthly_amount:,.2f} @ ₹{investment_price:.2f}")
+                                 f"Rs.{self.monthly_amount:,.2f} @ Rs.{investment_price:.2f}")
 
             # Calculate final metrics
             if total_units > 0 and benchmark_trades:
@@ -245,7 +245,7 @@ class BenchmarkSIPCalculator:
 
                 benchmark_result = {
                     'strategy_name': 'Regular SIP Benchmark',
-                    'description': f'₹{self.monthly_amount:,.0f} invested monthly (targeting {self.investment_day}th)',
+                    'description': f'Rs.{self.monthly_amount:,.0f} invested monthly (targeting {self.investment_day}th)',
                     'total_investment': float(total_investment),
                     'final_portfolio_value': float(final_portfolio_value),
                     'total_units': float(total_units),
@@ -262,8 +262,8 @@ class BenchmarkSIPCalculator:
                 }
 
                 logger.info(f"FIXED Benchmark SIP completed for {symbol}:")
-                logger.info(f"Investment: ₹{total_investment:,.2f}")
-                logger.info(f"Final Value: ₹{final_portfolio_value:,.2f}")
+                logger.info(f"Investment: Rs.{total_investment:,.2f}")
+                logger.info(f"Final Value: Rs.{final_portfolio_value:,.2f}")
                 logger.info(f"CAGR: {cagr_percent:.2f}%")
                 logger.info(f"Total Trades: {len(benchmark_trades)}")
 
@@ -437,7 +437,7 @@ class EnhancedSIPStrategy:
 
                         if trade:
                             logger.debug(
-                                f"Investment: ₹{trade.amount:,.2f} at ₹{trade.price:.2f} on {trade.timestamp.date()}")
+                                f"Investment: Rs.{trade.amount:,.2f} at Rs.{trade.price:.2f} on {trade.timestamp.date()}")
                             trades.append(asdict(trade))
                             # Record the investment in tracker
                             self.monthly_tracker.record_investment(
@@ -489,8 +489,8 @@ class EnhancedSIPStrategy:
             # )
 
             logger.info(f"✅ Enhanced backtest completed for {symbol}:")
-            logger.info(f"   📊 Investment: ₹{portfolio.total_investment:,.2f}")
-            logger.info(f"   💰 Final Value: ₹{final_portfolio_value:,.2f}")
+            logger.info(f"   📊 Investment: Rs.{portfolio.total_investment:,.2f}")
+            logger.info(f"   💰 Final Value: Rs.{final_portfolio_value:,.2f}")
             logger.info(f"   📈 CAGR: {cagr * 100:.2f}%")
             logger.info(f"   🔄 Total Trades: {len(portfolio.trades)}")
             logger.info(f"   ⏭️  Opportunities: {total_opportunities}, Skipped due to gap: {skipped_due_to_gap}")
@@ -942,7 +942,7 @@ class EnhancedSIPStrategy:
             if drawdown_100 <= config.extreme_drawdown_threshold:
                 extreme_amount = investment_amount * config.extreme_drawdown_inv_multiplier
                 logger.info(f"🔥 EXTREME OPPORTUNITY: {abs(drawdown_100):.1f}% drawdown "
-                            f"- investing ₹{extreme_amount:,.2f} (4x)")
+                            f"- investing Rs.{extreme_amount:,.2f} (4x)")
                 return extreme_amount, True
 
             # Regular drawdown logic
@@ -950,13 +950,13 @@ class EnhancedSIPStrategy:
                 multiplier = config.major_drawdown_inv_multiplier
                 investment_amount = config.fixed_investment * multiplier
                 logger.info(f"📉 Major drawdown: {abs(drawdown_100):.1f}% "
-                            f"- investing ₹{investment_amount:,.2f} ({multiplier}x)")
+                            f"- investing Rs.{investment_amount:,.2f} ({multiplier}x)")
 
             elif drawdown_100 <= config.minor_drawdown_threshold:
                 multiplier = config.minor_drawdown_inv_multiplier
                 investment_amount = config.fixed_investment * multiplier
                 logger.info(f"📊 Moderate drawdown: {abs(drawdown_100):.1f}% "
-                            f"- investing ₹{investment_amount:,.2f} ({multiplier}x)")
+                            f"- investing Rs.{investment_amount:,.2f} ({multiplier}x)")
 
 
             # RSI-based adjustments (oversold/overbought conditions)
@@ -1951,7 +1951,7 @@ class EnhancedSIPStrategy:
 
         logger.info(f"✅ Enhanced backtest V4 completed for {symbol}")
         logger.info(f"📊 Results: {regular_trades} regular + {extreme_trades} extreme + {force_trades} force trades")
-        logger.info(f"💰 Total investment: ₹{total_investment:,.2f}, Final value: ₹{final_portfolio_value:,.2f}")
+        logger.info(f"💰 Total investment: Rs.{total_investment:,.2f}, Final value: Rs.{final_portfolio_value:,.2f}")
         logger.info(f"📈 Return: {total_return_percent:.2f}%, CAGR: {cagr_percent:.2f}%")
 
         return results
@@ -2065,8 +2065,8 @@ class MonthlyInvestmentTracker:
 
             # For extreme opportunities, allow 4x investment regardless of monthly limit
             extreme_amount = intended_amount  # This should already be 4x from caller
-            logger.info(f"🔥 EXTREME OPPORTUNITY: {symbol} - Investing ₹{extreme_amount:,.2f} "
-                        f"(bypassing monthly limit of ₹{self.max_monthly_amount:,.2f})")
+            logger.info(f"🔥 EXTREME OPPORTUNITY: {symbol} - Investing Rs.{extreme_amount:,.2f} "
+                        f"(bypassing monthly limit of Rs.{self.max_monthly_amount:,.2f})")
 
             # Mark that we've made an extreme trade this month
             self.mark_extreme_trade(symbol, current_date)
@@ -2158,7 +2158,7 @@ class MonthlyInvestmentTracker:
         min_threshold = fixed_investment * 0.2
 
         if remaining_budget >= min_threshold and not month_data.get('extreme_trade_made', False):
-            logger.info(f"💰 FORCE INVESTMENT: {symbol} - Remaining budget ₹{remaining_budget:,.2f} "
+            logger.info(f"💰 FORCE INVESTMENT: {symbol} - Remaining budget Rs.{remaining_budget:,.2f} "
                         f"on {current_date.strftime('%Y-%m-%d')}")
             return {
                 'can_invest': True,
@@ -2202,8 +2202,8 @@ class MonthlyInvestmentTracker:
             'is_extreme': is_extreme
         })
 
-        logger.debug(f"💰 Recorded investment: {symbol} ₹{amount:,.2f} @ ₹{price:.2f} "
-                     f"(Month total: ₹{month_data['total_invested']:,.2f})")
+        logger.debug(f"💰 Recorded investment: {symbol} Rs.{amount:,.2f} @ Rs.{price:.2f} "
+                     f"(Month total: Rs.{month_data['total_invested']:,.2f})")
 
     def record_skip(self, symbol: str, date: datetime, intended_amount: float,
                     reason: str, current_price: float) -> None:
@@ -2218,7 +2218,7 @@ class MonthlyInvestmentTracker:
         }
 
         self.skipped_investments.append(skip_record)
-        logger.info(f"⏭️ Skipped investment: {symbol} ₹{intended_amount:,.2f} - {reason}")
+        logger.info(f"⏭️ Skipped investment: {symbol} Rs.{intended_amount:,.2f} - {reason}")
 
     def get_monthly_summary(self, symbol: str = None) -> Dict[str, Any]:
         """Get comprehensive monthly investment summary"""
@@ -2266,9 +2266,9 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
         try:
             logger.info(f"🚀 Starting enhanced SIP backtest for {symbol}")
             logger.info(f"📅 Period: {start_date} to {end_date}")
-            logger.info(f"💰 Config: Fixed=₹{config.fixed_investment:,.2f}, "
-                        f"Monthly=₹{config.max_amount_in_a_month:,.2f}, "
-                        f"Extreme=₹{config.fixed_investment * config.extreme_drawdown_inv_multiplier:,.2f}")
+            logger.info(f"💰 Config: Fixed=Rs.{config.fixed_investment:,.2f}, "
+                        f"Monthly=Rs.{config.max_amount_in_a_month:,.2f}, "
+                        f"Extreme=Rs.{config.fixed_investment * config.extreme_drawdown_inv_multiplier:,.2f}")
 
             # Initialize monthly tracker with enhanced config
             self.monthly_tracker = MonthlyInvestmentTracker(
@@ -2303,7 +2303,7 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
                 if should_invest:
                     logger.info(f"Investment signal: {investment_reason},"
                                 f" Date: {current_date.strftime('%Y-%m-%d')},"
-                                f" Price: ₹{current_price:.2f}")
+                                f" Price: Rs.{current_price:.2f}")
                     # Calculate investment amount based on market conditions
                     base_investment_amount, is_extreme  = self.determine_investment_amount(
                         current_price, data, config, i
@@ -2349,8 +2349,8 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
                         }
                         trades.append(trade)
 
-                        logger.debug(f"💰 Investment executed: {symbol} ₹{final_amount:,.2f}"
-                                     f" @ ₹{current_price:.2f} ({units_bought:.2f} units)")
+                        logger.debug(f"💰 Investment executed: {symbol} Rs.{final_amount:,.2f}"
+                                     f" @ Rs.{current_price:.2f} ({units_bought:.2f} units)")
 
                     else:
                         # Track skip reasons
@@ -2394,8 +2394,8 @@ class EnhancedSIPStrategyWithLimits(EnhancedSIPStrategy):
                         }
                         trades.append(trade)
 
-                        logger.info(f"🔄 FORCE INVESTMENT: ₹{final_amount:,.2f} "
-                                    f"(remaining budget) at ₹{current_price:.2f}")
+                        logger.info(f"🔄 FORCE INVESTMENT: Rs.{final_amount:,.2f} "
+                                    f"(remaining budget) at Rs.{current_price:.2f}")
 
             # Calculate final portfolio value
             final_price = data.iloc[-1]['close']
