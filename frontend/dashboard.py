@@ -608,7 +608,7 @@ async def render_enhanced_recent_orders_section(fetch_api, user_storage, broker)
                 ui.icon("list_alt", size="1.2rem").classes("text-blue-400")
                 ui.label("Recent Orders").classes("card-title text-sm")
             
-            ui.button("All", on_click=lambda: ui.navigate.to('/orderbook')).props("flat size=xs").classes("text-cyan-400 text-xs")
+            ui.button("All", on_click=lambda: ui.navigate.to('/order-book')).props("flat size=xs").classes("text-cyan-400 text-xs")
 
         # Orders container with headers and fixed height
         with ui.column().classes("w-full p-3"):

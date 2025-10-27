@@ -4,7 +4,6 @@ import aiohttp
 import asyncio
 import pandas as pd
 import plotly.graph_objects as go
-from datetime import datetime, date, timedelta
 import json
 import time
 import secrets
@@ -38,6 +37,8 @@ from settings import render_settings_page
 from dashboard import render_dashboard_page
 from backtesting import render_backtesting_page
 from enhanced_professional_scanner import create_enhanced_professional_scanner_page
+from profile import render_profile_page
+from market_utils import MarketStatusManager
 
 # Configure logging with file handler
 import os
@@ -119,8 +120,21 @@ async def cleanup_http_session():
     """Cleanup global HTTP session"""
     global _global_session
     if _global_session and not _global_session.closed:
-        await _global_session.close()
-        _global_session = None
+        try:
+            # Close session gracefully
+            await _global_session.close()
+            # Wait for connector to finish closing
+            await asyncio.sleep(0.25)
+        except Exception as e:
+            logger.warning(f"Error closing session gracefully: {e}")
+            try:
+                # Force close if graceful close fails
+                if hasattr(_global_session, '_connector') and _global_session._connector:
+                    _global_session._connector._close()
+            except Exception as e2:
+                logger.warning(f"Error force closing connector: {e2}")
+        finally:
+            _global_session = None
 
 def register_broker_change_handler(handler):
     """Register a handler to be called when broker changes"""
@@ -178,8 +192,7 @@ def create_broker_monitor(refresh_function, check_interval=2):
 
 # Admin users configuration - in production, this should come from database
 ADMIN_USERS = {
-    "admin@example.com",
-    "trader@company.com",
+    "srini@gmail.com"
     # Add more admin emails here
 }
 
@@ -538,14 +551,55 @@ def render_header():
 
         # Right side - Status and Profile
         with ui.row().classes("items-center gap-4"):
-            # Market Status
-            market_open = 9 <= datetime.now().hour < 16
-            status_color = "green" if market_open else "red"
-            status_text = "Market Open" if market_open else "Market Closed"
-
-            with ui.row().classes("status-indicator market-status"):
-                ui.icon("circle", size="0.5rem").classes(f"text-{status_color}-500")
-                ui.label(status_text).classes("text-sm theme-text-primary")
+            # Market Status - Dynamic (Event-driven, resource-efficient)
+            # Uses MarketStatusManager from market_utils.py for clean separation of concerns
+            with ui.row(align_items="center").classes("status-indicator market-status"):
+                market_status_icon = ui.icon("circle", size="0.5rem").classes("text-gray-500")
+                market_status_label = ui.label("Checking...").classes("text-sm theme-text-primary")
+                
+                # Initialize market status manager
+                status_manager = MarketStatusManager(fetch_api)
+                
+                async def update_market_status():
+                    """Fetch and update market status from backend"""
+                    try:
+                        # Fetch status using manager
+                        response = await status_manager.fetch_market_status()
+                        parsed = status_manager.parse_market_status_response(response)
+                        
+                        # Update UI elements
+                        market_status_icon.classes(replace=parsed["css_class"])
+                        market_status_label.text = parsed["status"]
+                        market_status_label.tooltip(parsed["tooltip"])
+                        
+                        # Schedule next update
+                        schedule_next_update(parsed["is_trading_day"])
+                        
+                    except Exception as e:
+                        logger.error(f"Error updating market status: {e}")
+                        market_status_label.text = "Status Unknown"
+                        market_status_icon.classes(replace="text-gray-500")
+                        schedule_next_update(False, error_retry=True)
+                
+                def schedule_next_update(is_trading_day, error_retry=False):
+                    """Schedule next update at optimal time"""
+                    # Cancel existing timer
+                    status_manager.cancel_current_timer()
+                    
+                    # Calculate next update time
+                    next_update_seconds, _ = status_manager.calculate_next_update_time(
+                        is_trading_day, error_retry
+                    )
+                    
+                    # Create new one-time timer (ui.timer handles async callbacks)
+                    status_manager.current_timer = ui.timer(
+                        next_update_seconds,
+                        update_market_status,
+                        once=True
+                    )
+                
+                # Initial update (ui.run_javascript is sync, so we schedule immediately)
+                ui.timer(0.1, update_market_status, once=True)
 
             # Connection Status
             with ui.row().classes("status-indicator connection-status"):
@@ -615,22 +669,18 @@ def render_header():
             import asyncio
             asyncio.create_task(render_broker_switcher())
 
-            # Current Time
-            time_label = ui.label().classes("text-sm theme-text-secondary font-mono")
+            # Settings Icon
+            ui.button(icon="settings", on_click=lambda: ui.navigate.to('/settings')).props(
+                "flat round dense").classes("theme-text-primary hover:bg-white/10").tooltip("Settings & Preferences")
 
-            def update_time():
-                time_label.text = datetime.now().strftime("%H:%M:%S IST")
-
-            ui.timer(1, update_time)
-
-            # Theme toggle
-            ui.button(icon="brightness_6", on_click=toggle_theme).props(
-                "flat round dense").classes("text-white hover:bg-white/10")
+            # Theme toggle (with meaningful icon)
+            ui.button(icon="dark_mode", on_click=toggle_theme).props(
+                "flat round dense").classes("theme-text-primary hover:bg-white/10").tooltip("Toggle Dark/Light Mode")
 
             # Profile Dropdown
             with ui.element('div').classes('profile-dropdown'):
                 with ui.button(icon="account_circle").props("flat round dense").classes(
-                        "text-white hover:bg-white/10") as profile_btn:
+                        "theme-text-primary hover:bg-white/10") as profile_btn:
 
                     # Create dropdown menu
                     menu = ui.menu().classes(
@@ -638,13 +688,37 @@ def render_header():
                     )
 
                     with menu:
-                        # User info
-                        user_email = app.storage.user.get('email', 'user@example.com')
+                        # User info (fetched from backend profile)
+                        user_email_label = ui.label("Loading...").classes("text-sm font-semibold text-white")
                         broker = app.storage.user.get(STORAGE_BROKER_KEY, 'Zerodha')
+                        broker_label = ui.label(f"Broker: {broker}").classes("text-xs text-gray-400")
+                        
+                        async def fetch_user_profile():
+                            """Fetch user profile from backend"""
+                            try:
+                                # Try to get profile from the current broker
+                                profile = await fetch_api(f"/profile/{broker}")
+                                if profile and profile.get("email"):
+                                    user_email_label.text = profile["email"]
+                                    # Store in local storage for future use
+                                    app.storage.user['email'] = profile["email"]
+                                    if profile.get("name"):
+                                        user_email_label.text = profile["name"]
+                                else:
+                                    # Fallback to stored email
+                                    user_email = app.storage.user.get('email', 'user@example.com')
+                                    user_email_label.text = user_email
+                            except Exception as e:
+                                logger.error(f"Error fetching user profile: {e}")
+                                # Fallback to stored email
+                                user_email = app.storage.user.get('email', 'user@example.com')
+                                user_email_label.text = user_email
+                        
+                        # Fetch profile data
+                        ui.timer(0.1, fetch_user_profile, once=True)
 
                         with ui.column().classes("p-3 border-b border-white/10"):
-                            ui.label(user_email).classes("text-sm font-semibold text-white")
-                            ui.label(f"Broker: {broker}").classes("text-xs text-gray-400")
+                            pass  # Labels already added above
 
                         # Menu items
                         with ui.column().classes("py-2"):
@@ -879,7 +953,7 @@ async def order_management_page(client: Client):
     if not app.storage.user.get(STORAGE_TOKEN_KEY):
         ui.navigate.to('/')
         return
-    apply_unified_theme(PageTheme.TRADING, app.storage.user)
+    apply_unified_theme(PageTheme.ORDER_MANAGEMENT, app.storage.user)  # Changed from TRADING to ORDER_MANAGEMENT
     render_header()
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_order_management(fetch_api, app.storage.user, await get_cached_instruments(broker))
@@ -1027,6 +1101,23 @@ async def settings_page(client: Client):
     broker = app.storage.user.get(STORAGE_BROKER_KEY, "Zerodha")
     await render_settings_page(fetch_api, app.storage.user, apply_theme_from_storage)
 
+
+@ui.page('/profile')
+async def profile_page(client: Client):
+    """User profile page with complete user data and preferences"""
+    await client.connected()
+    if not app.storage.user.get(STORAGE_TOKEN_KEY):
+        ui.navigate.to('/')
+        return
+    apply_unified_theme(PageTheme.SETTINGS, app.storage.user)
+    render_header()
+    
+    broker = app.storage.user.get(STORAGE_BROKER_KEY, 'Zerodha')
+    
+    # Render profile page using dedicated module
+    await render_profile_page(fetch_api, app.storage.user, broker)
+
+
 @ui.page('/cache-admin')
 async def cache_admin_page(client: Client):
     await client.connected()
@@ -1106,12 +1197,69 @@ async def on_client_disconnect(client: Client):
 
 @app.on_shutdown
 async def on_app_shutdown():
-    """Cleanup resources on application shutdown"""
+    """Cleanup resources on application shutdown - never raises exceptions"""
+    global _global_session  # Declare global at function level
+    
+    def force_cleanup():
+        """Synchronous force cleanup of HTTP session"""
+        global _global_session
+        try:
+            if _global_session and not _global_session.closed:
+                _global_session._connector._close()
+        except Exception:
+            pass
+        _global_session = None
+    
     try:
         logger.info("Application shutting down - cleaning up resources")
-        await cleanup_http_session()
+        
+        # Cancel any pending background tasks (non-blocking)
+        try:
+            tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            if tasks:
+                logger.info(f"Cancelling {len(tasks)} pending tasks...")
+                for task in tasks:
+                    try:
+                        task.cancel()
+                    except Exception:
+                        pass
+                logger.info("Background tasks cancellation initiated")
+        except Exception as e:
+            logger.warning(f"Error cancelling tasks: {e}")
+        
+        # Cleanup HTTP session - try async first, force sync if fails
+        cleaned = False
+        try:
+            # Don't use shield - it can still be cancelled
+            # Use a simple timeout instead
+            try:
+                await asyncio.wait_for(cleanup_http_session(), timeout=1.0)
+                logger.info("HTTP session cleaned up")
+                cleaned = True
+            except asyncio.TimeoutError:
+                logger.warning("HTTP cleanup timed out - forcing closure")
+            except asyncio.CancelledError:
+                logger.info("HTTP cleanup cancelled - forcing closure")
+        except Exception as e:
+            logger.warning(f"Error during HTTP cleanup: {e}")
+        
+        # Always force cleanup if async didn't work
+        if not cleaned:
+            force_cleanup()
+            logger.info("HTTP session force-closed")
+        
+        logger.info("Application shutdown complete")
+        
+    except asyncio.CancelledError:
+        # Catch CancelledError and don't re-raise
+        logger.info("Shutdown interrupted - forcing final cleanup")
+        force_cleanup()
     except Exception as e:
-        logger.error(f"Error during app shutdown: {e}")
+        logger.error(f"Unexpected error during shutdown: {e}")
+        force_cleanup()
+    
+    # Ensure we never raise an exception from this handler
+    # This prevents CancelledError from propagating to uvicorn
 
 
 # Cache utility functions for application-wide use
@@ -1157,15 +1305,13 @@ if __name__ in {"__main__", "__mp_main__"}:
 
     ui.run(
         title="AlgoTrade Pro - Advanced Trading Platform",
-        port=8081,
-        reload=True,
+        port=8083,
+        reload=True,  # Disable reload for clean shutdown - use external reloader if needed
         uvicorn_reload_dirs='.',
         uvicorn_reload_includes='*.py',
         storage_secret=storage_secret_key,
         favicon="🚀",
-        # NiceGUI 3.1.0+ session configuration
-        reconnect_timeout=30.0,  # Allow 30 seconds for reconnection
-        # Uvicorn configuration for better stability
+        reconnect_timeout=5.0,  # Reduced timeout to allow faster shutdown
         uvicorn_logging_level="info",
-        show=False,  # Don't auto-open browser
+        show=True,  # Don't auto-open browser
     )

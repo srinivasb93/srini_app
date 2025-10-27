@@ -9,7 +9,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-
+import nsepython
 from common_utils import fetch_load_db_data as rd
 import datetime as dt
 import logging
@@ -90,6 +90,17 @@ class MarketData:
         except Exception:
             logger.error(f"Error fetching corporate actions for {symbol}")
             return pd.DataFrame()
+
+    @staticmethod
+    def get_nse_market_status():
+        try:
+            payload = fetch_nse_data('https://www.nseindia.com/api/marketStatus')
+            if not payload or 'marketStatus' not in payload:
+                raise ValueError("Market status information missing in response")
+            return payload
+        except Exception:   
+            logger.error("Error fetching NSE market status")
+            return {}
 
     @staticmethod
     def fetch_and_load_nse_events():

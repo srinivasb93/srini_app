@@ -682,6 +682,149 @@ async def get_system_info():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/market-status", tags=["market-data"])
+async def get_market_status(nse_db: AsyncSession = Depends(get_nsedata_db)):
+    """
+    Get current market status for Indian stock exchanges (BSE & NSE)
+    
+    Market Hours:
+    - Pre-Open Session: 9:00 AM - 9:15 AM
+    - Normal Session: 9:15 AM - 3:30 PM
+    - Closing Session: 3:30 PM - 4:00 PM
+    - Closed: After 4:00 PM and before 9:00 AM
+    """
+    try:
+        now = datetime.now()
+        today_date = now.date()
+        current_time = now.time()
+        
+        # Check if today is a weekday (Monday=0, Sunday=6)
+        is_weekday = now.weekday() < 5  # Monday to Friday
+        
+        # Check if today is a holiday
+        is_holiday = False
+        holiday_description = None
+        
+        try:
+            result = await nse_db.execute(
+                text("""
+                    SELECT description FROM "NSE_HOLIDAYS" 
+                    WHERE DATE(trading_date) = :today_date
+                """),
+                {"today_date": today_date}
+            )
+            holiday_row = result.fetchone()
+            if holiday_row:
+                is_holiday = True
+                holiday_description = holiday_row[0]
+        except Exception as e:
+            logger.warning(f"Could not check NSE holidays: {e}")
+            # Continue without holiday check if database query fails
+        
+        # Determine if it's a trading day
+        is_trading_day = is_weekday and not is_holiday
+        
+        # Determine market status based on time
+        market_status = "Closed"
+        status_color = "red"
+        status_message = "Market is closed"
+        next_event = None
+        
+        if is_trading_day:
+            from datetime import time as dt_time
+            
+            # Define market hours
+            pre_open_start = dt_time(9, 0)
+            pre_open_end = dt_time(9, 15)
+            normal_session_start = dt_time(9, 15)
+            normal_session_end = dt_time(15, 30)
+            closing_session_end = dt_time(16, 0)
+            
+            if pre_open_start <= current_time < pre_open_end:
+                market_status = "Pre-Open"
+                status_color = "orange"
+                status_message = "Pre-Open Session (9:00 AM - 9:15 AM)"
+                next_event = "Normal trading starts at 9:15 AM"
+                
+            elif normal_session_start <= current_time < normal_session_end:
+                market_status = "Open"
+                status_color = "green"
+                status_message = "Market is open for trading"
+                next_event = "Closing session starts at 3:30 PM"
+                
+            elif normal_session_end <= current_time < closing_session_end:
+                market_status = "Closing"
+                status_color = "yellow"
+                status_message = "Closing Session (3:30 PM - 4:00 PM)"
+                next_event = "Market closes at 4:00 PM"
+                
+            elif current_time >= closing_session_end:
+                market_status = "Closed"
+                status_color = "red"
+                status_message = "Market is closed for the day"
+                # Calculate next trading day
+                next_trading_day = now + timedelta(days=1)
+                while next_trading_day.weekday() >= 5:  # Skip weekends
+                    next_trading_day = next_trading_day + timedelta(days=1)
+                next_event = f"Pre-open starts at 9:00 AM on {next_trading_day.strftime('%A, %B %d')}"
+                
+            else:  # Before 9:00 AM
+                market_status = "Closed"
+                status_color = "red"
+                status_message = "Market opens at 9:00 AM"
+                next_event = "Pre-open session starts at 9:00 AM"
+        else:
+            # Not a trading day
+            market_status = "Closed"
+            status_color = "red"
+            
+            if not is_weekday:
+                status_message = "Market is closed on weekends"
+                # Find next Monday
+                days_until_monday = (7 - now.weekday()) % 7
+                if days_until_monday == 0:
+                    days_until_monday = 7
+                next_trading_day = now + timedelta(days=days_until_monday)
+                next_event = f"Pre-open starts at 9:00 AM on {next_trading_day.strftime('%A, %B %d')}"
+            elif is_holiday:
+                status_message = f"Market Holiday: {holiday_description or 'Holiday'}"
+                # Find next trading day (skip holidays and weekends)
+                next_trading_day = now + timedelta(days=1)
+                while next_trading_day.weekday() >= 5:
+                    next_trading_day = next_trading_day + timedelta(days=1)
+                next_event = f"Pre-open starts at 9:00 AM on {next_trading_day.strftime('%A, %B %d')}"
+        
+        return {
+            "is_trading_day": is_trading_day,
+            "is_weekday": is_weekday,
+            "is_holiday": is_holiday,
+            "holiday_description": holiday_description,
+            "market_status": market_status,
+            "status_color": status_color,
+            "status_message": status_message,
+            "next_event": next_event,
+            "current_time": now.isoformat(),
+            "timestamp": now.isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching market status: {str(e)}")
+        # Return a safe fallback response
+        return {
+            "is_trading_day": False,
+            "is_weekday": False,
+            "is_holiday": False,
+            "holiday_description": None,
+            "market_status": "Unknown",
+            "status_color": "gray",
+            "status_message": "Unable to determine market status",
+            "next_event": None,
+            "current_time": datetime.now().isoformat(),
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        }
+
+
 # ============================================================================
 # AUTHENTICATION ENDPOINTS
 # ============================================================================

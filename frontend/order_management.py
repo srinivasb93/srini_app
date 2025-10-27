@@ -160,16 +160,16 @@ def create_position_calculator_button(
     baseline_snapshot: Dict[str, Any] = {}
     context_snapshot: Dict[str, Any] = {}
 
-    with ui.dialog().props('max-width=900px full-width').classes('position-sizing-dialog w-full max-w-[900px]') as dialog, ui.card().classes('position-sizing-card p-4 bg-gray-900 text-white gap-4 rounded-xl shadow-xl w-full'):
+    with ui.dialog().props('max-width=900px full-width').classes('position-sizing-dialog w-full max-w-[900px]') as dialog, ui.card().classes('position-sizing-card position-sizing-surface p-4 bg-gray-900 text-white gap-4 rounded-xl shadow-xl w-full'):
         dialog.style('width: min(50vw, 900px);')
         ui.label('Position Sizing Calculator').classes('text-xl font-semibold')
 
-        with ui.row().classes('w-full items-center justify-between gap-2 bg-emerald-900/25 border border-emerald-500/30 px-3 py-5 rounded-lg'):
+        with ui.row().classes('position-sizing-summary w-full items-center justify-between gap-2 bg-emerald-900/25 border border-emerald-500/30 px-3 py-5 rounded-lg'):
             funds_label = ui.label('Funds Available: --').classes('text-sm font-medium text-emerald-200 grow')
             basket_label = ui.label('Basket Allocation: --').classes('text-sm text-emerald-200 grow')
             net_funds_label = ui.label('After Basket: --').classes('text-sm font-semibold text-emerald-100 grow')
 
-        with ui.row().classes('w-full gap-4'):
+        with ui.row().classes('position-sizing-grid w-full gap-4'):
             with ui.column().classes('flex-1 gap-1'):
                 ui.label('Capital').classes('text-sm font-medium text-gray-300')
                 capital_input = ui.number(
@@ -196,7 +196,7 @@ def create_position_calculator_button(
                         format='%.2f'
                     ).classes('flex-1')
 
-        with ui.row().classes('w-full gap-4'):
+        with ui.row().classes('position-sizing-grid w-full gap-4'):
             with ui.column().classes('flex-1 gap-1'):
                 ui.label('Entry Price').classes('text-sm font-medium text-gray-300')
                 entry_input = ui.number(
@@ -233,7 +233,7 @@ def create_position_calculator_button(
                         format='%.2f'
                     ).classes('flex-1')
 
-        with ui.row().classes('w-full gap-4'):
+        with ui.row().classes('position-sizing-grid w-full gap-4'):
             with ui.column().classes('flex-1 gap-1'):
                 ui.label('Brokerage / Side').classes('text-sm font-medium text-gray-300')
                 brokerage_input = ui.number(
@@ -252,7 +252,7 @@ def create_position_calculator_button(
 
             quantity_preview = ui.label('Quantity: 0').classes('flex-1 text-lg font-semibold')
 
-        with ui.column().classes('w-full bg-gray-800/80 rounded-lg p-3 gap-2'):
+        with ui.column().classes('position-sizing-summary-panel w-full bg-gray-800/80 rounded-lg p-3 gap-2'):
             summary_title = ui.label('Trade Summary').classes('text-sm font-semibold text-cyan-300')
             summary_entry = ui.label('Entry: -').classes('text-sm text-gray-100')
             summary_levels = ui.label('Stop / Target: -').classes('text-sm text-gray-200')
@@ -260,7 +260,7 @@ def create_position_calculator_button(
             summary_ratio = ui.label('Risk/Reward Ratio: -').classes('text-sm text-gray-200')
             summary_charges = ui.label('Charges: -').classes('text-xs text-gray-400')
 
-        with ui.row().classes('w-full gap-3 justify-end mt-3'):
+        with ui.row().classes('position-sizing-actions w-full gap-3 justify-end mt-3'):
             reset_button = ui.button('Reset', icon='restart_alt').classes('bg-slate-700 text-white rounded-lg px-4')
             close_button = ui.button('Close').classes('bg-gray-600 text-white rounded-lg px-4')
             apply_button = ui.button('Apply to Order', icon='playlist_add_check').classes('bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg px-4')
@@ -704,32 +704,6 @@ async def render_order_management(fetch_api, user_storage, instruments):
 
     user_storage['position_calc_defaults'] = position_calc_defaults
 
-    if not user_storage.get('_order_management_styles_injected'):
-        ui.add_head_html("""
-        <style>
-        .position-sizing-dialog .q-dialog__inner {
-            max-width: 900px !important;
-        }
-        .position-sizing-dialog .q-card.position-sizing-card {
-            width: clamp(640px, 50vw, 900px) !important;
-            max-width: clamp(640px, 50vw, 900px) !important;
-        }
-        .order-action-row .q-btn {
-            min-height: 48px !important;
-            border-radius: 14px !important;
-        }
-        .basket-order-card.q-card {
-            border-radius: 16px !important;
-            overflow: visible !important;
-            border-width: 1px !important;
-        }
-        .basket-order-card .q-card__section {
-            padding: 0 !important;
-        }
-        </style>
-        """)
-        user_storage['_order_management_styles_injected'] = True
-
     # Fetch instruments if not already available
     if not instruments:
         instruments_data = await fetch_api(f"/instruments/{broker}/?exchange=NSE")
@@ -737,20 +711,23 @@ async def render_order_management(fetch_api, user_storage, instruments):
             equity_instruments = [i for i in instruments_data if i.get('segment') == 'NSE' and i.get('instrument_type') == 'EQ']
             instruments.update({i['trading_symbol']: i['instrument_token'] for i in equity_instruments})
 
-    # Compact header
-    with ui.row().classes("w-full items-center justify-between p-2 bg-gray-900/50"):
+    # Compact header with theme-aware styling
+    with ui.row().classes("w-full items-center justify-between p-2 order-mgmt-header theme-surface-elevated"):
         with ui.row().classes("items-center gap-2"):
-            ui.icon("shopping_cart", size="1.5rem").classes("text-cyan-400")
-            ui.label("Order Management").classes("text-2xl font-bold text-white")
+            ui.icon("shopping_cart", size="1.5rem").classes("theme-text-accent")
+            ui.label("Order Management").classes("text-2xl font-bold theme-text-primary")
             ui.chip("TRADING", color="cyan").classes("text-xs")
 
         with ui.row().classes("items-center gap-4"):
-            with ui.tabs().classes('bg-gray-800/50 rounded-lg') as tabs:
+            with ui.tabs().classes('order-tabs theme-surface-elevated rounded-lg') as tabs:
                 regular_tab = ui.tab('Regular Orders', icon='flash_on').classes('px-4 py-2')
                 # scheduled_tab = ui.tab('Scheduled Orders', icon='schedule').classes('px-4 py-2')  # Merged into Regular Orders
                 gtt_tab = ui.tab('GTT Orders', icon='compare_arrows').classes('px-4 py-2')
                 auto_tab = ui.tab('Auto Orders', icon='smart_toy').classes('px-4 py-2')
             basket_button_container = ui.row().classes("items-center gap-2 ml-4")
+    
+    # Set default tab to Regular Orders
+    tabs.set_value(regular_tab)
 
     basket_state = user_storage.get('order_basket')
     if basket_state is None:
@@ -772,19 +749,25 @@ async def render_order_management(fetch_api, user_storage, instruments):
                 logger.warning(f"Basket observer error: {exc}")
 
     with basket_button_container:
-        with ui.row().classes('items-center gap-2 bg-gradient-to-r from-orange-500 to-pink-500 px-3 py-1.5 rounded-full shadow-lg'):
-            basket_button = ui.button('Basket Orders', icon='shopping_basket').props('flat dense').classes('text-white bg-transparent hover:bg-white/10 px-2 min-w-0 rounded-full')
-            basket_count_badge = ui.badge(str(len(basket_state))).classes('bg-white text-orange-600 text-xs font-semibold px-2 rounded-full')
+        with ui.row().classes('items-center gap-3'):
+            # Basket Orders Button
+            with ui.row().classes('items-center gap-2 bg-gradient-to-r from-orange-500 to-pink-500 px-3 py-1.5 rounded-full shadow-lg'):
+                basket_button = ui.button('Basket Orders', icon='shopping_basket').props('flat dense').classes('text-white bg-transparent hover:bg-white/10 px-2 min-w-0 rounded-full')
+                basket_count_badge = ui.badge(str(len(basket_state))).classes('bg-white text-orange-600 text-xs font-semibold px-2 rounded-full')
+            
+            # Orderbook Button  
+            ui.button('Orderbook', icon='library_books', on_click=lambda: ui.navigate.to('/order-book'))\
+                .props('flat').classes('bg-gradient-to-r from-blue-500 to-cyan-500 text-white px-4 py-1.5 rounded-full shadow-lg hover:shadow-xl transition-all')
 
-    with ui.dialog().classes('max-w-3xl') as basket_dialog:
-        with ui.card().classes('p-4 bg-gray-900 text-white gap-3 w-full'):
-            with ui.row().classes('w-full items-center justify-between'):
+    with ui.dialog().classes('basket-orders-dialog max-w-3xl') as basket_dialog:
+        with ui.card().classes('basket-orders-card p-4 bg-gray-900 text-white gap-3 w-full'):
+            with ui.row().classes('basket-orders-header w-full items-center justify-between'):
                 ui.label('Order Basket').classes('text-xl font-semibold')
                 ui.button(icon='close', on_click=basket_dialog.close).props('flat round dense').classes('text-white hover:bg-gray-700/70')
-            basket_summary_label = ui.label('Basket is empty').classes('text-sm text-gray-300')
-            basket_list_column = ui.column().classes('w-full gap-3 py-2')
-            basket_feedback_column = ui.column().classes('w-full gap-3')
-            with ui.row().classes('w-full justify-between gap-2'):
+            basket_summary_label = ui.label('Basket is empty').classes('basket-orders-summary text-sm text-gray-300')
+            basket_list_column = ui.column().classes('basket-orders-list w-full gap-3 py-2')
+            basket_feedback_column = ui.column().classes('basket-orders-feedback w-full gap-3')
+            with ui.row().classes('basket-orders-actions w-full justify-between gap-2'):
                 clear_basket_button = ui.button('Clear Basket', icon='delete_sweep').classes('bg-gray-700 text-white')
                 place_all_button = ui.button('Place Basket Orders', icon='playlist_play').classes('bg-green-600 text-white')
 
@@ -1131,95 +1114,95 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker, po
         position_calc_defaults['risk_amount'] = capital_val * (risk_percent_val / 100.0) if capital_val and risk_percent_val else 0.0
 
     with ui.card().classes('w-full enhanced-card'):
-        with ui.row().classes("w-full items-center justify-between p-2 border-b border-gray-700"):
+        with ui.row().classes("w-full items-center justify-between p-2 border-b order-form-header theme-surface-elevated"):
             with ui.row().classes("items-center gap-3"):
-                ui.icon("add_circle", size="1.2rem").classes("text-cyan-400")
-                ui.label("Place Regular Order").classes("text-lg font-semibold text-white")
+                ui.icon("add_circle", size="1.2rem").classes("theme-text-accent")
+                ui.label("Place Regular Order").classes("text-lg font-semibold theme-text-primary")
             ui.chip("LIVE", color="green").classes("text-xs")
 
         with ui.column().classes("p-2 gap-3 w-full"):
             validation_state = {'symbol': True, 'quantity': True, 'price': True, 'trigger_price': True}
 
-            # Index Filter and Symbol Selection
-            with ui.row().classes('w-full gap-3'):
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Index Filter").classes("text-sm font-medium text-gray-300")
-                    index_select = ui.select(
-                        options=['NIFTY_50', 'NIFTY_NEXT_50', 'All Instruments'],
-                        value='NIFTY_50'
-                    ).classes('w-full')
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Trading Symbol").classes("text-sm font-medium text-gray-300")
-
-                    # Prepare initial symbol options
-                    symbol_options = await get_symbol_options(index_select.value)
-                    initial_symbol = symbol_options[0] if symbol_options else None
-
-                    symbol_select = ui.select(
-                        options=symbol_options,
-                        with_input=True,
-                        value=initial_symbol
-                    ).classes('w-full')
-                    symbol_select.on_value_change(lambda e: validation_state.update({'symbol': bool(e.value)}))
-
-                    async def update_symbol_options():
-                        if index_select.value == 'All Instruments':
-                            symbol_select.options = sorted(list(instruments.keys()))
-                        else:
-                            symbol_select.options = await get_symbol_options(index_select.value)
-                        symbol_select.update()
-                        if symbol_select.value:
-                            await update_market_price(symbol_select.value, reset_defaults=True)
-
-                    index_select.on_value_change(update_symbol_options)
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Transaction Type").classes("text-sm font-medium text-gray-300")
-                    transaction_type = ui.select(
-                        options=['BUY', 'SELL'],
-                        value='BUY'
-                    ).classes('w-full')
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Product Type").classes("text-sm font-medium text-gray-300")
-                    product_type = ui.select(
-                        options=['MIS', 'CNC'] if broker == 'Zerodha' else ['I', 'D'],
-                        value='CNC' if broker == 'Zerodha' else 'D'
-                    ).classes('w-full')
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Quantity").classes("text-sm font-medium text-gray-300")
-                    quantity = ui.number(
-                        value=1,
-                        min=1,
-                        format='%d'
-                    ).classes('w-full')
-                    quantity.on_value_change(lambda e: validation_state.update({'quantity': _safe_int(e.value) > 0}))
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Disclosed Qty").classes("text-sm font-medium text-gray-300")
-                    disclosed_quantity = ui.number(
-                        value=0,
-                        min=0,
-                        format='%d'
-                    ).classes('w-full')
-
-            # Main Layout: Two Columns (Order Entry + Market Data)
-            with ui.row().classes('w-full gap-4'):
-                # LEFT COLUMN: Order Entry Fields
-                with ui.column().classes('flex-[2] gap-3'):
-                    # Price Configuration Row
+            # Main Layout: Two Columns (Order Entry + Market Data) - 80% : 20%
+            with ui.row().classes('w-full gap-4 mb-2'):
+                # LEFT COLUMN: Order Entry Fields (80%)
+                with ui.column().classes('flex-[4] gap-3'):
+                    # Index Filter and Symbol Selection
                     with ui.row().classes('w-full gap-3'):
                         with ui.column().classes("flex-1 gap-2"):
-                            ui.label("Order Type").classes("text-sm font-medium text-gray-300")
-                            order_type = ui.select(
-                                options=['MARKET', 'LIMIT', 'SL', 'SL-M'],
-                                value='MARKET'
+                            ui.label("Index Filter").classes("text-sm font-medium theme-text-primary")
+                            index_select = ui.select(
+                                options=['NIFTY_50', 'NIFTY_NEXT_50', 'All Instruments'],
+                                value='NIFTY_50'
                             ).classes('w-full')
 
                         with ui.column().classes("flex-1 gap-2"):
-                            ui.label("Price").classes("text-sm font-medium text-gray-300")
+                            ui.label("Trading Symbol").classes("text-sm font-medium theme-text-primary")
+
+                            # Prepare initial symbol options
+                            symbol_options = await get_symbol_options(index_select.value)
+                            initial_symbol = symbol_options[0] if symbol_options else None
+
+                            symbol_select = ui.select(
+                                options=symbol_options,
+                                with_input=True,
+                                value=initial_symbol
+                            ).classes('w-full')
+                            symbol_select.on_value_change(lambda e: validation_state.update({'symbol': bool(e.value)}))
+
+                            async def update_symbol_options():
+                                if index_select.value == 'All Instruments':
+                                    symbol_select.options = sorted(list(instruments.keys()))
+                                else:
+                                    symbol_select.options = await get_symbol_options(index_select.value)
+                                symbol_select.update()
+                                if symbol_select.value:
+                                    await update_market_price(symbol_select.value, reset_defaults=True)
+
+                            index_select.on_value_change(update_symbol_options)
+
+                        with ui.column().classes("flex-1 gap-2"):
+                            ui.label("Transaction Type").classes("text-sm font-medium theme-text-primary")
+                            transaction_type = ui.select(
+                                options=['BUY', 'SELL'],
+                                value='BUY'
+                            ).classes('w-full')
+
+                        with ui.column().classes("flex-1 gap-2"):
+                            ui.label("Product Type").classes("text-sm font-medium theme-text-primary")
+                            product_type = ui.select(
+                                options=['MIS', 'CNC'] if broker == 'Zerodha' else ['I', 'D'],
+                                value='CNC' if broker == 'Zerodha' else 'D'
+                            ).classes('w-full')
+
+                        with ui.column().classes("flex-1 gap-2"):
+                            ui.label("Quantity").classes("text-sm font-medium theme-text-primary")
+                            quantity = ui.number(
+                                value=1,
+                                min=1,
+                                format='%d'
+                            ).classes('w-full')
+                            quantity.on_value_change(lambda e: validation_state.update({'quantity': _safe_int(e.value) > 0}))
+
+                        with ui.column().classes("flex-1 gap-2"):
+                            ui.label("Disclosed Qty").classes("text-sm font-medium theme-text-primary")
+                            disclosed_quantity = ui.number(
+                                value=0,
+                                min=0,
+                                format='%d'
+                            ).classes('w-full')
+                    
+                    # Price Configuration Row
+                    with ui.row().classes('w-full gap-3'):
+                        with ui.column().classes("flex-1 gap-2"):
+                            ui.label("Order Type").classes("text-sm font-medium theme-text-primary")
+                            order_type = ui.select(
+                                options=['MARKET', 'LIMIT', 'SL', 'SL-M'],
+                                value='LIMIT'
+                            ).classes('w-full')
+
+                        with ui.column().classes("flex-1 gap-2"):
+                            ui.label("Price").classes("text-sm font-medium theme-text-primary")
                             price_field = ui.number(
                                 value=0,
                                 min=0,
@@ -1230,7 +1213,7 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker, po
                                 {'price': (_safe_float(e.value) > 0) if order_type.value in ['LIMIT', 'SL'] else True}))
 
                         with ui.column().classes("flex-1 gap-2"):
-                            ui.label("Trigger Price").classes("text-sm font-medium text-gray-300")
+                            ui.label("Trigger Price").classes("text-sm font-medium theme-text-primary")
                             trigger_price_field = ui.number(
                                 value=0,
                                 min=0,
@@ -1241,132 +1224,133 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker, po
                                 {'trigger_price': (_safe_float(e.value) > 0) if order_type.value in ['SL', 'SL-M'] else True}))
 
                         with ui.column().classes("flex-1 gap-2"):
-                            ui.label("Validity").classes("text-sm font-medium text-gray-300")
+                            ui.label("Validity").classes("text-sm font-medium theme-text-primary")
                             validity = ui.select(
                                 options=['DAY', 'IOC'],
                                 value='DAY'
                             ).classes('w-full')
 
-                        with ui.column().classes('flex-1'):
-                            ui.label("AMO").classes("text-sm font-medium text-gray-300")
-                            is_amo_checkbox = ui.checkbox('After Market Order (AMO)').classes('text-white')
+                        with ui.column().classes('flex-1 gap-2'):
+                            ui.label("AMO").classes("text-sm font-medium theme-text-primary")
+                            is_amo_checkbox = ui.checkbox('After Market Order (AMO)').classes('theme-text-primary')
                             is_amo_checkbox.value = False
                     
-                    # Schedule Order Section (INSIDE left column)
-                    with ui.row().classes('w-full gap-3 items-center bg-purple-500/10 border border-purple-500/30 p-2 rounded-lg mt-2'):
-                        with ui.column().classes('flex-initial'):
-                            schedule_order_toggle = ui.checkbox('Schedule Order').classes('text-white')
+                    # Schedule Order and Risk Management in same row (25% : 75%)
+                    with ui.row().classes('w-full gap-4 mt-2'):
+                        # LEFT: Schedule Order Section (25%)
+                        with ui.column().classes('flex-1 gap-2 bg-purple-500/10 border border-purple-500/30 p-3 rounded-lg'):
+                            schedule_order_toggle = ui.checkbox('Schedule Order').classes('theme-text-primary font-semibold')
                             schedule_order_toggle.value = False
-                        
-                        schedule_fields_row = ui.row().classes('flex-1 gap-3')
-                        with schedule_fields_row:
-                            with ui.column().classes("flex-1 gap-2"):
-                                ui.label("Schedule Date").classes("text-sm font-medium text-gray-300")
-                                schedule_date = ui.input(
-                                    value=(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
-                                ).props("dense type=date").classes("w-full")
                             
-                            with ui.column().classes("flex-1 gap-2"):
-                                ui.label("Schedule Time").classes("text-sm font-medium text-gray-300")
-                                schedule_time = ui.input(
-                                    value=(datetime.now() + timedelta(minutes=15)).strftime("%H:%M")
-                                ).props("dense type=time").classes("w-full")
+                            schedule_fields_col = ui.column().classes('w-full gap-2 mt-2')
+                            with schedule_fields_col:
+                                with ui.row().classes('w-full gap-2'):
+                                    with ui.column().classes("flex-1 gap-1"):
+                                        ui.label("Date").classes("text-xs font-medium theme-text-secondary")
+                                        schedule_date = ui.input(
+                                            value=(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+                                        ).props("dense type=date").classes("w-full")
+                                    
+                                    with ui.column().classes("flex-1 gap-1"):
+                                        ui.label("Time").classes("text-xs font-medium theme-text-secondary")
+                                        schedule_time = ui.input(
+                                            value=(datetime.now() + timedelta(minutes=15)).strftime("%H:%M")
+                                        ).props("dense type=time").classes("w-full")
+                            
+                            # Initially hide schedule fields
+                            schedule_fields_col.visible = False
+                            
+                            def toggle_schedule_fields():
+                                schedule_fields_col.visible = schedule_order_toggle.value
+                                validation_state['schedule_datetime'] = not schedule_order_toggle.value or bool(schedule_date.value and schedule_time.value)
+                                schedule_fields_col.update()
+                            
+                            schedule_order_toggle.on_value_change(toggle_schedule_fields)
                         
-                        # Initially hide schedule fields
-                        schedule_fields_row.visible = False
-                        
-                        def toggle_schedule_fields():
-                            schedule_fields_row.visible = schedule_order_toggle.value
-                            validation_state['schedule_datetime'] = not schedule_order_toggle.value or bool(schedule_date.value and schedule_time.value)
-                        
-                        schedule_order_toggle.on_value_change(toggle_schedule_fields)
+                        # RIGHT: Risk Management Section (75%)
+                        with ui.column().classes('flex-[3] gap-2 theme-surface-elevated p-3 rounded-lg'):
+                            ui.label('Risk Management').classes('text-sm font-semibold theme-text-accent mb-1')
+                            
+                            # Risk Management Type Toggle
+                            risk_management_type = ui.toggle({
+                                'regular': 'Regular SL/Target',
+                                'trailing': 'Trailing Stop Loss'
+                            }, value='regular').classes('theme-toggle')
+                            
+                            # Regular Risk Management Section
+                            regular_risk_section = ui.column().classes('w-full mt-2')
+                            with regular_risk_section:
+                                with ui.row().classes('w-full gap-3'):
+                                    with ui.column().classes("flex-1 gap-2"):
+                                        ui.label("Stop Loss (₹)").classes("text-sm font-medium theme-text-secondary")
+                                        regular_stop_loss = ui.number(
+                                            value=0,
+                                            min=0,
+                                            step=0.05,
+                                            format='%.2f'
+                                        ).classes('w-full')
 
-                    # Risk Management Section (in left column)
-                    ui.label('Risk Management').classes('text-sm font-semibold text-cyan-400 mt-2 mb-1')
+                                    with ui.column().classes("flex-1 gap-2"):
+                                        ui.label("Target (₹)").classes("text-sm font-medium theme-text-secondary")
+                                        regular_target = ui.number(
+                                            value=0,
+                                            min=0,
+                                            step=0.05,
+                                            format='%.2f'
+                                        ).classes('w-full')
 
-                    # Risk Management Type Toggle
-                    with ui.row().classes('w-full gap-2 mb-1'):
-                        risk_management_type = ui.toggle({
-                            'regular': 'Regular SL/Target',
-                            'trailing': 'Trailing Stop Loss'
-                        }, value='regular').classes('bg-gray-700')
+                            # Trailing Stop Loss Section
+                            trailing_risk_section = ui.column().classes('w-full mt-2')
+                            trailing_risk_section.visible = False
+                            with trailing_risk_section:
+                                with ui.row().classes('w-full gap-3 mb-1'):
+                                    with ui.column().classes("flex-1 gap-2"):
+                                        ui.label("Stop Loss (₹)").classes("text-sm font-medium theme-text-secondary")
+                                        ui.label("Initial stop loss").classes("text-xs theme-text-muted")
+                                        trailing_stop_loss = ui.number(
+                                            value=0,
+                                            min=0,
+                                            step=0.05,
+                                            format='%.2f'
+                                        ).classes('w-full')
 
-                    # Regular Risk Management Section
-                    regular_risk_section = ui.column().classes('w-full')
-                    with regular_risk_section:
-                        with ui.row().classes('w-full gap-3'):
-                            with ui.column().classes("flex-1 gap-2"):
-                                ui.label("Stop Loss (₹)").classes("text-sm font-medium text-gray-300")
-                                regular_stop_loss = ui.number(
-                                    value=0,
-                                    min=0,
-                                    step=0.05,
-                                    format='%.2f'
-                                ).classes('w-full')
+                                    with ui.column().classes("flex-1 gap-2"):
+                                        ui.label("Target (₹)").classes("text-sm font-medium theme-text-secondary")
+                                        ui.label("Fixed target or 0").classes("text-xs theme-text-muted")
+                                        trailing_target = ui.number(
+                                            value=0,
+                                            min=0,
+                                            step=0.05,
+                                            format='%.2f'
+                                        ).classes('w-full')
 
-                            with ui.column().classes("flex-1 gap-2"):
-                                ui.label("Target (₹)").classes("text-sm font-medium text-gray-300")
-                                regular_target = ui.number(
-                                    value=0,
-                                    min=0,
-                                    step=0.05,
-                                    format='%.2f'
-                                ).classes('w-full')
+                                    with ui.column().classes("flex-1 gap-2"):
+                                        ui.label("Trail Start (%)").classes("text-sm font-medium theme-text-secondary")
+                                        ui.label("% gain to activate").classes("text-xs theme-text-muted")
+                                        trail_start_target_percent = ui.number(
+                                            value=5.0,
+                                            min=0.1,
+                                            max=50.0,
+                                            step=0.1,
+                                            format='%.1f'
+                                        ).classes('w-full')
 
-                    # Trailing Stop Loss Section
-                    trailing_risk_section = ui.column().classes('w-full')
-                    trailing_risk_section.visible = False
-                    with trailing_risk_section:
-                        with ui.row().classes('w-full gap-3'):
-                            with ui.column().classes("flex-1 gap-2"):
-                                ui.label("Stop Loss (₹)").classes("text-sm font-medium text-gray-300")
-                                ui.label("Initial stop loss when order is placed").classes("text-xs text-gray-400")
-                                trailing_stop_loss = ui.number(
-                                    value=0,
-                                    min=0,
-                                    step=0.05,
-                                    format='%.2f'
-                                ).classes('w-full')
+                                    with ui.column().classes("flex-1 gap-2"):
+                                        ui.label("Trailing SL (%)").classes("text-sm font-medium theme-text-secondary")
+                                        ui.label("% below highest").classes("text-xs theme-text-muted")
+                                        trailing_stop_loss_percent = ui.number(
+                                            value=2.0,
+                                            min=0.1,
+                                            max=20.0,
+                                            step=0.1,
+                                            format='%.1f'
+                                        ).classes('w-full')
 
-                            with ui.column().classes("flex-1 gap-2"):
-                                ui.label("Target (₹)").classes("text-sm font-medium text-gray-300")
-                                ui.label("Fixed Target if required else leave it at 0.0").classes("text-xs text-gray-400")
-                                trailing_target = ui.number(
-                                    value=0,
-                                    min=0,
-                                    step=0.05,
-                                    format='%.2f'
-                                ).classes('w-full')
-
-                            with ui.column().classes("flex-1 gap-2"):
-                                ui.label("Trail Start Target (%)").classes("text-sm font-medium text-gray-300")
-                                ui.label("Percentage gain to activate trailing").classes("text-xs text-gray-400")
-                                trail_start_target_percent = ui.number(
-                                    value=5.0,
-                                    min=0.1,
-                                    max=50.0,
-                                    step=0.1,
-                                    format='%.1f'
-                                ).classes('w-full')
-
-                            with ui.column().classes("flex-1 gap-2"):
-                                ui.label("Trailing Stop Loss (%)").classes("text-sm font-medium text-gray-300")
-                                ui.label("Percentage below highest price").classes("text-xs text-gray-400")
-                                trailing_stop_loss_percent = ui.number(
-                                    value=2.0,
-                                    min=0.1,
-                                    max=20.0,
-                                    step=0.1,
-                                    format='%.1f'
-                                ).classes('w-full')
-
-                        # Info section for trailing stop loss (compact)
-                        with ui.card().classes('bg-blue-900/30 border-blue-600/50 p-2 mt-1'):
-                            with ui.row().classes('gap-2 items-start'):
-                                ui.icon('info').classes('text-blue-400 text-sm')
-                                with ui.column().classes('gap-0.5'):
-                                    ui.label('Trailing SL Info:').classes('text-xs font-semibold text-blue-100')
-                                    ui.label('• Activates at trail start target | Adjusts as price rises | Triggers on drop').classes('text-xs text-blue-200')
+                                # Info section for trailing stop loss (compact)
+                                with ui.card().classes('bg-blue-900/30 border-blue-600/50 p-1 mt-1'):
+                                    with ui.row().classes('gap-1 items-start'):
+                                        ui.icon('info').classes('text-blue-400 text-xs')
+                                        ui.label('Activates at trail start | Adjusts as price rises | Triggers on drop').classes('text-xs text-blue-200')
 
                     def reset_regular_inputs(last_price: Optional[float] = None) -> None:
                         if last_price is not None:
@@ -1401,10 +1385,31 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker, po
                             if market_data:
                                 quote = market_data[0]
                                 last_price = _safe_float(quote.get('last_price', 0))
-                                prev_close = _safe_float(quote.get('previous_close', 0))
                                 market_price_state['last_price'] = last_price
+                                
+                                # Get additional price data
+                                avg_price = _safe_float(quote.get('average_price', 0)) or last_price
+                                net_change = _safe_float(quote.get('net_change', 0))
                                 pct_change = _safe_float(quote.get('pct_change', 0))
-                                market_price_label.text = f"{last_price:.2f} ({pct_change:.2f}%)"
+                                
+                                # Update price labels
+                                market_price_label.text = f"₹{last_price:,.2f}"
+                                avg_price_label.text = f"₹{avg_price:,.2f}"
+                                
+                                # Update change labels with color coding (green if positive, red if negative)
+                                if net_change >= 0:
+                                    net_change_label.text = f"+₹{net_change:,.2f}"
+                                    net_change_label.classes('text-sm font-semibold text-green-400')
+                                else:
+                                    net_change_label.text = f"₹{net_change:,.2f}"
+                                    net_change_label.classes('text-sm font-semibold text-red-400')
+                                
+                                if pct_change >= 0:
+                                    pct_change_label.text = f"+{pct_change:.2f}%"
+                                    pct_change_label.classes('text-sm font-semibold text-green-400')
+                                else:
+                                    pct_change_label.text = f"{pct_change:.2f}%"
+                                    pct_change_label.classes('text-sm font-semibold text-red-400')
                                 
                                 # Update OHLC data
                                 open_price = _safe_float(quote.get('ohlc', {}).get('open', 0))
@@ -1449,6 +1454,9 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker, po
                                         ui.label("No orders").classes("text-gray-500 text-xs italic text-center")
                             else:
                                 market_price_label.text = "--"
+                                avg_price_label.text = "--"
+                                net_change_label.text = "--"
+                                pct_change_label.text = "--"
                                 ohlc_open_label.text = "Open: --"
                                 ohlc_high_label.text = "High: --"
                                 ohlc_low_label.text = "Low: --"
@@ -1456,6 +1464,9 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker, po
                                 ohlc_volume_label.text = "Volume: --"
                         else:
                             market_price_label.text = "--"
+                            avg_price_label.text = "--"
+                            net_change_label.text = "--"
+                            pct_change_label.text = "--"
                             ohlc_open_label.text = "Open: --"
                             ohlc_high_label.text = "High: --"
                             ohlc_low_label.text = "Low: --"
@@ -1649,56 +1660,50 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker, po
                                         loading_container.clear()
 
                                 button_text = 'Schedule Order' if is_scheduled else 'Place Order'
-                                ui.button(button_text, on_click=lambda: asyncio.create_task(confirm_order())).classes('bg-green-600 text-white px-4 py-2 rounded')
+                                ui.button(button_text, on_click=confirm_order).classes('bg-green-600 text-white px-4 py-2 rounded')
 
                         regular_confirm_dialog.open()
 
-                    def build_regular_order_payload() -> Optional[Dict[str, Any]]:
+                    def build_regular_order_payload() -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+                        """
+                        Build order payload with validation.
+                        Returns: (order_data, error_message)
+                        """
                         if not all(validation_state.values()):
-                            ui.notify('Please fix form errors', type='negative')
-                            return None
+                            return None, 'Please fix form errors'
 
                         if not symbol_select.value or symbol_select.value not in instruments:
-                            ui.notify('Please select a valid symbol', type='negative')
-                            return None
+                            return None, 'Please select a valid symbol'
 
                         if quantity.value <= 0:
-                            ui.notify('Quantity must be greater than 0', type='negative')
-                            return None
+                            return None, 'Quantity must be greater than 0'
 
                         if order_type.value in ['LIMIT', 'SL'] and price_field.value <= 0:
-                            ui.notify('Price must be greater than 0 for LIMIT and SL orders', type='negative')
-                            return None
+                            return None, 'Price must be greater than 0 for LIMIT and SL orders'
 
                         if order_type.value in ['SL', 'SL-M'] and trigger_price_field.value <= 0:
-                            ui.notify('Trigger price must be greater than 0 for SL and SL-M orders', type='negative')
-                            return None
+                            return None, 'Trigger price must be greater than 0 for SL and SL-M orders'
 
                         # Validate schedule fields if scheduling is enabled
                         if schedule_order_toggle.value:
                             if not schedule_date.value or not schedule_time.value:
-                                ui.notify('Please provide schedule date and time', type='negative')
-                                return None
+                                return None, 'Please provide schedule date and time'
                             try:
                                 schedule_datetime = datetime.combine(
                                     datetime.strptime(schedule_date.value, '%Y-%m-%d').date(),
                                     datetime.strptime(schedule_time.value, '%H:%M').time()
                                 )
                                 if schedule_datetime <= datetime.now():
-                                    ui.notify('Schedule time must be in the future', type='negative')
-                                    return None
+                                    return None, 'Schedule time must be in the future'
                             except Exception as e:
-                                ui.notify(f'Invalid schedule time: {str(e)}', type='negative')
-                                return None
+                                return None, f'Invalid schedule time: {str(e)}'
 
                         # Validate trailing stop loss parameters
                         if risk_management_type.value == 'trailing':
                             if trail_start_target_percent.value <= 0:
-                                ui.notify('Trail start target percentage must be greater than 0', type='negative')
-                                return None
+                                return None, 'Trail start target percentage must be greater than 0'
                             if trailing_stop_loss_percent.value <= 0:
-                                ui.notify('Trailing stop loss percentage must be greater than 0', type='negative')
-                                return None
+                                return None, 'Trailing stop loss percentage must be greater than 0'
 
                         order_data = {
                             "trading_symbol": symbol_select.value,
@@ -1742,17 +1747,23 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker, po
                         estimated_price = _safe_float(price_field.value) if order_type.value in ['LIMIT', 'SL'] and price_field.value else _safe_float(market_price_label.text)
                         order_data["estimated_price"] = estimated_price if estimated_price > 0 else 0.0
 
-                        return order_data
+                        return order_data, None
 
                     async def place_regular_order():
-                        order_data = build_regular_order_payload()
+                        order_data, error = build_regular_order_payload()
+                        if error:
+                            ui.notify(error, type='negative')
+                            return
                         if not order_data:
                             return
 
                         await show_regular_confirm(order_data)
 
                     def add_regular_to_basket() -> None:
-                        order_data = build_regular_order_payload()
+                        order_data, error = build_regular_order_payload()
+                        if error:
+                            ui.notify(error, type='negative')
+                            return
                         if not order_data:
                             return
                         add_fn = basket_controller.get('add')
@@ -1768,7 +1779,7 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker, po
 
                     basket_observer_register = basket_controller.get('register_observer')
 
-                    with ui.row().classes('order-action-row w-full gap-3 mt-6'):
+                    with ui.row().classes('order-action-row w-full gap-3 mt-2'):
                         create_position_calculator_button(
                             label='Position Sizing',
                             defaults=position_calc_defaults,
@@ -1785,7 +1796,7 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker, po
                         regular_basket_btn = ui.button('Add to Basket', icon='add_shopping_cart', on_click=add_regular_to_basket)\
                             .classes('flex-1 px-6 py-3 rounded-lg font-medium text-lg shadow-inner')
                         apply_button_style(regular_basket_btn, 'background: linear-gradient(135deg, #334155, #1e293b); color: #f8fafc; border: 1px solid rgba(148,163,184,0.35);')
-                        regular_place_btn = ui.button('Place Order', icon="send", on_click=lambda: asyncio.create_task(place_regular_order()))\
+                        regular_place_btn = ui.button('Place Order', icon="send", on_click=place_regular_order)\
                             .classes('flex-1 px-6 py-3 rounded-lg font-semibold text-lg shadow')
                         apply_button_style(regular_place_btn, 'background: linear-gradient(135deg, #22d3ee, #38bdf8); color: #0f172a; border: none; box-shadow: 0 8px 16px rgba(56,189,248,0.45);')
                         
@@ -1802,459 +1813,65 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker, po
                         
                         schedule_order_toggle.on_value_change(update_place_button)
                 
-                # RIGHT COLUMN: Market Data Panel (parallel to left column)
-                with ui.card().classes('flex-1 bg-gray-800/30 border border-gray-700/50 p-3'):
-                    ui.label("Market Data").classes("text-sm font-semibold text-cyan-400 mb-2")
+                # RIGHT COLUMN: Market Data Panel (20%)
+                with ui.card().classes('flex-1 theme-surface-elevated p-3'):
+                    # Market Data header with refresh icon
+                    with ui.row().classes('w-full items-center justify-between mb-2'):
+                        ui.label("Market Data").classes("text-sm font-semibold theme-text-accent")
+                        ui.button(icon='refresh', on_click=lambda: asyncio.create_task(update_market_price(symbol_select.value, reset_defaults=False)))\
+                            .props('flat dense round').classes('theme-icon-button').tooltip('Refresh Market Data')
                     
-                    # Market Price
-                    ui.label("Current Price").classes("text-xs font-medium text-gray-400")
-                    with ui.row().classes('items-center gap-2 bg-emerald-500/15 border border-emerald-500/30 px-3 py-2 rounded-lg w-full mb-3'):
-                        ui.icon('show_chart').classes('text-emerald-400 text-sm')
-                        market_price_label = ui.label("--").classes("text-base font-semibold text-emerald-200")
+                    # Market Price (Enhanced with LTP, Avg Price, Change)
+                    with ui.card().classes('w-full p-2 mb-2 theme-surface-card'):
+                        # First row: LTP and Avg Price
+                        with ui.row().classes('w-full items-center justify-between mb-1'):
+                            with ui.column().classes('gap-0'):
+                                ui.label("LTP").classes("text-xs theme-text-secondary")
+                                market_price_label = ui.label("--").classes("text-base font-bold theme-text-primary")
+                            with ui.column().classes('gap-0'):
+                                ui.label("Avg Price").classes("text-xs theme-text-secondary")
+                                avg_price_label = ui.label("--").classes("text-base font-bold theme-text-primary")
+                        
+                        # Second row: Net Change and % Change (color coded)
+                        with ui.row().classes('w-full items-center justify-between'):
+                            with ui.column().classes('gap-0'):
+                                ui.label("Change").classes("text-xs theme-text-secondary")
+                                net_change_label = ui.label("--").classes("text-sm font-semibold")
+                            with ui.column().classes('gap-0'):
+                                ui.label("Change %").classes("text-xs theme-text-secondary")
+                                pct_change_label = ui.label("--").classes("text-sm font-semibold")
                     
-                    # OHLC Data
-                    with ui.expansion("OHLC", icon="candlestick_chart").classes("w-full text-xs bg-gray-700/30 mb-2").props("dense"):
-                        ohlc_container = ui.column().classes("gap-1 p-2")
-                        with ohlc_container:
-                            ohlc_open_label = ui.label("Open: --").classes("text-xs text-gray-300")
-                            ohlc_high_label = ui.label("High: --").classes("text-xs text-green-400")
-                            ohlc_low_label = ui.label("Low: --").classes("text-xs text-red-400")
-                            ohlc_close_label = ui.label("Close: --").classes("text-xs text-gray-300")
-                            ohlc_volume_label = ui.label("Volume: --").classes("text-xs text-blue-400")
+                    # OHLC Data (horizontal layout, expanded by default)
+                    with ui.expansion("OHLC", icon="candlestick_chart", value=True).classes("w-full text-xs theme-expansion mb-2").props("dense"):
+                        with ui.row().classes("gap-3 p-2 items-center justify-between w-full"):
+                            ohlc_open_label = ui.label("Open: --").classes("text-xs theme-text-primary")
+                            ohlc_high_label = ui.label("High: --").classes("text-xs theme-text-success")
+                            ohlc_low_label = ui.label("Low: --").classes("text-xs theme-text-error")
+                            ohlc_close_label = ui.label("Close: --").classes("text-xs theme-text-primary")
+                            ohlc_volume_label = ui.label("Volume: --").classes("text-xs theme-text-info")
                     
-                    # Market Depth
-                    with ui.expansion("Market Depth", icon="layers").classes("w-full text-xs bg-gray-700/30").props("dense"):
+                    # Market Depth (expanded by default)
+                    with ui.expansion("Market Depth", icon="layers", value=True).classes("w-full text-xs theme-expansion").props("dense"):
                         with ui.element('div').style("display: grid; grid-template-columns: 1fr auto 1fr; gap: 0.5rem; padding: 0.5rem; width: 100%;"):
                             # Buy orders column
                             with ui.element('div').style("min-width: 0;"):
-                                ui.label("Buy Orders").classes("text-green-400 font-semibold text-xs mb-1 text-center")
+                                ui.label("Buy Orders").classes("theme-text-success font-semibold text-xs mb-1 text-center")
                                 depth_buy_container = ui.column().classes("gap-1")
                             
                             # Vertical separator
-                            with ui.element('div').style("width: 1px; background: #4B5563; height: auto; align-self: stretch;"):
+                            with ui.element('div').classes("theme-divider"):
                                 pass
                             
                             # Sell orders column
                             with ui.element('div').style("min-width: 0;"):
-                                ui.label("Sell Orders").classes("text-red-400 font-semibold text-xs mb-1 text-center")
+                                ui.label("Sell Orders").classes("theme-text-error font-semibold text-xs mb-1 text-center")
                                 depth_sell_container = ui.column().classes("gap-1")
             
             # Initial market data fetch (after UI elements are created)
             if symbol_select.value:
                 await update_market_price(symbol_select.value, reset_defaults=True)
 
-async def render_scheduled_orders(fetch_api, user_storage, instruments, broker, position_calc_defaults, basket_controller):
-    """Scheduled orders form"""
-
-    market_price_state = {'last_price': 0.0}
-    template_defaults = user_storage.get('_position_calc_template', {})
-
-    def apply_symbol_defaults(last_price: float) -> None:
-        template = user_storage.get('_position_calc_template', template_defaults) or {}
-        position_calc_defaults['capital'] = template.get('capital', position_calc_defaults.get('capital', 0.0))
-        position_calc_defaults['risk_percent'] = template.get('risk_percent', position_calc_defaults.get('risk_percent', 0.0))
-        position_calc_defaults['brokerage'] = template.get('brokerage', position_calc_defaults.get('brokerage', 0.0))
-        position_calc_defaults['charges_pct'] = template.get('charges_pct', position_calc_defaults.get('charges_pct', 0.0))
-        position_calc_defaults['entry_price'] = _safe_float(last_price, 0.0)
-        position_calc_defaults['stop_input'] = 0.0
-        position_calc_defaults['target_input'] = 0.0
-        position_calc_defaults['stop_mode'] = 'Absolute'
-        position_calc_defaults['target_mode'] = 'Absolute'
-        capital_val = position_calc_defaults.get('capital', 0.0)
-        risk_percent_val = position_calc_defaults.get('risk_percent', 0.0)
-        position_calc_defaults['risk_amount'] = capital_val * (risk_percent_val / 100.0) if capital_val and risk_percent_val else 0.0
-
-    with ui.card().classes('w-full enhanced-card'):
-        with ui.row().classes("w-full items-center justify-between p-4 border-b border-gray-700"):
-            with ui.row().classes("items-center gap-3"):
-                ui.icon("schedule", size="1.2rem").classes("text-purple-400")
-                ui.label("Schedule Order").classes("text-lg font-semibold text-white")
-            ui.chip("SCHEDULED", color="purple").classes("text-xs")
-
-        with ui.column().classes("p-6 gap-4 w-full"):
-            validation_state = {'symbol': True, 'quantity': True, 'price': True, 'trigger_price': True, 'schedule_datetime': True}
-
-            # Index Filter and Symbol Selection
-            with ui.row().classes('w-full gap-6'):
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Index Filter").classes("text-sm font-medium text-gray-300")
-                    index_select = ui.select(
-                        options=['NIFTY_50', 'NIFTY_NEXT_50', 'All Instruments'],
-                        value='NIFTY_50'
-                    ).classes('w-full')
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Trading Symbol").classes("text-sm font-medium text-gray-300")
-                    
-                    # Prepare initial symbol options
-                    symbol_options = await get_symbol_options(index_select.value)
-                    initial_symbol = symbol_options[0] if symbol_options else None
-
-                    symbol_select = ui.select(
-                        options=symbol_options,
-                        with_input=True,
-                        value=initial_symbol
-                    ).classes('w-full')
-                    symbol_select.on_value_change(lambda e: validation_state.update({'symbol': bool(e.value)}))
-
-                    async def update_symbol_options():
-                        if index_select.value == 'All Instruments':
-                            symbol_select.options = sorted(list(instruments.keys()))
-                        else:
-                            symbol_select.options = await get_symbol_options(index_select.value)
-                        symbol_select.update()
-
-                    index_select.on_value_change(update_symbol_options)
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Transaction Type").classes("text-sm font-medium text-gray-300")
-                    transaction_type = ui.select(
-                        options=['BUY', 'SELL'],
-                        value='BUY'
-                    ).classes('w-full')
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Product Type").classes("text-sm font-medium text-gray-300")
-                    product_type = ui.select(
-                        options=['MIS', 'CNC'] if broker == 'Zerodha' else ['I', 'D'],
-                        value='CNC' if broker == 'Zerodha' else 'D'
-                    ).classes('w-full')
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Quantity").classes("text-sm font-medium text-gray-300")
-                    quantity = ui.number(
-                        value=1,
-                        min=1,
-                        format='%d'
-                    ).classes('w-full')
-                    quantity.on_value_change(lambda e: validation_state.update({'quantity': _safe_int(e.value) > 0}))
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Order Type").classes("text-sm font-medium text-gray-300")
-                    order_type = ui.select(
-                        options=['MARKET', 'LIMIT', 'SL', 'SL-M'],
-                        value='MARKET'
-                    ).classes('w-full')
-
-            # Price and Schedule Configuration
-            with ui.row().classes('w-full gap-6'):
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Price").classes("text-sm font-medium text-gray-300")
-                    price_field = ui.number(
-                        value=0,
-                        min=0,
-                        step=0.05,
-                        format='%.2f'
-                    ).classes('w-full')
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Trigger Price").classes("text-sm font-medium text-gray-300")
-                    trigger_price_field = ui.number(
-                        value=0,
-                        min=0,
-                        step=0.05,
-                        format='%.2f'
-                    ).classes('w-full')
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Schedule Date").classes("text-sm font-medium text-gray-300")
-                    schedule_date = ui.input(
-                                          value=(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")).props(
-                        "dense type=date").classes("w-full")
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Schedule Time").classes("text-sm font-medium text-gray-300")
-                    schedule_time = ui.input(
-                                          value=(datetime.now() + timedelta(minutes=15)).strftime("%H:%M")).props(
-                        "dense type=time").classes("w-full")
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("AMO").classes("text-sm font-medium text-gray-300")
-                    is_amo_checkbox = ui.checkbox('After Market Order (AMO)').classes('text-white')
-                    is_amo_checkbox.value = False
-
-            with ui.row().classes('w-full gap-6'):
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Stop Loss Price").classes("text-sm font-medium text-gray-300")
-                    scheduled_stop_loss = ui.number(
-                        value=0,
-                        min=0,
-                        step=0.05,
-                        format='%.2f'
-                    ).classes('w-full')
-
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Target Price").classes("text-sm font-medium text-gray-300")
-                    scheduled_target = ui.number(
-                        value=0,
-                        min=0,
-                        step=0.05,
-                        format='%.2f'
-                    ).classes('w-full')
-
-            def update_price_fields():
-                price_field.visible = order_type.value in ['LIMIT', 'SL']
-                trigger_price_field.visible = order_type.value in ['SL', 'SL-M']
-
-            order_type.on_value_change(update_price_fields)
-            update_price_fields()
-
-            def scheduled_calc_context() -> Dict[str, Any]:
-                return {
-                    'transaction_type': transaction_type.value,
-                    'entry_price': market_price_state['last_price'],
-                    'stop_loss': _safe_float(scheduled_stop_loss.value),
-                    'target_price': _safe_float(scheduled_target.value),
-                    'stop_mode': position_calc_defaults.get('stop_mode', 'Absolute'),
-                    'target_mode': position_calc_defaults.get('target_mode', 'Absolute'),
-                    'stop_input': _safe_float(scheduled_stop_loss.value),
-                    'target_input': _safe_float(scheduled_target.value),
-                    'capital': position_calc_defaults.get('capital'),
-                    'risk_percent': position_calc_defaults.get('risk_percent'),
-                    'risk_amount': position_calc_defaults.get('risk_amount'),
-                    'brokerage': position_calc_defaults.get('brokerage'),
-                    'charges_pct': position_calc_defaults.get('charges_pct'),
-                }
-
-            def scheduled_default_calc() -> Dict[str, Any]:
-                template = user_storage.get('_position_calc_template', template_defaults) or {}
-                capital_val = template.get('capital', position_calc_defaults.get('capital', 0.0))
-                risk_percent_val = template.get('risk_percent', position_calc_defaults.get('risk_percent', 0.0))
-                risk_amount_val = capital_val * (risk_percent_val / 100.0) if capital_val and risk_percent_val else 0.0
-                return {
-                    'transaction_type': transaction_type.value,
-                    'entry_price': market_price_state['last_price'],
-                    'stop_loss': 0.0,
-                    'target_price': 0.0,
-                    'stop_mode': 'Absolute',
-                    'target_mode': 'Absolute',
-                    'stop_input': 0.0,
-                    'target_input': 0.0,
-                    'capital': capital_val,
-                    'risk_percent': risk_percent_val,
-                    'risk_amount': risk_amount_val,
-                    'brokerage': template.get('brokerage', position_calc_defaults.get('brokerage', 0.0)),
-                    'charges_pct': template.get('charges_pct', position_calc_defaults.get('charges_pct', 0.0)),
-                }
-
-            async def fetch_equity_funds() -> Dict[str, Any]:
-                try:
-                    response = await fetch_api(f"/funds/{broker}")
-                    return response or {}
-                except Exception as exc:
-                    logger.warning(f"Unable to fetch funds for calculator: {exc}")
-                    return {}
-
-            def get_basket_totals() -> Dict[str, float]:
-                totals_fn = basket_controller.get('totals')
-                if callable(totals_fn):
-                    try:
-                        return totals_fn() or {}
-                    except Exception as exc:
-                        logger.warning(f"Unable to compute basket totals: {exc}")
-                return {'required': 0.0, 'risk': 0.0, 'reward': 0.0}
-
-            def apply_scheduled_calc(result: Dict[str, Any]) -> None:
-                quantity_val = result.get('quantity')
-                if quantity_val:
-                    quantity.value = max(_safe_int(quantity_val), 1)
-                    quantity.update()
-
-                if result.get('stop_loss') is not None:
-                    scheduled_stop_loss.value = result['stop_loss']
-                    scheduled_stop_loss.update()
-
-                if result.get('target') is not None:
-                    scheduled_target.value = result['target']
-                    scheduled_target.update()
-
-                entry_val = result.get('entry_price')
-                if entry_val and order_type.value in ['LIMIT', 'SL']:
-                    price_field.value = entry_val
-                    price_field.update()
-
-                summary = result.get('summary', {})
-                if quantity_val:
-                    msg = f"Applied sizing: Qty {quantity.value}"
-                    if summary.get('risk_amount') is not None:
-                        msg += f" | Risk {summary['risk_amount']:.2f}"
-                    ui.notify(msg, type='positive')
-
-            # Market Price Section
-            # Note: This function is currently not used as Scheduled Orders are merged into Regular Orders
-            ui.label("Market Price").classes("text-sm font-medium text-gray-300")
-            with ui.row().classes('items-center gap-2 bg-sky-500/15 border border-sky-500/30 px-3 py-1 rounded-lg w-fit'):
-                ui.icon('show_chart').classes('text-sky-400 text-sm')
-                market_price_label = ui.label("--").classes("text-sm font-semibold text-sky-200")
-            
-            def reset_scheduled_inputs(last_price: Optional[float] = None) -> None:
-                if last_price is not None:
-                    market_price_state['last_price'] = _safe_float(last_price, 0.0)
-                apply_symbol_defaults(market_price_state['last_price'])
-                scheduled_stop_loss.value = 0.0
-                scheduled_stop_loss.update()
-                scheduled_target.value = 0.0
-                scheduled_target.update()
-                price_field.value = 0.0
-                price_field.update()
-                trigger_price_field.value = 0.0
-                trigger_price_field.update()
-
-            async def update_market_price(symbol, reset_defaults: bool = False):
-                # Note: This function is currently not used as Scheduled Orders are merged into Regular Orders
-                market_price_state['last_price'] = 0.0
-                instrument_token = instruments.get(symbol)
-                if instrument_token:
-                    market_data = await fetch_api(f"/ltp/{broker}?instruments={instrument_token}")
-                    if market_data:
-                        last_price = _safe_float(market_data[0]['last_price'])
-                        prev_close = _safe_float(market_data[0]['previous_close'])
-                        market_price_state['last_price'] = last_price
-                        pct_change = ((last_price - prev_close) / prev_close * 100.0) if prev_close else 0.0
-                        market_price_label.text = f"{last_price:.2f} ({pct_change:.2f}%)"
-                    else:
-                        market_price_label.text = "--"
-                else:
-                    market_price_label.text = "--"
-                market_price_label.update()
-                if reset_defaults:
-                    reset_scheduled_inputs(market_price_state['last_price'])
-
-            await update_market_price(symbol_select.value, reset_defaults=True)
-            symbol_select.on_value_change(lambda e: asyncio.create_task(update_market_price(e.value, reset_defaults=True)))
-
-            # Loading container
-            loading_container = ui.column().classes('w-full')
-            scheduled_confirm_dialog = ui.dialog()
-
-            async def show_scheduled_confirm(order_data: Dict[str, Any], schedule_datetime: datetime) -> None:
-                scheduled_confirm_dialog.clear()
-                with scheduled_confirm_dialog, ui.card().classes('p-6 min-w-96'):
-                    ui.label('Confirm Scheduled Order').classes('text-xl font-bold mb-4')
-
-                    with ui.column().classes('gap-2 mb-4'):
-                        ui.label(f"Symbol: {order_data['trading_symbol']}").classes('text-white')
-                        ui.label(f"Schedule: {schedule_datetime.strftime('%Y-%m-%d %H:%M')}").classes('text-white')
-                        if order_data.get('stop_loss'):
-                            ui.label(f"Stop Loss: \u20B9{order_data['stop_loss']:.2f}").classes('text-white')
-                        if order_data.get('target'):
-                            ui.label(f"Target: \u20B9{order_data['target']:.2f}").classes('text-white')
-
-                    with ui.row().classes('gap-3'):
-                        ui.button('Cancel', on_click=scheduled_confirm_dialog.close).classes('bg-gray-600 text-white px-4 py-2 rounded')
-
-                        async def confirm_scheduled_order():
-                            scheduled_confirm_dialog.close()
-                            with loading_container:
-                                loading_container.clear()
-                                with ui.row().classes("items-center gap-3"):
-                                    ui.spinner(size="lg")
-                                    ui.label("Scheduling order...").classes("text-white")
-
-                                response = await fetch_api("/scheduled-orders/", method="POST", data=order_data)
-                                if response and response.get('scheduled_order_id'):
-                                    ui.notify(f"Order scheduled: {response['scheduled_order_id']}", type='positive')
-                                else:
-                                    ui.notify("Failed to schedule order", type='negative')
-                                loading_container.clear()
-
-                        ui.button('Schedule Order', on_click=lambda: asyncio.create_task(confirm_scheduled_order())).classes('bg-purple-600 text-white px-4 py-2 rounded')
-
-                scheduled_confirm_dialog.open()
-
-            def build_scheduled_order_payload() -> Optional[Tuple[Dict[str, Any], datetime]]:
-                if not all(validation_state.values()):
-                    ui.notify('Please fix form errors', type='negative')
-                    return None
-
-                if not symbol_select.value or symbol_select.value not in instruments:
-                    ui.notify('Please select a valid symbol', type='negative')
-                    return None
-
-                if quantity.value <= 0:
-                    ui.notify('Quantity must be greater than 0', type='negative')
-                    return None
-
-                try:
-                    schedule_datetime = datetime.combine(
-                        datetime.strptime(schedule_date.value, '%Y-%m-%d').date(),
-                        datetime.strptime(schedule_time.value, '%H:%M').time()
-                    )
-
-                    if schedule_datetime <= datetime.now():
-                        ui.notify('Schedule time must be in the future', type='negative')
-                        return None
-                except Exception as e:
-                    ui.notify(f'Invalid schedule time: {str(e)}', type='negative')
-                    return None
-
-                estimated_price = _safe_float(price_field.value) if order_type.value in ['LIMIT', 'SL'] and price_field.value else _safe_float(market_price_label.text)
-                order_data = {
-                    "broker": broker,  # Add missing broker field
-                    "trading_symbol": symbol_select.value,
-                    "instrument_token": instruments[symbol_select.value],
-                    "transaction_type": transaction_type.value,
-                    "quantity": int(quantity.value),
-                    "order_type": order_type.value,
-                    "product_type": product_type.value,
-                    "price": float(price_field.value) if order_type.value in ['LIMIT', 'SL'] else 0,
-                    "trigger_price": float(trigger_price_field.value) if order_type.value in ['SL', 'SL-M'] else 0,
-                    "validity": "DAY",
-                    "disclosed_quantity": 0,
-                    "schedule_datetime": schedule_datetime.isoformat(),
-                    "is_amo": is_amo_checkbox.value,
-                    "stop_loss": float(scheduled_stop_loss.value) if scheduled_stop_loss.value > 0 else None,
-                    "target": float(scheduled_target.value) if scheduled_target.value > 0 else None
-                }
-                order_data["estimated_price"] = estimated_price if estimated_price > 0 else 0.0
-
-                return order_data, schedule_datetime
-
-            # Schedule Order Action
-            async def schedule_order():
-                payload = build_scheduled_order_payload()
-                if not payload:
-                    return
-                order_data, schedule_datetime = payload
-                await show_scheduled_confirm(order_data, schedule_datetime)
-
-            def add_scheduled_to_basket() -> None:
-                payload = build_scheduled_order_payload()
-                if not payload:
-                    return
-                order_data, _ = payload
-                add_fn = basket_controller.get('add')
-                if callable(add_fn):
-                    basket_entry = {
-                        "type": "Scheduled",
-                        "endpoint": "/scheduled-orders/",
-                        "success_key": "scheduled_order_id",
-                        "payload": order_data,
-                    }
-                    add_fn(basket_entry)
-
-            basket_observer_register = basket_controller.get('register_observer')
-
-            with ui.row().classes('order-action-row w-full gap-3 mt-4'):
-                create_position_calculator_button(
-                    label='Position Sizing',
-                    defaults=position_calc_defaults,
-                    get_context=scheduled_calc_context,
-                    apply_callback=apply_scheduled_calc,
-                    button_classes='flex-1 px-6 py-3 rounded-lg font-medium text-lg shadow',
-                    button_style='background: linear-gradient(135deg, #8b5cf6, #6366f1); color: #fff; border:none; box-shadow:0 8px 16px rgba(99,102,241,0.45);',
-                    get_default_context=scheduled_default_calc,
-                    funds_fetcher=fetch_equity_funds,
-                    basket_totals_provider=get_basket_totals,
-                    register_basket_listener=basket_observer_register if callable(basket_observer_register) else None,
-                    on_reset=lambda: reset_scheduled_inputs(market_price_state['last_price'])
-                )
-                scheduled_basket_btn = ui.button('Add to Basket', icon='add_shopping_cart', on_click=add_scheduled_to_basket)\
-                    .classes('flex-1 px-6 py-3 rounded-lg font-medium text-lg shadow-inner')
-                apply_button_style(scheduled_basket_btn, 'background: linear-gradient(135deg, #43365d, #2e2250); color: #f3e8ff; border:1px solid rgba(196,181,253,0.3);')
-                scheduled_place_btn = ui.button('Schedule Order', icon="schedule", on_click=lambda: asyncio.create_task(schedule_order()))\
-                    .classes('flex-1 px-6 py-3 rounded-lg font-semibold text-lg shadow')
-                apply_button_style(scheduled_place_btn, 'background: linear-gradient(135deg, #a855f7, #ec4899); color:#fff; border:none; box-shadow:0 8px 16px rgba(236,72,153,0.45);')
+# render_scheduled_orders function removed - scheduled orders are now part of regular orders
 
 async def render_gtt_orders(fetch_api, user_storage, instruments, broker, position_calc_defaults, basket_controller):
     """GTT orders form"""
@@ -2290,39 +1907,87 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
     upstox_visibility_callback: Optional[Callable[[], None]] = None
     oco_visibility_callback: Optional[Callable[[], None]] = None
     market_price_label = None
+    gtt_avg_price_label = None
+    gtt_net_change_label = None
+    gtt_pct_change_label = None
+    gtt_ohlc_open_label = None
+    gtt_ohlc_high_label = None
+    gtt_ohlc_low_label = None
+    gtt_ohlc_close_label = None
+    gtt_ohlc_volume_label = None
+    gtt_depth_buy_container = None
+    gtt_depth_sell_container = None
 
     with ui.card().classes('w-full enhanced-card'):
-        with ui.row().classes("w-full items-center justify-between p-4 border-b border-gray-700"):
+        with ui.row().classes("w-full items-center justify-between p-2 border-b order-form-header theme-surface-elevated"):
             with ui.row().classes("items-center gap-3"):
-                ui.icon("compare_arrows", size="1.2rem").classes("text-green-400")
-                ui.label("GTT Orders").classes("text-lg font-semibold text-white")
+                ui.icon("compare_arrows", size="1.2rem").classes("theme-text-accent")
+                ui.label("Place GTT Order").classes("text-lg font-semibold theme-text-primary")
             ui.chip("TRIGGERED", color="green").classes("text-xs")
 
-        with ui.column().classes("p-6 gap-4 w-full"):
+        with ui.column().classes("p-2 gap-3 w-full gtt-card-body").style(
+            "display: flex; flex-direction: column !important; gap: 0.75rem; width: 100%;"
+        ):
             validation_state = {'symbol': True, 'quantity': True, 'trigger_price': True, 'limit_price': True}
 
-            # Symbol and GTT Configuration
-            with ui.row().classes('w-full gap-6'):
-                # Index filter and symbol selection similar to regular orders
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Index Filter").classes("text-sm font-medium text-gray-300")
-                    index_select = ui.select(
-                        options=['NIFTY_50', 'NIFTY_NEXT_50', 'All Instruments'],
-                        value='NIFTY_50'
-                    ).classes('w-full')
+            # Main Layout: Order Form (80%) + Market Data (20%)
+            with ui.element('div').classes('gtt-layout-grid').style(
+                'display: grid; width: 100%; gap: 1rem; grid-template-columns: minmax(0, 4fr) minmax(260px, 360px); align-items: start;'
+            ):
+                # LEFT COLUMN: GTT Order Form
+                gtt_form_column = ui.column().classes('gap-3').style('min-width: 0; display: flex; flex-direction: column; gap: 0.75rem;')
+                with gtt_form_column:
+                    # Row 1 - Core Inputs
+                    with ui.row().classes('w-full gap-3'):
+                        with ui.column().classes("flex-1 gap-2"):
+                            ui.label("Index Filter").classes("text-sm font-medium theme-text-primary")
+                            index_select = ui.select(
+                                options=['NIFTY_50', 'NIFTY_NEXT_50', 'All Instruments'],
+                                value='NIFTY_50'
+                            ).classes('w-full')
 
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Trading Symbol").classes("text-sm font-medium text-gray-300")
-                    
-                    # Prepare initial symbol options
-                    symbol_options = await get_symbol_options(index_select.value)
-                    initial_symbol = symbol_options[0] if symbol_options else None
+                        with ui.column().classes("flex-1 gap-2"):
+                            ui.label("Trading Symbol").classes("text-sm font-medium theme-text-primary")
 
-                    symbol_select = ui.select(
-                        options=symbol_options,
-                        with_input=True,
-                        value=initial_symbol
-                    ).classes('w-full')
+                            symbol_options = await get_symbol_options(index_select.value)
+                            initial_symbol = symbol_options[0] if symbol_options else None
+
+                            symbol_select = ui.select(
+                                options=symbol_options,
+                                with_input=True,
+                                value=initial_symbol
+                            ).classes('w-full')
+                            symbol_select.on_value_change(lambda e: validation_state.update({'symbol': bool(e.value)}))
+
+                        with ui.column().classes("flex-1 gap-2"):
+                            ui.label("GTT Type").classes("text-sm font-medium theme-text-primary")
+                            trigger_type = ui.select(
+                                options=['single', 'OCO'] if broker == 'Zerodha' else ['SINGLE', 'OCO'],
+                                value='single' if broker == 'Zerodha' else 'SINGLE'
+                            ).classes('w-full')
+
+                        with ui.column().classes("flex-1 gap-2"):
+                            ui.label("Transaction Type").classes("text-sm font-medium theme-text-primary")
+                            transaction_type = ui.select(
+                                options=['BUY', 'SELL'],
+                                value='BUY'
+                            ).classes('w-full')
+
+                        with ui.column().classes("flex-1 gap-2"):
+                            ui.label("Quantity").classes("text-sm font-medium theme-text-primary")
+                            quantity = ui.number(
+                                value=1,
+                                min=1,
+                                format='%d'
+                            ).classes('w-full')
+                            quantity.on_value_change(lambda e: validation_state.update({'quantity': _safe_int(e.value) > 0}))
+
+                        with ui.column().classes("flex-1 gap-2"):
+                            ui.label("Product Type").classes("text-sm font-medium theme-text-primary")
+                            product_type = ui.select(
+                                options=['MIS', 'CNC'] if broker == 'Zerodha' else ['I', 'D'],
+                                value='CNC' if broker == 'Zerodha' else 'D'
+                            ).classes('w-full')
 
                     async def update_symbol_options():
                         if index_select.value == 'All Instruments':
@@ -2335,225 +2000,260 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
 
                     index_select.on_value_change(update_symbol_options)
 
-                with ui.column().classes("flex-1 gap-2"):
-                    # Market Price Section for GTT Orders
-                    ui.label("Market Price").classes("text-sm font-medium text-gray-300")
-                    with ui.row().classes('items-center gap-2 bg-emerald-500/15 border border-emerald-500/30 px-3 py-1 rounded-lg w-fit'):
-                        ui.icon('show_chart').classes('text-emerald-400 text-sm')
-                        market_price_label = ui.label("--").classes("text-sm font-semibold text-emerald-200")
-                    
-                    # OHLC Data
-                    with ui.expansion("OHLC", icon="candlestick_chart").classes("w-full text-xs bg-gray-700/30 mt-2").props("dense"):
-                        gtt_ohlc_container = ui.column().classes("gap-1 p-2")
-                        with gtt_ohlc_container:
-                            gtt_ohlc_open_label = ui.label("Open: --").classes("text-xs text-gray-300")
-                            gtt_ohlc_high_label = ui.label("High: --").classes("text-xs text-green-400")
-                            gtt_ohlc_low_label = ui.label("Low: --").classes("text-xs text-red-400")
-                            gtt_ohlc_close_label = ui.label("Close: --").classes("text-xs text-gray-300")
-                            gtt_ohlc_volume_label = ui.label("Volume: --").classes("text-xs text-blue-400")
-                    
-                    # Market Depth
-                    with ui.expansion("Depth", icon="layers").classes("w-full text-xs bg-gray-700/30 mt-2").props("dense"):
+                    # Row 2 - Broker-specific fields
+                    if broker == 'Zerodha':
+                        with ui.row().classes('w-full gap-3'):
+                            with ui.column().classes("flex-1 gap-2"):
+                                ui.label("Trigger Price").classes("text-sm font-medium theme-text-primary")
+                                trigger_price = ui.number(
+                                    value=0,
+                                    min=0,
+                                    step=0.05,
+                                    format='%.2f'
+                                ).classes('w-full')
+                                trigger_price.on_value_change(lambda e: validation_state.update({'trigger_price': _safe_float(e.value) > 0}))
+
+                            with ui.column().classes("flex-1 gap-2"):
+                                ui.label("Limit Price").classes("text-sm font-medium theme-text-primary")
+                                limit_price = ui.number(
+                                    value=0,
+                                    min=0,
+                                    step=0.05,
+                                    format='%.2f'
+                                ).classes('w-full')
+                                limit_price.on_value_change(lambda e: validation_state.update({'limit_price': _safe_float(e.value) > 0}))
+
+                        ui.label("Trigger Price should be 0.25% above or below market price").classes("text-xs theme-text-info")
+
+                        with ui.row().classes('w-full gap-3') as oco_price_row:
+                            with ui.column().classes("flex-1 gap-2"):
+                                ui.label("Second Trigger Price").classes("text-sm font-medium theme-text-primary")
+                                second_trigger_price = ui.number(
+                                    value=0,
+                                    min=0,
+                                    step=0.05,
+                                    format='%.2f'
+                                ).classes('w-full')
+
+                            with ui.column().classes("flex-1 gap-2"):
+                                ui.label("Second Limit Price").classes("text-sm font-medium theme-text-primary")
+                                second_limit_price = ui.number(
+                                    value=0,
+                                    min=0,
+                                    step=0.05,
+                                    format='%.2f'
+                                ).classes('w-full')
+
+                        def update_oco_fields():
+                            is_oco = str(trigger_type.value).upper() == 'OCO'
+                            oco_price_row.visible = is_oco
+                            oco_price_row.update()
+
+                        oco_visibility_callback = update_oco_fields
+                        trigger_type.on_value_change(lambda e: update_oco_fields())
+                        update_oco_fields()
+
+                    if broker == 'Upstox':
+                        with ui.column().classes('w-full gap-3 theme-surface-elevated p-3 rounded-lg'):
+                            ui.label('Upstox GTT Rules').classes('text-sm font-semibold theme-text-accent')
+                            with ui.row().classes('w-full gap-3'):
+                                with ui.column().classes('flex-1 gap-2') as up_entry_container:
+                                    ui.label('ENTRY').classes('text-xs theme-text-secondary')
+                                    up_entry_enabled = ui.checkbox('Include ENTRY', value=True).classes('theme-text-primary')
+                                    up_entry_trigger_type = ui.select(options=['BELOW', 'ABOVE', 'IMMEDIATE'], value='ABOVE').classes('w-full')
+                                    up_entry_trigger_price = ui.number(value=0, min=0, step=0.05, format='%.2f').classes('w-full')
+
+                                with ui.column().classes('flex-1 gap-2') as up_target_container:
+                                    ui.label('TARGET').classes('text-xs theme-text-secondary')
+                                    up_target_enabled = ui.checkbox('Include TARGET', value=True).classes('theme-text-primary')
+                                    up_target_trigger_type = ui.select(options=['IMMEDIATE'], value='IMMEDIATE').classes('w-full')
+                                    up_target_trigger_price = ui.number(value=0, min=0, step=0.05, format='%.2f').classes('w-full')
+
+                                with ui.column().classes('flex-1 gap-2') as up_sl_container:
+                                    ui.label('STOP_LOSS').classes('text-xs theme-text-secondary')
+                                    up_sl_enabled = ui.checkbox('Include STOP_LOSS', value=True).classes('theme-text-primary')
+                                    up_sl_trigger_type = ui.select(options=['IMMEDIATE'], value='IMMEDIATE').classes('w-full')
+                                    up_sl_trigger_price = ui.number(value=0, min=0, step=0.05, format='%.2f').classes('w-full')
+
+                            def update_upstox_rule_visibility():
+                                is_single = str(trigger_type.value).upper() == 'SINGLE'
+                                up_entry_container.visible = True
+                                up_target_container.visible = not is_single
+                                up_sl_container.visible = not is_single
+                                up_target_enabled.value = not is_single
+                                up_sl_enabled.value = not is_single
+                                up_entry_container.update(); up_target_container.update(); up_sl_container.update()
+
+                            upstox_visibility_callback = update_upstox_rule_visibility
+                            trigger_type.on_value_change(lambda e: update_upstox_rule_visibility())
+                            update_upstox_rule_visibility()
+
+                # RIGHT COLUMN: Market Data Panel
+                with ui.card().classes('theme-surface-elevated p-3').style('min-width: 260px; max-width: 360px;'):
+                    with ui.row().classes('w-full items-center justify-between mb-2'):
+                        ui.label("Market Data").classes("text-sm font-semibold theme-text-accent")
+                        ui.button(
+                            icon='refresh',
+                            on_click=lambda: asyncio.create_task(update_market_price(symbol_select.value, reset_defaults=False))
+                        ).props('flat dense round').classes('theme-icon-button').tooltip('Refresh Market Data')
+
+                    with ui.card().classes('w-full p-2 mb-2 theme-surface-card'):
+                        with ui.row().classes('w-full items-center justify-between mb-1'):
+                            with ui.column().classes('gap-0'):
+                                ui.label("LTP").classes("text-xs theme-text-secondary")
+                                market_price_label = ui.label("--").classes("text-base font-bold theme-text-primary")
+                            with ui.column().classes('gap-0'):
+                                ui.label("Avg Price").classes("text-xs theme-text-secondary")
+                                gtt_avg_price_label = ui.label("--").classes("text-base font-bold theme-text-primary")
+
+                        with ui.row().classes('w-full items-center justify-between'):
+                            with ui.column().classes('gap-0'):
+                                ui.label("Change").classes("text-xs theme-text-secondary")
+                                gtt_net_change_label = ui.label("--").classes("text-sm font-semibold theme-text-primary")
+                            with ui.column().classes('gap-0'):
+                                ui.label("Change %").classes("text-xs theme-text-secondary")
+                                gtt_pct_change_label = ui.label("--").classes("text-sm font-semibold theme-text-primary")
+
+                    with ui.expansion("OHLC", icon="candlestick_chart", value=True).classes("w-full text-xs theme-expansion mb-2").props("dense"):
+                        with ui.row().classes("gap-3 p-2 items-center justify-between w-full"):
+                            gtt_ohlc_open_label = ui.label("Open: --").classes("text-xs theme-text-primary")
+                            gtt_ohlc_high_label = ui.label("High: --").classes("text-xs theme-text-success")
+                            gtt_ohlc_low_label = ui.label("Low: --").classes("text-xs theme-text-error")
+                            gtt_ohlc_close_label = ui.label("Close: --").classes("text-xs theme-text-primary")
+                            gtt_ohlc_volume_label = ui.label("Volume: --").classes("text-xs theme-text-info")
+
+                    with ui.expansion("Market Depth", icon="layers", value=True).classes("w-full text-xs theme-expansion").props("dense"):
                         with ui.element('div').style("display: grid; grid-template-columns: 1fr auto 1fr; gap: 0.5rem; padding: 0.5rem; width: 100%;"):
-                            # Buy orders column
                             with ui.element('div').style("min-width: 0;"):
-                                ui.label("Buy Orders").classes("text-green-400 font-semibold text-xs mb-1 text-center")
+                                ui.label("Buy Orders").classes("theme-text-success font-semibold text-xs mb-1 text-center")
                                 gtt_depth_buy_container = ui.column().classes("gap-1")
-                            
-                            # Vertical separator
-                            with ui.element('div').style("width: 1px; background: #4B5563; height: auto; align-self: stretch;"):
+
+                            with ui.element('div').classes("theme-divider"):
                                 pass
-                            
-                            # Sell orders column
+
                             with ui.element('div').style("min-width: 0;"):
-                                ui.label("Sell Orders").classes("text-red-400 font-semibold text-xs mb-1 text-center")
+                                ui.label("Sell Orders").classes("theme-text-error font-semibold text-xs mb-1 text-center")
                                 gtt_depth_sell_container = ui.column().classes("gap-1")
 
-                    async def update_market_price(symbol, reset_defaults: bool = False):
-                        market_price_state['last_price'] = 0.0
-                        instrument_token = instruments.get(symbol)
-                        if instrument_token:
-                            market_data = await fetch_api(f"/quotes/{broker}?instruments={instrument_token}")
-                            if market_data:
-                                quote = market_data[0]
-                                last_price = _safe_float(quote.get('last_price', 0))
-                                prev_close = _safe_float(quote.get('previous_close', 0))
-                                market_price_state['last_price'] = last_price
-                                pct_change = ((last_price - prev_close) / prev_close * 100.0) if prev_close else 0.0
-                                market_price_label.text = f"{last_price:.2f} ({pct_change:.2f}%)"
-                                
-                                # Update OHLC data
-                                open_price = _safe_float(quote.get('ohlc', {}).get('open', 0))
-                                high_price = _safe_float(quote.get('ohlc', {}).get('high', 0))
-                                low_price = _safe_float(quote.get('ohlc', {}).get('low', 0))
-                                close_price = _safe_float(quote.get('ohlc', {}).get('close', 0))
-                                volume = _safe_int(quote.get('volume', 0))
-                                
-                                gtt_ohlc_open_label.text = f"Open: ₹{open_price:,.2f}"
-                                gtt_ohlc_high_label.text = f"High: ₹{high_price:,.2f}"
-                                gtt_ohlc_low_label.text = f"Low: ₹{low_price:,.2f}"
-                                gtt_ohlc_close_label.text = f"Close: ₹{close_price:,.2f}"
-                                gtt_ohlc_volume_label.text = f"Volume: {volume:,}"
-                                
-                                # Update Market Depth data
-                                depth_data = quote.get("depth", {})
-                                buy_orders = depth_data.get("buy", []) if depth_data else []
-                                sell_orders = depth_data.get("sell", []) if depth_data else []
-                                
-                                # Clear previous depth data
-                                gtt_depth_buy_container.clear()
-                                gtt_depth_sell_container.clear()
-                                
-                                # Populate buy orders
-                                with gtt_depth_buy_container:
-                                    if buy_orders:
-                                        for order in buy_orders[:5]:  # Show top 5
-                                            with ui.row().classes("justify-between w-full gap-2"):
-                                                ui.label(f"₹{order.get('price', 0):,.2f}").classes("text-green-400 font-mono text-xs")
-                                                ui.label(f"{order.get('quantity', 0):,}").classes("text-gray-300 text-xs")
-                                    else:
-                                        ui.label("No orders").classes("text-gray-500 text-xs italic text-center")
-                                
-                                # Populate sell orders
-                                with gtt_depth_sell_container:
-                                    if sell_orders:
-                                        for order in sell_orders[:5]:  # Show top 5
-                                            with ui.row().classes("justify-between w-full gap-2"):
-                                                ui.label(f"₹{order.get('price', 0):,.2f}").classes("text-red-400 font-mono text-xs")
-                                                ui.label(f"{order.get('quantity', 0):,}").classes("text-gray-300 text-xs")
-                                    else:
-                                        ui.label("No orders").classes("text-gray-500 text-xs italic text-center")
-                            else:
-                                market_price_label.text = "--"
-                                gtt_ohlc_open_label.text = "Open: --"
-                                gtt_ohlc_high_label.text = "High: --"
-                                gtt_ohlc_low_label.text = "Low: --"
-                                gtt_ohlc_close_label.text = "Close: --"
-                                gtt_ohlc_volume_label.text = "Volume: --"
+            async def update_market_price(symbol, reset_defaults: bool = False):
+                market_price_state['last_price'] = 0.0
+
+                def set_default_panels() -> None:
+                    if market_price_label:
+                        market_price_label.text = "--"
+                    if gtt_avg_price_label:
+                        gtt_avg_price_label.text = "--"
+                    if gtt_net_change_label:
+                        gtt_net_change_label.text = "--"
+                        gtt_net_change_label.classes("text-sm font-semibold theme-text-primary")
+                    if gtt_pct_change_label:
+                        gtt_pct_change_label.text = "--"
+                        gtt_pct_change_label.classes("text-sm font-semibold theme-text-primary")
+                    if gtt_ohlc_open_label:
+                        gtt_ohlc_open_label.text = "Open: --"
+                    if gtt_ohlc_high_label:
+                        gtt_ohlc_high_label.text = "High: --"
+                    if gtt_ohlc_low_label:
+                        gtt_ohlc_low_label.text = "Low: --"
+                    if gtt_ohlc_close_label:
+                        gtt_ohlc_close_label.text = "Close: --"
+                    if gtt_ohlc_volume_label:
+                        gtt_ohlc_volume_label.text = "Volume: --"
+                    if gtt_depth_buy_container:
+                        gtt_depth_buy_container.clear()
+                        with gtt_depth_buy_container:
+                            ui.label("No orders").classes("theme-text-secondary text-xs italic text-center")
+                    if gtt_depth_sell_container:
+                        gtt_depth_sell_container.clear()
+                        with gtt_depth_sell_container:
+                            ui.label("No orders").classes("theme-text-secondary text-xs italic text-center")
+
+                instrument_token = instruments.get(symbol)
+                if instrument_token:
+                    market_data = await fetch_api(f"/quotes/{broker}?instruments={instrument_token}")
+                    if market_data:
+                        quote = market_data[0]
+                        last_price = _safe_float(quote.get('last_price', 0))
+                        avg_price = _safe_float(quote.get('average_price', 0)) or last_price
+                        net_change = _safe_float(quote.get('net_change', 0))
+                        pct_change = _safe_float(quote.get('pct_change', 0))
+                        market_price_state['last_price'] = last_price
+
+                        market_price_label.text = f"₹{last_price:,.2f}"
+                        gtt_avg_price_label.text = f"₹{avg_price:,.2f}"
+
+                        if net_change >= 0:
+                            gtt_net_change_label.text = f"+₹{net_change:,.2f}"
+                            gtt_net_change_label.classes('text-sm font-semibold text-green-400')
                         else:
-                            market_price_label.text = "--"
-                            gtt_ohlc_open_label.text = "Open: --"
-                            gtt_ohlc_high_label.text = "High: --"
-                            gtt_ohlc_low_label.text = "Low: --"
-                            gtt_ohlc_close_label.text = "Close: --"
-                            gtt_ohlc_volume_label.text = "Volume: --"
-                        market_price_label.update()
-                        if reset_defaults:
-                            apply_symbol_defaults(market_price_state['last_price'])
+                            gtt_net_change_label.text = f"₹{net_change:,.2f}"
+                            gtt_net_change_label.classes('text-sm font-semibold text-red-400')
 
-                    await update_market_price(symbol_select.value, reset_defaults=True)
-                    symbol_select.on_value_change(lambda e: asyncio.create_task(update_market_price(e.value, reset_defaults=True)))
+                        if pct_change >= 0:
+                            gtt_pct_change_label.text = f"+{pct_change:.2f}%"
+                            gtt_pct_change_label.classes('text-sm font-semibold text-green-400')
+                        else:
+                            gtt_pct_change_label.text = f"{pct_change:.2f}%"
+                            gtt_pct_change_label.classes('text-sm font-semibold text-red-400')
 
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("GTT Type").classes("text-sm font-medium text-gray-300")
-                    trigger_type = ui.select(
-                        options=['single', 'OCO'] if broker == 'Zerodha' else ['SINGLE', 'OCO'],
-                        value='single' if broker == 'Zerodha' else 'SINGLE'
-                    ).classes('w-full')
+                        ohlc_data = quote.get('ohlc', {}) or {}
+                        open_price = _safe_float(ohlc_data.get('open', 0))
+                        high_price = _safe_float(ohlc_data.get('high', 0))
+                        low_price = _safe_float(ohlc_data.get('low', 0))
+                        close_price = _safe_float(ohlc_data.get('close', 0))
+                        volume = _safe_int(quote.get('volume', 0))
 
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Transaction Type").classes("text-sm font-medium text-gray-300")
-                    transaction_type = ui.select(
-                        options=['BUY', 'SELL'],
-                        value='BUY'
-                    ).classes('w-full')
+                        gtt_ohlc_open_label.text = f"Open: ₹{open_price:,.2f}"
+                        gtt_ohlc_high_label.text = f"High: ₹{high_price:,.2f}"
+                        gtt_ohlc_low_label.text = f"Low: ₹{low_price:,.2f}"
+                        gtt_ohlc_close_label.text = f"Close: ₹{close_price:,.2f}"
+                        gtt_ohlc_volume_label.text = f"Volume: {volume:,}"
 
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Quantity").classes("text-sm font-medium text-gray-300")
-                    quantity = ui.number(
-                        value=1,
-                        min=1,
-                        format='%d'
-                    ).classes('w-full')
+                        depth_data = quote.get("depth", {}) or {}
+                        buy_orders = depth_data.get("buy", [])
+                        sell_orders = depth_data.get("sell", [])
 
-                with ui.column().classes("flex-1 gap-2"):
-                    ui.label("Product Type").classes("text-sm font-medium text-gray-300")
-                    product_type = ui.select(
-                        options=['MIS', 'CNC'] if broker == 'Zerodha' else ['I', 'D'],
-                        value='CNC' if broker == 'Zerodha' else 'D'
-                    ).classes('w-full')
+                        if gtt_depth_buy_container:
+                            gtt_depth_buy_container.clear()
+                            with gtt_depth_buy_container:
+                                if buy_orders:
+                                    for order in buy_orders[:5]:
+                                        with ui.row().classes("justify-between w-full gap-2"):
+                                            ui.label(f"₹{order.get('price', 0):,.2f}").classes("theme-text-success font-mono text-xs")
+                                            ui.label(f"{order.get('quantity', 0):,}").classes("theme-text-secondary text-xs")
+                                else:
+                                    ui.label("No orders").classes("theme-text-secondary text-xs italic text-center")
 
-            # Price Configuration
-            with ui.row().classes('w-1/3 gap-6'):
-                if broker == 'Zerodha':
-                    with ui.column().classes("flex-1 gap-2"):
-                        ui.label("Trigger Price").classes("text-sm font-medium text-gray-300")
-                        trigger_price = ui.number(value=0, min=0, step=0.05, format='%.2f').classes('w-full')
+                        if gtt_depth_sell_container:
+                            gtt_depth_sell_container.clear()
+                            with gtt_depth_sell_container:
+                                if sell_orders:
+                                    for order in sell_orders[:5]:
+                                        with ui.row().classes("justify-between w-full gap-2"):
+                                            ui.label(f"₹{order.get('price', 0):,.2f}").classes("theme-text-error font-mono text-xs")
+                                            ui.label(f"{order.get('quantity', 0):,}").classes("theme-text-secondary text-xs")
+                                else:
+                                    ui.label("No orders").classes("theme-text-secondary text-xs italic text-center")
+                    else:
+                        set_default_panels()
+                else:
+                    set_default_panels()
 
-                    with ui.column().classes("flex-1 gap-2"):
-                        ui.label("Limit Price").classes("text-sm font-medium text-gray-300")
-                        limit_price = ui.number(value=0, min=0, step=0.05, format='%.2f').classes('w-full')                
-            with ui.row().classes('w-1/3 gap-6'):
-                if broker == 'Zerodha':
-                    with ui.column().classes("flex-1 gap-2"):
-                        ui.label(f"Trigger Price should be 0.25% above or below market price").classes("text-sm font-medium text-blue-500")
+                if market_price_label:
+                    market_price_label.update()
+                if gtt_avg_price_label:
+                    gtt_avg_price_label.update()
+                if gtt_net_change_label:
+                    gtt_net_change_label.update()
+                if gtt_pct_change_label:
+                    gtt_pct_change_label.update()
 
-            # Upstox rules editor (ENTRY / TARGET / STOP_LOSS)
-            if broker == 'Upstox':
-                with ui.column().classes('gap-3'):
-                    ui.label('Upstox GTT Rules').classes('text-sm font-medium text-gray-300')
-                    with ui.row().classes('w-full gap-6'):
-                        with ui.column().classes('flex-1 gap-2') as up_entry_container:
-                            ui.label('ENTRY').classes('text-xs text-gray-400')
-                            up_entry_enabled = ui.checkbox('Include ENTRY', value=True)
-                            up_entry_trigger_type = ui.select(options=['BELOW','ABOVE','IMMEDIATE'], value='ABOVE').classes('w-full')
-                            up_entry_trigger_price = ui.number(value=0, min=0, step=0.05, format='%.2f').classes('w-full')
-                        with ui.column().classes('flex-1 gap-2') as up_target_container:
-                            ui.label('TARGET').classes('text-xs text-gray-400')
-                            up_target_enabled = ui.checkbox('Include TARGET', value=True)
-                            up_target_trigger_type = ui.select(options=['IMMEDIATE'], value='IMMEDIATE').classes('w-full')
-                            up_target_trigger_price = ui.number(value=0, min=0, step=0.05, format='%.2f').classes('w-full')
-                        with ui.column().classes('flex-1 gap-2') as up_sl_container:
-                            ui.label('STOP_LOSS').classes('text-xs text-gray-400')
-                            up_sl_enabled = ui.checkbox('Include STOP_LOSS', value=True)
-                            up_sl_trigger_type = ui.select(options=['IMMEDIATE'], value='IMMEDIATE').classes('w-full')
-                            up_sl_trigger_price = ui.number(value=0, min=0, step=0.05, format='%.2f').classes('w-full')
+                if reset_defaults:
+                    apply_symbol_defaults(market_price_state['last_price'])
 
-                    # Show only ENTRY for SINGLE; show TARGET/STOP_LOSS for OCO
-                    def update_upstox_rule_visibility():
-                        is_single = str(trigger_type.value).upper() == 'SINGLE'
-                        up_entry_container.visible = True
-                        up_target_container.visible = not is_single
-                        up_sl_container.visible = not is_single
-                        up_target_enabled.value = not is_single
-                        up_sl_enabled.value = not is_single
-                        up_entry_container.update(); up_target_container.update(); up_sl_container.update()
-                    upstox_visibility_callback = update_upstox_rule_visibility
-                    trigger_type.on_value_change(lambda e: update_upstox_rule_visibility())
-                    update_upstox_rule_visibility()
-
-            # OCO specific fields (shown conditionally) for Zerodha only
-            if broker == 'Zerodha':
-                oco_section = ui.column().classes("gap-4")
-                with oco_section:
-                    ui.label("Second Trigger (OCO)").classes("text-lg font-medium text-orange-400")
-
-                    with ui.row().classes('w-full gap-6'):
-                        with ui.column().classes("flex-1 gap-2"):
-                            ui.label("Second Trigger Price").classes("text-sm font-medium text-gray-300")
-                            second_trigger_price = ui.number(
-                                value=0,
-                                min=0,
-                                step=0.05,
-                                format='%.2f'
-                            ).classes('w-full')
-
-                        with ui.column().classes("flex-1 gap-2"):
-                            ui.label("Second Limit Price").classes("text-sm font-medium text-gray-300")
-                            second_limit_price = ui.number(
-                                value=0,
-                                min=0,
-                                step=0.05,
-                                format='%.2f'
-                            ).classes('w-full')
-
-                def update_oco_fields():
-                    oco_section.visible = trigger_type.value == 'OCO'
-
-                oco_visibility_callback = update_oco_fields
-                trigger_type.on_value_change(update_oco_fields)
-                update_oco_fields()
-
+            if symbol_select.value:
+                await update_market_price(symbol_select.value, reset_defaults=True)
+            symbol_select.on_value_change(lambda e: asyncio.create_task(update_market_price(e.value, reset_defaults=True)))
             def reset_gtt_defaults(last_price: Optional[float] = None) -> None:
                 if last_price is not None:
                     market_price_state['last_price'] = _safe_float(last_price, 0.0)
@@ -2564,49 +2264,29 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
                 if limit_price:
                     limit_price.value = 0.0
                     limit_price.update()
-
-            # # Market Price Section for GTT Orders
-            # ui.label("Market Price").classes("text-sm font-medium text-gray-300")
-            # with ui.row().classes('items-center gap-2 bg-emerald-500/15 border border-emerald-500/30 px-3 py-1 rounded-lg w-fit'):
-            #     ui.icon('show_chart').classes('text-emerald-400 text-sm')
-            #     market_price_label = ui.label("--").classes("text-sm font-semibold text-emerald-200")
-            # async def update_market_price(symbol, reset_defaults: bool = False):
-            #     market_price_state['last_price'] = 0.0
-            #     instrument_token = instruments.get(symbol)
-            #     if instrument_token:
-            #         market_data = await fetch_api(f"/ltp/{broker}?instruments={instrument_token}")
-            #         if market_data:
-            #             last_price = _safe_float(market_data[0]['last_price'])
-            #             prev_close = _safe_float(market_data[0]['previous_close'])
-            #             market_price_state['last_price'] = last_price
-            #             pct_change = ((last_price - prev_close) / prev_close * 100.0) if prev_close else 0.0
-            #             market_price_label.text = f"{last_price:.2f} ({pct_change:.2f}%)"
-            #         else:
-            #             market_price_label.text = "--"
-            #     else:
-            #         market_price_label.text = "--"
-            #     market_price_label.update()
-            #     if reset_defaults:
-            #         apply_symbol_defaults(market_price_state['last_price'])
-
-            # await update_market_price(symbol_select.value, reset_defaults=True)
-            # symbol_select.on_value_change(lambda e: asyncio.create_task(update_market_price(e.value, reset_defaults=True)))
+                if second_trigger_price:
+                    second_trigger_price.value = 0.0
+                    second_trigger_price.update()
+                if second_limit_price:
+                    second_limit_price.value = 0.0
+                    second_limit_price.update()
 
             # Loading container
             loading_container = ui.column().classes('w-full')
 
-            def build_gtt_order_payload() -> Optional[Dict[str, Any]]:
+            def build_gtt_order_payload() -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+                """
+                Build GTT order payload with validation.
+                Returns: (order_data, error_message)
+                """
                 if not all(validation_state.values()):
-                    ui.notify('Please fix form errors', type='negative')
-                    return None
+                    return None, 'Please fix form errors'
 
                 if not symbol_select.value or symbol_select.value not in instruments:
-                    ui.notify('Please select a valid symbol', type='negative')
-                    return None
+                    return None, 'Please select a valid symbol'
 
                 if quantity.value <= 0:
-                    ui.notify('Quantity must be greater than 0', type='negative')
-                    return None
+                    return None, 'Quantity must be greater than 0'
 
                 # Get current market price for the symbol
                 last_price = market_price_state.get('last_price', 0.0)
@@ -2614,9 +2294,9 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
                     # Try to extract price from market price label if available
                     if market_price_label and market_price_label.text != "--":
                         try:
-                            # Extract price from text like "1234.56 (+1.23%)"
                             price_text = market_price_label.text.split()[0]
-                            last_price = _safe_float(price_text, 0.0)
+                            clean_price = price_text.replace('₹', '').replace(',', '')
+                            last_price = _safe_float(clean_price, 0.0)
                         except Exception:
                             last_price = 0.0
 
@@ -2633,18 +2313,15 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
 
                 if broker == 'Zerodha':
                     if trigger_price is None or limit_price is None:
-                        ui.notify('Trigger/limit price fields are required', type='negative')
-                        return None
+                        return None, 'Trigger/limit price fields are required'
 
                     trigger_val = _safe_float(trigger_price.value)
                     limit_val = _safe_float(limit_price.value)
 
                     if trigger_val <= 0:
-                        ui.notify('Trigger price must be greater than 0', type='negative')
-                        return None
+                        return None, 'Trigger price must be greater than 0'
                     if limit_val <= 0:
-                        ui.notify('Limit price must be greater than 0', type='negative')
-                        return None
+                        return None, 'Limit price must be greater than 0'
 
                     order_data.update({
                         "trigger_type": trigger_type.value,
@@ -2656,8 +2333,7 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
                         second_trigger_val = _safe_float(second_trigger_price.value) if second_trigger_price else 0.0
                         second_limit_val = _safe_float(second_limit_price.value) if second_limit_price else 0.0
                         if second_trigger_val <= 0 or second_limit_val <= 0:
-                            ui.notify('OCO trigger/limit must be greater than 0', type='negative')
-                            return None
+                            return None, 'OCO trigger/limit must be greater than 0'
                         order_data.update({
                             "second_trigger_price": second_trigger_val,
                             "second_limit_price": second_limit_val
@@ -2669,8 +2345,7 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
                         if up_entry_enabled and up_entry_enabled.value:
                             entry_price_val = _safe_float(up_entry_trigger_price.value)
                             if entry_price_val <= 0:
-                                ui.notify('Entry trigger price must be greater than 0', type='negative')
-                                return None
+                                return None, 'Entry trigger price must be greater than 0'
                             up_rules.append({
                                 "strategy": "ENTRY",
                                 "trigger_type": up_entry_trigger_type.value,
@@ -2679,8 +2354,7 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
                         if up_target_enabled and up_target_enabled.value:
                             target_price_val = _safe_float(up_target_trigger_price.value)
                             if target_price_val <= 0:
-                                ui.notify('Target trigger price must be greater than 0', type='negative')
-                                return None
+                                return None, 'Target trigger price must be greater than 0'
                             up_rules.append({
                                 "strategy": "TARGET",
                                 "trigger_type": up_target_trigger_type.value,
@@ -2689,8 +2363,7 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
                         if up_sl_enabled and up_sl_enabled.value:
                             sl_price_val = _safe_float(up_sl_trigger_price.value)
                             if sl_price_val <= 0:
-                                ui.notify('Stop loss trigger price must be greater than 0', type='negative')
-                                return None
+                                return None, 'Stop loss trigger price must be greater than 0'
                             up_rules.append({
                                 "strategy": "STOPLOSS",
                                 "trigger_type": up_sl_trigger_type.value,
@@ -2700,8 +2373,7 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
                         up_rules = []
 
                     if not up_rules:
-                        ui.notify('Select at least one rule for Upstox GTT', type='negative')
-                        return None
+                        return None, 'Select at least one rule for Upstox GTT'
 
                     order_data.update({
                         "trigger_type": str(trigger_type.value).upper(),
@@ -2715,14 +2387,17 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
 
                 order_data["estimated_price"] = estimated_price if estimated_price and estimated_price > 0 else 0.0
 
-                return order_data
+                return order_data, None
 
             # GTT Confirmation Dialog (created outside async function)
             gtt_confirm_dialog = ui.dialog()
             
             # Place GTT Order Action
             async def place_gtt_order():
-                order_data = build_gtt_order_payload()
+                order_data, error = build_gtt_order_payload()
+                if error:
+                    ui.notify(error, type='negative')
+                    return
                 if not order_data:
                     return
 
@@ -2775,7 +2450,7 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
                                     ui.notify("Failed to place GTT order", type='negative')
                                 loading_container.clear()
 
-                        ui.button('Place GTT Order', on_click=lambda: asyncio.create_task(confirm_gtt_order())).classes('bg-green-600 text-white px-4 py-2 rounded')
+                        ui.button('Place GTT Order', on_click=confirm_gtt_order).classes('bg-green-600 text-white px-4 py-2 rounded')
 
                 gtt_confirm_dialog.open()
 
@@ -2792,7 +2467,10 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
                 return 0.0
 
             async def add_gtt_to_basket() -> None:
-                order_data = build_gtt_order_payload()
+                order_data, error = build_gtt_order_payload()
+                if error:
+                    ui.notify(error, type='negative')
+                    return
                 if not order_data:
                     return
                 
@@ -2954,27 +2632,27 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
                     
             basket_observer_register = basket_controller.get('register_observer')
 
-            gtt_action_row = ui.row().classes('order-action-row w-full gap-3 mt-4').style('display: flex !important; flex-wrap: wrap;')
-            with gtt_action_row:
-                position_btn = create_position_calculator_button(
-                    label='Position Sizing',
-                    defaults=position_calc_defaults,
-                    get_context=gtt_calc_context,
-                    apply_callback=apply_gtt_calc,
-                    button_classes='flex-1 px-6 py-3 rounded-lg font-medium text-lg shadow',
-                    button_style='background: linear-gradient(135deg, #34d399, #14b8a6); color:#052e16; border:none; box-shadow:0 8px 16px rgba(52,211,153,0.45);',
-                    get_default_context=gtt_default_calc,
-                    funds_fetcher=fetch_equity_funds,
-                    basket_totals_provider=get_basket_totals,
-                    register_basket_listener=basket_observer_register if callable(basket_observer_register) else None,
-                    on_reset=lambda: reset_gtt_defaults(market_price_state['last_price'])
-                )
-                gtt_basket_btn = ui.button('Add to Basket', icon='add_shopping_cart', on_click=lambda: asyncio.create_task(add_gtt_to_basket()))\
-                    .classes('flex-1 px-6 py-3 rounded-lg font-medium text-lg shadow-inner')
-                apply_button_style(gtt_basket_btn, 'background: linear-gradient(135deg, #1f2937, #0f172a); color:#e2e8f0; border:1px solid rgba(148,163,184,0.35);')
-                gtt_place_btn = ui.button('Place GTT Order', icon="compare_arrows", on_click=lambda: asyncio.create_task(place_gtt_order()))\
-                    .classes('flex-1 px-6 py-3 rounded-lg font-semibold text-lg shadow')
-                apply_button_style(gtt_place_btn, 'background: linear-gradient(135deg, #10b981, #2dd4bf); color:#022c22; border:none; box-shadow:0 8px 16px rgba(16,185,129,0.45);')
+            with gtt_form_column:
+                with ui.row().classes('order-action-row w-full gap-3 mt-4'):
+                    create_position_calculator_button(
+                        label='Position Sizing',
+                        defaults=position_calc_defaults,
+                        get_context=gtt_calc_context,
+                        apply_callback=apply_gtt_calc,
+                        button_classes='flex-1 px-6 py-3 rounded-lg font-medium text-lg shadow',
+                        button_style='background: linear-gradient(135deg, #34d399, #14b8a6); color:#052e16; border:none; box-shadow:0 8px 16px rgba(52,211,153,0.45);',
+                        get_default_context=gtt_default_calc,
+                        funds_fetcher=fetch_equity_funds,
+                        basket_totals_provider=get_basket_totals,
+                        register_basket_listener=basket_observer_register if callable(basket_observer_register) else None,
+                        on_reset=lambda: reset_gtt_defaults(market_price_state['last_price'])
+                    )
+                    gtt_basket_btn = ui.button('Add to Basket', icon='add_shopping_cart', on_click=add_gtt_to_basket)\
+                        .classes('flex-1 px-6 py-3 rounded-lg font-medium text-lg shadow-inner')
+                    apply_button_style(gtt_basket_btn, 'background: linear-gradient(135deg, #1f2937, #0f172a); color:#e2e8f0; border:1px solid rgba(148,163,184,0.35);')
+                    gtt_place_btn = ui.button('Place GTT Order', icon="compare_arrows", on_click=place_gtt_order)\
+                        .classes('flex-1 px-6 py-3 rounded-lg font-semibold text-lg shadow')
+                    apply_button_style(gtt_place_btn, 'background: linear-gradient(135deg, #10b981, #2dd4bf); color:#022c22; border:none; box-shadow:0 8px 16px rgba(16,185,129,0.45);')
 
 async def render_auto_orders(fetch_api, user_storage, instruments, broker, position_calc_defaults, basket_controller):
     """Auto orders form"""
@@ -3340,16 +3018,18 @@ async def render_auto_orders(fetch_api, user_storage, instruments, broker, posit
             # Loading container
             loading_container = ui.column().classes('w-full')
 
-            def build_auto_order_payload() -> Optional[Dict[str, Any]]:
+            def build_auto_order_payload() -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+                """
+                Build auto order payload with validation.
+                Returns: (order_data, error_message)
+                """
                 if not all(validation_state.values()):
-                    ui.notify('Please fix form errors', type='negative')
-                    return None
+                    return None, 'Please fix form errors'
 
                 if not symbol_select.value or symbol_select.value not in instruments:
-                    ui.notify('Please select a valid symbol', type='negative')
-                    return None
+                    return None, 'Please select a valid symbol'
 
-                return {
+                order_data = {
                     "trading_symbol": symbol_select.value,
                     "instrument_token": instruments[symbol_select.value],
                     "transaction_type": transaction_type.value,
@@ -3364,10 +3044,14 @@ async def render_auto_orders(fetch_api, user_storage, instruments, broker, posit
                     "trailing_stop_loss": trailing_stop.value,
                     "square_off_time": square_off_time.value
                 }
+                return order_data, None
 
             # Place Auto Order Action
             async def place_auto_order():
-                order_data = build_auto_order_payload()
+                order_data, error = build_auto_order_payload()
+                if error:
+                    ui.notify(error, type='negative')
+                    return
                 if not order_data:
                     return
 
@@ -3400,12 +3084,15 @@ async def render_auto_orders(fetch_api, user_storage, instruments, broker, posit
                                     ui.notify("Failed to create auto order", type='negative')
                                 loading_container.clear()
 
-                        ui.button('Create Auto Order', on_click=lambda: asyncio.create_task(confirm_auto_order())).classes('bg-orange-600 text-white px-4 py-2 rounded')
+                        ui.button('Create Auto Order', on_click=confirm_auto_order).classes('bg-orange-600 text-white px-4 py-2 rounded')
 
                 dialog.open()
 
             def add_auto_to_basket() -> None:
-                order_data = build_auto_order_payload()
+                order_data, error = build_auto_order_payload()
+                if error:
+                    ui.notify(error, type='negative')
+                    return
                 if not order_data:
                     return
                 add_fn = basket_controller.get('add')
@@ -3437,6 +3124,6 @@ async def render_auto_orders(fetch_api, user_storage, instruments, broker, posit
                 auto_basket_btn = ui.button('Add to Basket', icon='add_shopping_cart', on_click=add_auto_to_basket)\
                     .classes('flex-1 px-6 py-3 rounded-lg font-medium text-lg shadow-inner')
                 apply_button_style(auto_basket_btn, 'background: linear-gradient(135deg, #1f2937, #111827); color:#f3f4f6; border:1px solid rgba(148,163,184,0.35);')
-                auto_place_btn = ui.button('Create Auto Order', icon="smart_toy", on_click=lambda: asyncio.create_task(place_auto_order()))\
+                auto_place_btn = ui.button('Create Auto Order', icon="smart_toy", on_click=place_auto_order)\
                     .classes('flex-1 px-6 py-3 rounded-lg font-semibold text-lg shadow')
                 apply_button_style(auto_place_btn, 'background: linear-gradient(135deg, #fb923c, #f97316); color:#431407; border:none; box-shadow:0 8px 16px rgba(251,146,60,0.45);')

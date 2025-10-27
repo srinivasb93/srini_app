@@ -925,6 +925,106 @@ class UnifiedThemeManager:
             background: #10b981 !important;
             color: white !important;
         }
+        
+        /* Order Management - Light Theme Enhancements */
+        .theme-surface-elevated {
+            background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%) !important;
+            border: 1px solid #cbd5e1 !important;
+        }
+        
+        .theme-surface-card {
+            background: #ffffff !important;
+            border: 1px solid #e2e8f0 !important;
+        }
+        
+        .theme-text-accent {
+            color: #0891b2 !important;
+        }
+        
+        .theme-text-primary {
+            color: #0f172a !important;
+        }
+        
+        .theme-text-muted {
+            color: #64748b !important;
+        }
+        
+        /* Order Management Header in Light Theme */
+        .order-mgmt-header {
+            background: linear-gradient(135deg, #0ea5e9 0%, #06b6d4 100%) !important;
+            border-bottom: 2px solid #0284c7 !important;
+            box-shadow: 0 2px 8px rgba(14, 165, 233, 0.15) !important;
+        }
+        
+        .order-mgmt-header .theme-text-primary {
+            color: #ffffff !important;
+        }
+        
+        .order-mgmt-header .theme-text-accent {
+            color: #ffffff !important;
+        }
+        
+        /* Order Tabs in Light Theme */
+        .order-tabs {
+            background: #ffffff !important;
+            border: 1px solid #e2e8f0 !important;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08) !important;
+        }
+        
+        .order-tabs .q-tab {
+            color: #475569 !important;
+        }
+        
+        .order-tabs .q-tab--active {
+            background: linear-gradient(135deg, #0ea5e9 0%, #06b6d4 100%) !important;
+            color: #ffffff !important;
+        }
+        
+        /* Order Form Header in Light Theme */
+        .order-form-header {
+            background: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%) !important;
+            border-bottom: 1px solid #cbd5e1 !important;
+        }
+        
+        .order-form-header .theme-text-primary {
+            color: #0f172a !important;
+        }
+        
+        .order-form-header .theme-text-accent {
+            color: #0891b2 !important;
+        }
+        
+        /* Icon Button in Light Theme */
+        .theme-icon-button {
+            color: #0891b2 !important;
+        }
+        
+        .theme-icon-button:hover {
+            background: rgba(14, 165, 233, 0.1) !important;
+        }
+        
+        .theme-expansion {
+            background: #f8fafc !important;
+            border: 1px solid #e2e8f0 !important;
+        }
+        
+        .theme-expansion .q-expansion-item__label {
+            color: #1e293b !important;
+        }
+        
+        .theme-expansion .q-expansion-item__content {
+            background: #ffffff !important;
+            border-top: 1px solid #e2e8f0 !important;
+        }
+        
+        .theme-divider {
+            background: #cbd5e1 !important;
+        }
+        
+        .theme-toggle {
+            background: #ffffff !important;
+            border: 1px solid #e2e8f0 !important;
+        }
         '''
 
     def _get_page_specific_styles(self, page_type: PageTheme) -> str:
@@ -1185,13 +1285,237 @@ class UnifiedThemeManager:
                 .order-management-page .md\:grid-cols-4 { grid-template-columns: repeat(4, 1fr); }
             }
             
-            /* Order Management Page Header */
+            /* ============================================================================ */
+            /* CRITICAL FIX: Force consistent element sizing in Order Management */
+            /* ============================================================================ */
+            
+            /* ULTRA HIGH SPECIFICITY: Force equal width for ALL flex-1 input columns */
+            /* But preserve main layout flex-[4] and flex-1 ratios */
+            .row.w-full.gap-3 > .column.flex-1.gap-2,
+            .row.w-full.gap-3 > .column.flex-1.gap-1,
+            .row.w-full.gap-3 > div.flex-1.gap-2,
+            .row.w-full.gap-3 > div.flex-1.gap-1,
+            .row.w-full.gap-2 > .column.flex-1.gap-2,
+            .row.w-full.gap-2 > .column.flex-1.gap-1,
+            .row.w-full.gap-4 > .column.flex-1.gap-2,
+            .row.w-full.gap-4 > .column.flex-1.gap-1 {
+                flex: 1 1 0px !important;
+                min-width: 0 !important;
+                max-width: 100% !important;
+                width: auto !important;
+                flex-basis: 0px !important;
+            }
+            
+            /* Preserve main layout ratios */
+            .flex-\[4\] {
+                flex: 4 1 0% !important;  /* 80% width */
+            }
+            
+            .flex-\[3\] {
+                flex: 3 1 0% !important;  /* 75% width */
+            }
+            
+            /* Additional catch-all for any flex-1 in gap rows that aren't special layouts */
+            .gap-3 > .flex-1:not([class*="flex-["]),
+            .gap-2 > .flex-1:not([class*="flex-["]) {
+                flex: 1 1 0px !important;
+                flex-basis: 0px !important;
+            }
+            
+            /* Force all Quasar fields inside flex-1 to take full width */
+            .flex-1 > .q-field,
+            .flex-1 > .q-select,
+            .flex-1 > .q-input,
+            .flex-1 > .nicegui-select,
+            .flex-1 > .nicegui-input,
+            .flex-1 > .nicegui-number,
+            .flex-1 .q-field,
+            .flex-1 .q-select,
+            .flex-1 .q-input,
+            .flex-1 .nicegui-select,
+            .flex-1 .nicegui-input,
+            .flex-1 .nicegui-number {
+                width: 100% !important;
+                min-width: 0 !important;
+                max-width: 100% !important;
+                flex: 1 1 auto !important;
+                box-sizing: border-box !important;
+            }
+            
+            /* Override Quasar's intrinsic widths with MAXIMUM specificity */
+            .flex-1 .q-field__control,
+            .flex-1 .q-field__inner,
+            .flex-1 .q-field__native,
+            .q-field .q-field__control,
+            .q-field .q-field__inner,
+            .q-field .q-field__native {
+                width: 100% !important;
+                min-width: 0 !important;
+                max-width: 100% !important;
+                box-sizing: border-box !important;
+            }
+            
+            /* Nuclear option: Force all inputs in flex containers */
+            .gap-3 .flex-1 input,
+            .gap-3 .flex-1 select,
+            .gap-2 .flex-1 input,
+            .gap-2 .flex-1 select {
+                width: 100% !important;
+                box-sizing: border-box !important;
+            }
+            
+            /* Force consistent row layouts */
+            .w-full.gap-3,
+            .w-full.gap-2,
+            .w-full.gap-4 {
+                display: flex !important;
+            }
+            
+            /* Ensure all input fields have consistent height */
+            .q-field__control,
+            .q-field__inner {
+                min-height: 40px !important;
+                height: 40px !important;
+            }
+            
+            /* Fix checkbox styling and alignment */
+            .q-checkbox {
+                padding-top: 0 !important;
+                padding-bottom: 0 !important;
+                align-items: center !important;
+                min-height: 40px !important;
+                display: inline-flex !important;
+            }
+            
+            .q-checkbox__inner {
+                width: 24px !important;
+                height: 24px !important;
+                border-radius: 4px !important;
+                border: 2px solid rgba(255, 255, 255, 0.3) !important;
+            }
+            
+            .q-checkbox__bg {
+                border-radius: 4px !important;
+            }
+            
+            /* Checkbox in flex container alignment */
+            .flex-1 .q-checkbox,
+            .gap-2 .q-checkbox,
+            .gap-3 .q-checkbox {
+                margin-top: auto !important;
+                margin-bottom: auto !important;
+            }
+            
+            /* CRITICAL FIX: Prevent border truncation on ALL cards */
+            .q-card {
+                overflow: visible !important;
+                position: relative !important;  /* Establish stacking context */
+            }
+            
+            .theme-surface-card {
+                border: 1px solid var(--border-color) !important;
+                border-radius: 8px !important;
+                overflow: visible !important;
+                box-sizing: border-box !important;
+                position: relative !important;
+            }
+            
+            /* Ensure market data panel doesn't clip borders */
+            .flex-1.theme-surface-elevated {
+                overflow: visible !important;
+            }
+            
+            /* Fix nested card borders */
+            .q-card .q-card {
+                border: 1px solid var(--border-color) !important;
+                margin: 0.5rem 0 !important;
+            }
+            
+            /* CRITICAL: Prevent layout shift when dropdowns open */
+            .q-menu,
+            .q-dialog,
+            .q-select__menu,
+            .q-menu__container {
+                position: fixed !important;
+                z-index: 9000 !important;
+            }
+            
+            /* Ensure dropdown doesn't push content */
+            .q-field--with-bottom {
+                padding-bottom: 0 !important;
+            }
+            
+            /* Prevent card movement on interaction */
+            .dashboard-card,
+            .order-card,
+            [class*="card"] {
+                will-change: auto !important;
+                transform: translateZ(0) !important;
+            }
+            
+            /* Force all overlays to be above content without affecting layout */
+            .q-menu,
+            .q-tooltip,
+            .q-dialog__backdrop {
+                position: fixed !important;
+            }
+            
+            /* Additional targeted fixes for specific input rows only */
+            /* Don't affect main layout columns */
+            .w-full > [class*="gap-"] > .flex-1:not(.flex-\[4\]):not(.flex-\[3\]) {
+                flex-basis: 0 !important;
+                flex-grow: 1 !important;
+                flex-shrink: 1 !important;
+            }
+            
+            /* ============================================================================ */
+            /* Order Management - Theme-Aware Styling (Dark Theme) */
+            /* ============================================================================ */
+            
+            /* Order Management Header in Dark Theme */
             .order-mgmt-header {
-                background: rgba(255, 255, 255, 0.92);
-                border-bottom: 1px solid var(--border-color);
-                box-shadow: var(--shadow-lg);
-                padding: 1rem 1.5rem;
-                border-radius: var(--radius-lg);
+                background: linear-gradient(135deg, rgba(30, 41, 59, 0.95) 0%, rgba(15, 23, 42, 0.95) 100%);
+                border-bottom: 2px solid rgba(6, 182, 212, 0.3);
+                box-shadow: 0 2px 8px rgba(6, 182, 212, 0.15);
+            }
+            
+            /* Order Tabs in Dark Theme */
+            .order-tabs {
+                background: rgba(30, 41, 59, 0.5);
+                border: 1px solid rgba(100, 116, 139, 0.3);
+            }
+            
+            .order-tabs .q-tab {
+                color: #cbd5e1;
+            }
+            
+            .order-tabs .q-tab--active {
+                background: linear-gradient(135deg, #0ea5e9 0%, #06b6d4 100%);
+                color: #ffffff;
+            }
+            
+            /* Order Form Header in Dark Theme */
+            .order-form-header {
+                background: rgba(30, 41, 59, 0.3);
+                border-bottom-color: rgba(100, 116, 139, 0.3);
+            }
+            
+            /* Icon Button in Dark Theme */
+            .theme-icon-button {
+                color: #06b6d4;
+            }
+            
+            .theme-icon-button:hover {
+                background: rgba(6, 182, 212, 0.1);
+            }
+            
+            /* Dark Theme Text Colors */
+            .theme-text-primary {
+                color: #f1f5f9;
+            }
+            
+            .theme-text-accent {
+                color: #06b6d4;
             }
             
             .order-mgmt-logo-box {
@@ -1437,6 +1761,241 @@ class UnifiedThemeManager:
                 padding: 1.5rem;
             }
             
+            /* Position Sizing Modal Enhancements */
+            .position-sizing-dialog .q-dialog__inner {
+                width: min(900px, 94vw) !important;
+                margin: 0 auto !important;
+                padding: 0 !important;
+                align-items: center !important;
+            }
+            
+            .position-sizing-dialog .q-card.position-sizing-card {
+                background: linear-gradient(135deg, rgba(15, 23, 42, 0.96) 0%, rgba(8, 47, 73, 0.92) 100%) !important;
+                border: 1px solid rgba(148, 163, 184, 0.28) !important;
+                border-radius: var(--radius-xl) !important;
+                box-shadow: 0 24px 48px rgba(2, 6, 23, 0.55) !important;
+                padding: 1.75rem !important;
+                gap: 1.5rem !important;
+                max-height: calc(100vh - 4rem) !important;
+                overflow-y: auto !important;
+                scrollbar-width: thin;
+            }
+            
+            .position-sizing-dialog .q-card.position-sizing-card::-webkit-scrollbar {
+                width: 8px;
+            }
+            
+            .position-sizing-dialog .q-card.position-sizing-card::-webkit-scrollbar-thumb {
+                background: rgba(148, 163, 184, 0.35);
+                border-radius: 999px;
+            }
+            
+            .position-sizing-surface {
+                backdrop-filter: blur(14px);
+            }
+            
+            .position-sizing-summary {
+                display: grid !important;
+                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) !important;
+                gap: 1rem !important;
+                padding: 1.25rem 1.5rem !important;
+                border-radius: var(--radius-lg) !important;
+                border: 1px solid rgba(20, 184, 166, 0.35) !important;
+                background: linear-gradient(135deg, rgba(16, 185, 129, 0.15) 0%, rgba(45, 212, 191, 0.12) 100%) !important;
+                box-shadow: inset 0 1px 0 rgba(45, 212, 191, 0.2) !important;
+            }
+            
+            .position-sizing-summary .text-sm {
+                margin: 0 !important;
+                white-space: nowrap !important;
+            }
+            
+            .position-sizing-grid {
+                width: 100% !important;
+                gap: 1.25rem !important;
+                flex-wrap: wrap !important;
+                align-items: stretch !important;
+            }
+            
+            .position-sizing-grid > .column.flex-1 {
+                flex: 1 1 220px !important;
+                min-width: 220px !important;
+            }
+            
+            .position-sizing-grid .q-field,
+            .position-sizing-grid .q-select,
+            .position-sizing-grid .q-input {
+                width: 100% !important;
+                background: rgba(15, 23, 42, 0.65) !important;
+                border-radius: var(--radius-md) !important;
+                border: 1px solid rgba(148, 163, 184, 0.32) !important;
+                box-shadow: inset 0 1px 0 rgba(148, 163, 184, 0.12) !important;
+            }
+            
+            .position-sizing-grid .q-field__control {
+                min-height: 44px !important;
+            }
+            
+            .position-sizing-grid .text-lg {
+                text-align: right !important;
+                color: rgba(56, 189, 248, 0.95) !important;
+            }
+            
+            .position-sizing-summary-panel {
+                background: linear-gradient(135deg, rgba(14, 116, 144, 0.18) 0%, rgba(15, 23, 42, 0.88) 100%) !important;
+                border: 1px solid rgba(94, 234, 212, 0.2) !important;
+                box-shadow: inset 0 1px 0 rgba(14, 165, 233, 0.2) !important;
+                padding: 1.25rem !important;
+                gap: 0.75rem !important;
+            }
+            
+            .position-sizing-summary-panel .text-sm {
+                color: rgba(226, 232, 240, 0.92) !important;
+            }
+            
+            .position-sizing-summary-panel .text-xs {
+                color: rgba(148, 163, 184, 0.85) !important;
+            }
+            
+            .position-sizing-actions {
+                flex-wrap: wrap !important;
+                gap: 0.75rem !important;
+                justify-content: flex-end !important;
+            }
+            
+            .position-sizing-actions .q-btn {
+                min-width: 160px !important;
+                height: 44px !important;
+                border-radius: var(--radius-md) !important;
+            }
+            
+            @media (max-width: 768px) {
+                .position-sizing-dialog .q-card.position-sizing-card {
+                    padding: 1.25rem !important;
+                    max-height: calc(100vh - 2rem) !important;
+                }
+                
+                .position-sizing-summary {
+                    grid-template-columns: 1fr !important;
+                }
+                
+                .position-sizing-grid > .column.flex-1 {
+                    min-width: 100% !important;
+                }
+                
+                .position-sizing-grid .text-lg {
+                    text-align: left !important;
+                }
+            }
+            
+            /* Basket Orders Modal Enhancements */
+            .basket-orders-dialog .q-dialog__inner {
+                width: min(820px, 94vw) !important;
+                margin: 0 auto !important;
+                padding: 0 !important;
+            }
+            
+            .basket-orders-card {
+                background: linear-gradient(135deg, rgba(17, 24, 39, 0.97) 0%, rgba(15, 23, 42, 0.92) 100%) !important;
+                border: 1px solid rgba(59, 130, 246, 0.28) !important;
+                border-radius: var(--radius-xl) !important;
+                box-shadow: 0 24px 48px rgba(2, 6, 23, 0.5) !important;
+                padding: 1.75rem !important;
+                gap: 1.5rem !important;
+                max-height: calc(100vh - 4rem) !important;
+                display: flex !important;
+                flex-direction: column !important;
+            }
+            
+            .basket-orders-card .q-card__section {
+                display: flex !important;
+                flex-direction: column !important;
+                gap: 1.25rem !important;
+                padding: 0 !important;
+            }
+            
+            .basket-orders-header {
+                border-bottom: 1px solid rgba(148, 163, 184, 0.18) !important;
+                padding-bottom: 1rem !important;
+                gap: 1rem !important;
+            }
+            
+            .basket-orders-summary {
+                color: rgba(226, 232, 240, 0.8) !important;
+            }
+            
+            .basket-orders-list {
+                flex: 1 1 auto !important;
+                max-height: 320px !important;
+                overflow-y: auto !important;
+                padding-right: 0.5rem !important;
+                margin-right: -0.5rem !important;
+            }
+            
+            .basket-orders-list::-webkit-scrollbar {
+                width: 8px;
+            }
+            
+            .basket-orders-list::-webkit-scrollbar-thumb {
+                background: rgba(59, 130, 246, 0.35);
+                border-radius: 999px;
+            }
+            
+            .basket-orders-feedback {
+                gap: 1rem !important;
+            }
+            
+            .basket-orders-actions {
+                border-top: 1px solid rgba(148, 163, 184, 0.18) !important;
+                padding-top: 1rem !important;
+                gap: 0.75rem !important;
+                flex-wrap: wrap !important;
+            }
+            
+            .basket-orders-card .row.justify-end,
+            .basket-orders-card .row.items-end {
+                flex-direction: column !important;
+                align-items: stretch !important;
+                gap: 0.75rem !important;
+            }
+            
+            .basket-orders-card .row.justify-end .q-btn,
+            .basket-orders-card .row.items-end .q-btn {
+                width: 100% !important;
+            }
+            
+            .basket-orders-actions .q-btn {
+                min-width: 180px !important;
+                height: 44px !important;
+                border-radius: var(--radius-md) !important;
+            }
+            
+            @media (max-width: 768px) {
+                .basket-orders-card {
+                    padding: 1.25rem !important;
+                    max-height: calc(100vh - 2rem) !important;
+                }
+                
+                .basket-orders-actions {
+                    justify-content: flex-start !important;
+                }
+                
+                .basket-orders-actions .q-btn {
+                    flex: 1 1 100% !important;
+                    min-width: 0 !important;
+                }
+            }
+            
+            .order-action-row {
+                gap: 0.75rem !important;
+                flex-wrap: wrap !important;
+            }
+            
+            .order-action-row .q-btn {
+                min-height: 48px !important;
+                border-radius: 14px !important;
+            }
+            
             /* Buy/Sell Toggle Buttons */
             .buy-toggle-btn {
                 background: linear-gradient(135deg, var(--success-color) 0%, #059669 100%);
@@ -1671,27 +2230,6 @@ class UnifiedThemeManager:
                 border: 1px solid rgba(245, 158, 11, 0.3) !important;
             }
             
-            /* Basket Order List */
-            .basket-order-list {
-                max-height: 400px;
-                overflow-y: auto;
-            }
-            
-            .basket-order-card {
-                background: var(--surface-color);
-                border: 1px solid var(--border-color);
-                border-left: 3px solid var(--info-color);
-                border-radius: var(--radius-md);
-                padding: 0.75rem;
-                margin-bottom: 0.75rem;
-                transition: all var(--transition-fast);
-            }
-            
-            .basket-order-card:hover {
-                transform: translateX(2px);
-                box-shadow: var(--shadow-md);
-            }
-            
             /* Action Buttons */
             .order-action-modify {
                 color: var(--info-color);
@@ -1760,6 +2298,47 @@ class UnifiedThemeManager:
                     flex-direction: column;
                     gap: 1rem;
                 }
+            }
+            
+            /* =====================================================
+               CRITICAL FIXES FOR ORDER MANAGEMENT
+               ===================================================== */
+            
+            /* FIX 1: Element Sizing Consistency */
+            /* Ensure all form elements in a row have matching heights */
+            .q-field,
+            .q-select,
+            .q-input,
+            
+            .q-field .q-field__control,
+            .q-select .q-field__control,
+            .q-input .q-field__control {
+                min-height: 40px !important;
+                height: 40px !important;
+            }
+            
+            /* FIX 2: Nested Card Padding and Border */
+            /* Override default card padding removal for nested cards */
+            .theme-surface-elevated .q-card,
+            .theme-surface-card.q-card {
+                padding: 0.5rem !important;  /* Restore padding for nested cards */
+                overflow: visible !important;  /* Prevent border clipping */
+            }
+            
+            /* Fix nested card border visibility */
+            .theme-surface-elevated .theme-surface-card,
+            .flex-1.theme-surface-elevated .q-card {
+                border: 1px solid var(--border-color) !important;
+                border-radius: var(--radius-md) !important;
+                box-sizing: border-box !important;  /* Include border in dimensions */
+            }
+            
+            /* Specific fix for Market Data LTP card */
+            .theme-surface-elevated .w-full.p-2.mb-2 {
+                padding: 0.5rem !important;
+                border: 1px solid var(--border-color) !important;
+                border-radius: var(--radius-md) !important;
+                margin-bottom: 0.5rem !important;
             }
             ''',
 

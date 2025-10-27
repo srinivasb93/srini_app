@@ -372,8 +372,8 @@ async def render_enhanced_strategy_card(strategy, fetch_api, broker):
                 # Action buttons row
                 with ui.row().classes("w-full justify-between items-center mt-3 pt-2 border-t border-gray-700"):
                     with ui.row().classes("gap-1"):
-                        ui.button("Stop", icon="stop", on_click=lambda sid=strategy_id: asyncio.create_task(stop_execution_from_live(sid, fetch_api))).props("size=sm color=negative flat").classes("text-xs")
-                        ui.button("Metrics", icon="analytics", on_click=lambda sid=strategy_id: asyncio.create_task(view_metrics_from_live(sid, fetch_api))).props("size=sm flat").classes("text-xs text-cyan-400")
+                        ui.button("Stop", icon="stop", on_click=lambda sid=strategy_id: stop_execution_from_live(sid, fetch_api)).props("size=sm color=negative flat").classes("text-xs")
+                        ui.button("Metrics", icon="analytics", on_click=lambda sid=strategy_id: view_metrics_from_live(sid, fetch_api)).props("size=sm flat").classes("text-xs text-cyan-400")
                     
                     with ui.row().classes("gap-1"):
                         if strategy.get('strategy_id'):

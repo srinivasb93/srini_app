@@ -2,8 +2,220 @@
 # Generic functions for market data operations that can be used across modules
 
 import logging
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# MARKET STATUS UTILITIES
+# ============================================================================
+
+def calculate_next_market_event_seconds():
+    """
+    Calculate seconds until next critical market event.
+    
+    Market Events:
+    - 9:00 AM - Pre-Open starts
+    - 9:15 AM - Normal session starts
+    - 3:30 PM (15:30) - Closing session starts
+    - 4:00 PM (16:00) - Market closes
+    
+    Returns:
+        int: Seconds until next market event (minimum 1 second)
+    """
+    now = datetime.now()
+    
+    # Market event times (24-hour format)
+    events = [
+        (9, 0),    # Pre-Open starts
+        (9, 15),   # Normal session starts
+        (15, 30),  # Closing session starts
+        (16, 0),   # Market closes
+    ]
+    
+    # Find next event today
+    for hour, minute in events:
+        event_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now < event_time:
+            seconds_until = (event_time - now).total_seconds()
+            return max(1, seconds_until)  # At least 1 second
+    
+    # All events passed today, next event is 9:00 AM tomorrow
+    next_day = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    seconds_until = (next_day - now).total_seconds()
+    return max(1, seconds_until)
+
+
+def calculate_next_check_time(is_trading_day, error_retry=False):
+    """
+    Calculate seconds until next market status check based on current state.
+    
+    Args:
+        is_trading_day (bool): Whether today is a trading day
+        error_retry (bool): Whether this is an error retry
+        
+    Returns:
+        tuple: (seconds_until_next_check, description)
+    """
+    now = datetime.now()
+    
+    if error_retry:
+        # Retry in 5 minutes on error
+        return 300, "Error occurred, retrying in 5 minutes"
+    
+    elif not is_trading_day:
+        # Not a trading day (weekend/holiday)
+        # Check again at 9:00 AM tomorrow
+        next_check = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        if now.hour >= 9:
+            next_check += timedelta(days=1)
+        seconds_until = (next_check - now).total_seconds()
+        hours_until = seconds_until / 3600
+        return seconds_until, f"Non-trading day, next check in {hours_until:.1f} hours"
+    
+    else:
+        # Trading day - schedule for next event
+        seconds_until = calculate_next_market_event_seconds()
+        minutes_until = seconds_until / 60
+        return seconds_until, f"Trading day, next update in {minutes_until:.1f} minutes"
+
+
+def get_market_status_color_class(status_color):
+    """
+    Map backend status color to Tailwind CSS class.
+    
+    Args:
+        status_color (str): Color name from backend ("green", "orange", "yellow", "red", "gray")
+        
+    Returns:
+        str: Tailwind CSS class for the color
+    """
+    color_map = {
+        "green": "text-green-500",
+        "orange": "text-orange-500",
+        "yellow": "text-yellow-500",
+        "red": "text-red-500",
+        "gray": "text-gray-500"
+    }
+    return color_map.get(status_color, "text-gray-500")
+
+
+def format_market_status_tooltip(message, next_event=None):
+    """
+    Format tooltip text for market status display.
+    
+    Args:
+        message (str): Main status message
+        next_event (str, optional): Next market event description
+        
+    Returns:
+        str: Formatted tooltip text
+    """
+    tooltip = message
+    if next_event:
+        tooltip += f"\n{next_event}"
+    return tooltip
+
+
+class MarketStatusManager:
+    """
+    Manages market status updates with event-driven scheduling.
+    
+    This class encapsulates the logic for fetching market status from the backend
+    and scheduling updates at optimal times (only at market events).
+    """
+    
+    def __init__(self, fetch_api_func):
+        """
+        Initialize the market status manager.
+        
+        Args:
+            fetch_api_func: Async function to call backend API
+        """
+        self.fetch_api = fetch_api_func
+        self.current_timer = None
+        self.logger = logging.getLogger(f"{__name__}.MarketStatusManager")
+    
+    async def fetch_market_status(self):
+        """
+        Fetch current market status from backend.
+        
+        Returns:
+            dict: Market status response or None on error
+        """
+        try:
+            response = await self.fetch_api("/market-status", method="GET")
+            return response
+        except Exception as e:
+            self.logger.error(f"Error fetching market status: {e}")
+            return None
+    
+    def parse_market_status_response(self, response):
+        """
+        Parse market status response and extract key information.
+        
+        Args:
+            response (dict): API response
+            
+        Returns:
+            dict: Parsed status information with keys:
+                - status (str): Market status text
+                - color (str): Status color
+                - message (str): Status message
+                - tooltip (str): Formatted tooltip text
+                - is_trading_day (bool): Whether it's a trading day
+                - css_class (str): CSS class for icon color
+        """
+        if not response:
+            return {
+                "status": "Unknown",
+                "color": "gray",
+                "message": "Unable to fetch market status",
+                "tooltip": "Market status unknown",
+                "is_trading_day": False,
+                "css_class": "text-gray-500"
+            }
+        
+        status = response.get("market_status", "Unknown")
+        color = response.get("status_color", "gray")
+        message = response.get("status_message", "Market status unknown")
+        next_event = response.get("next_event")
+        is_trading_day = response.get("is_trading_day", False)
+        
+        return {
+            "status": status,
+            "color": color,
+            "message": message,
+            "tooltip": format_market_status_tooltip(message, next_event),
+            "is_trading_day": is_trading_day,
+            "css_class": get_market_status_color_class(color)
+        }
+    
+    def calculate_next_update_time(self, is_trading_day, error_retry=False):
+        """
+        Calculate when the next status update should occur.
+        
+        Args:
+            is_trading_day (bool): Whether today is a trading day
+            error_retry (bool): Whether this is an error retry
+            
+        Returns:
+            tuple: (seconds, description)
+        """
+        seconds, description = calculate_next_check_time(is_trading_day, error_retry)
+        self.logger.info(f"Market status: {description}")
+        return seconds, description
+    
+    def cancel_current_timer(self):
+        """Cancel the current timer if it exists."""
+        if self.current_timer is not None:
+            try:
+                self.current_timer.cancel()
+                self.logger.debug("Cancelled existing market status timer")
+            except Exception as e:
+                self.logger.warning(f"Error cancelling timer: {e}")
+            self.current_timer = None
 
 
 async def fetch_batch_ltp_data(symbols, get_cached_instruments, broker, fetch_api):

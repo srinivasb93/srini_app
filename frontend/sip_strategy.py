@@ -519,11 +519,18 @@ class EnhancedSIPStrategy:
                             ui.icon("psychology", size="1.5rem").classes("text-green-400")
                             ui.label("Strategy Parameters").classes("font-bold text-lg ml-3 text-green-300")
 
-                        self.fixed_investment = ui.number(
-                            label="💰 Monthly Investment (₹)",
-                            value=self.default_config["fixed_investment"],
-                            min=1000, step=500
-                        ).classes("w-full").props("outlined dense")
+                        with ui.row().classes("w-full gap-3"):
+                            self.fixed_investment = ui.number(
+                                label="💰 Monthly Investment (₹)",
+                                value=self.default_config["fixed_investment"],
+                                min=1000, step=500
+                            ).classes("flex-1").props("outlined dense")
+
+                            self.max_monthly = ui.number(
+                                label="📅 Max Monthly Amount (₹)",
+                                value=self.default_config["fixed_investment"] * 4,
+                                min=1000, step=1000
+                            ).classes("flex-1").props("outlined dense")
 
                         with ui.row().classes("w-full gap-3"):
                             self.major_dd = ui.number(
@@ -577,27 +584,22 @@ class EnhancedSIPStrategy:
                                 min=1, max=30, step=1
                             ).classes("flex-1").props("outlined dense")
 
-                        self.rolling_window = ui.number(
-                            label="🔄 Rolling Window (days)",
-                            value=self.default_config["rolling_window"],
-                            min=20, max=365, step=5
-                        ).classes("w-full").props("outlined dense")
+                        with ui.row().classes("w-full gap-3"):
+                            self.rolling_window = ui.number(
+                                label="🔄 Rolling Window (days)",
+                                value=self.default_config["rolling_window"],
+                                min=20, max=365, step=5
+                            ).classes("flex-1").props("outlined dense")
 
-                        self.price_reduction_threshold = ui.number(
-                            label="📉 Price Reduction Threshold (%)",
-                            value=self.default_config["price_reduction_threshold"],
-                            min=1, max=10, step=0.5
-                        ).classes("w-full").props("outlined dense")
-
-                        self.max_monthly = ui.number(
-                            label="📅 Max Monthly Amount (₹)",
-                            value=self.default_config["fixed_investment"] * 4,
-                            min=1000, step=1000
-                        ).classes("w-full").props("outlined dense")
-
+                            self.price_reduction_threshold = ui.number(
+                                label="📉 Price Reduction Threshold (%)",
+                                value=self.default_config["price_reduction_threshold"],
+                                min=1, max=10, step=0.5
+                            ).classes("flex-1").props("outlined dense")
+                        
         # Action buttons
-        with ui.card().classes("w-full p-4 mt-4"):
-            with ui.row().classes("w-full items-center justify-between mb-4"):
+        with ui.card().classes("w-full p-4 mt-2"):
+            with ui.row().classes("w-full items-center justify-between mb-2"):
                 with ui.row().classes("items-center gap-3"):
                     ui.icon("rocket_launch", size="1.5rem").classes("text-orange-400")
                     ui.label("Backtest Actions").classes("font-bold text-lg text-orange-300")
@@ -612,7 +614,7 @@ class EnhancedSIPStrategy:
                     "bg-green-500 text-white px-6 py-3 font-bold")
 
         # Results container
-        self.results_container = ui.column().classes("w-full mt-4")
+        self.results_container = ui.column().classes("w-full mt-2")
 
     async def run_enhanced_backtest(self):
         await self.clear_results()
@@ -2256,294 +2258,293 @@ class EnhancedSIPStrategy:
     async def render_batch_multi_configs_section(self, fetch_api, user_storage):
         """Enhanced batch multi-configs backtest UI aligned with endpoint response"""
 
-        ui.label("🔄 Batch Backtest with Multiple Configurations").classes("text-lg font-bold mb-4")
-        ui.label("Test multiple strategy configurations in batch and find the best one").classes("text-gray-600 mb-4")
+        ui.label("🔄 Batch Backtest with Multiple Configurations").classes("text-lg font-bold mb-2")
+        ui.label("Test multiple strategy configurations in batch and find the best one").classes("text-gray-600 mb-2")
 
-        symbols_input = ui.textarea(
-            label="Symbols (one per line)",
-            value="ICICIB22\nCPSEETF",
-            placeholder="Enter symbols separated by new lines"
-        ).classes("w-full mb-4")
+        with ui.row().classes("gap-4 mb-2"):
+            symbols_input = ui.textarea(
+                label="Symbols (one per line)",
+                value="ICICIB22\nCPSEETF",
+                placeholder="Enter symbols separated by new lines"
+            ).classes("flex-1").props("outlined dense w-full")
 
-        with ui.row().classes("gap-4 mb-4"):
-            start_date = ui.input("Start Date", value="2020-01-01").props("dense type=date").classes("flex-1 min-w-0")
+            start_date = ui.input("Start Date", value="2020-01-01").props("dense type=date").classes("flex-1").props("outlined dense w-full")
             end_date = ui.input("End Date", value=datetime.now().strftime("%Y-%m-%d")).props(
-                "dense type=date").classes("flex-1 min-w-0")
+                "dense type=date").classes("flex-1").props("outlined dense w-full")
 
-            # FIXED: Use individual input fields instead of editable table for better UX
-            ui.label("⚙️ Configuration Management").classes("text-lg font-bold mb-2")
-            ui.label("Add and customize multiple configurations to test").classes("text-gray-600 mb-4")
+        # FIXED: Use individual input fields instead of editable table for better UX
+        ui.label("⚙️ Configuration Management").classes("text-lg font-bold mb-1")
+        ui.label("Add and customize multiple configurations to test").classes("text-gray-600 mb-2")
 
-            # Configuration storage
-            configs_data = []
-            configs_container = ui.column().classes("w-full mb-4")
+        # Configuration storage
+        configs_data = []
+        configs_container = ui.column().classes("w-full mb-2")
 
-            def create_config_card(config_data: dict, config_index: int):
-                """Create an editable configuration card"""
+        def create_config_card(config_data: dict, config_index: int):
+            """Create an editable configuration card"""
 
-                with ui.card().classes("w-full mb-4 p-4 border"):
-                    with ui.row().classes("w-full justify-between items-center mb-4"):
-                        ui.label(f"Configuration {config_index + 1}").classes("text-lg font-bold")
+            with ui.card().classes("w-full mb-2 p-4 border"):
+                with ui.row().classes("w-full justify-between items-center mb-2"):
+                    ui.label(f"Configuration {config_index + 1}").classes("text-lg font-bold")
 
-                        def remove_config():
-                            if len(configs_data) > 1:  # Keep at least one config
-                                configs_data.pop(config_index)
-                                refresh_configs_display()
-                                ui.notify(f"Configuration {config_index + 1} removed", type="positive")
-                            else:
-                                ui.notify("Keep at least one configuration", type="warning")
+                    def remove_config():
+                        if len(configs_data) > 1:  # Keep at least one config
+                            configs_data.pop(config_index)
+                            refresh_configs_display()
+                            ui.notify(f"Configuration {config_index + 1} removed", type="positive")
+                        else:
+                            ui.notify("Keep at least one configuration", type="warning")
 
-                        if len(configs_data) > 1:
-                            ui.button("🗑️ Remove", on_click=remove_config).classes("bg-red-500 text-white text-xs")
+                    if len(configs_data) > 1:
+                        ui.button("🗑️ Remove", on_click=remove_config).classes("bg-red-500 text-white text-xs")
 
-                    # Investment Settings
-                    with ui.expansion("💰 Investment Settings", value=True).classes("w-full mb-2"):
-                        with ui.row().classes("gap-4"):
-                            fixed_investment = ui.number(
-                                label="Monthly Investment (₹)",
-                                value=config_data.get('fixed_investment', 5000),
-                                step=100,
-                                min=100
-                            ).classes("w-48")
+                # Investment Settings
+                with ui.expansion("💰 Investment Settings", value=True).classes("w-full mb-2"):
+                    with ui.row().classes("gap-4"):
+                        fixed_investment = ui.number(
+                            label="Monthly Investment (₹)",
+                            value=config_data.get('fixed_investment', 5000),
+                            step=100,
+                            min=100
+                        ).classes("w-48")
 
-                            max_amount = ui.number(
-                                label="Max Monthly Amount (₹)",
-                                value=config_data.get('max_amount_in_a_month', 18000),
-                                step=1000,
-                                min=1000
-                            ).classes("w-48")
+                        max_amount = ui.number(
+                            label="Max Monthly Amount (₹)",
+                            value=config_data.get('max_amount_in_a_month', 18000),
+                            step=1000,
+                            min=1000
+                        ).classes("w-48")
 
-                            force_remaining = ui.checkbox(
-                                text="Force Remaining Investment",
-                                value=config_data.get('force_remaining_investment', True)
-                            )
+                        force_remaining = ui.checkbox(
+                            text="Force Remaining Investment",
+                            value=config_data.get('force_remaining_investment', True)
+                        )
 
-                    # Drawdown Thresholds
-                    with ui.expansion("📉 Drawdown Thresholds").classes("w-full mb-2"):
-                        with ui.row().classes("gap-4"):
-                            minor_dd = ui.number(
-                                label="Minor Drawdown (%)",
-                                value=config_data.get('minor_drawdown_threshold', -4),
-                                step=0.5,
-                                max=-1
-                            ).classes("w-48")
+                # Drawdown Thresholds
+                with ui.expansion("📉 Drawdown Thresholds").classes("w-full mb-2"):
+                    with ui.row().classes("gap-4"):
+                        minor_dd = ui.number(
+                            label="Minor Drawdown (%)",
+                            value=config_data.get('minor_drawdown_threshold', -4),
+                            step=0.5,
+                            max=-1
+                        ).classes("w-48")
 
-                            major_dd = ui.number(
-                                label="Major Drawdown (%)",
-                                value=config_data.get('major_drawdown_threshold', -10),
-                                step=0.5,
-                                max=-5
-                            ).classes("w-48")
+                        major_dd = ui.number(
+                            label="Major Drawdown (%)",
+                            value=config_data.get('major_drawdown_threshold', -10),
+                            step=0.5,
+                            max=-5
+                        ).classes("w-48")
 
-                            extreme_dd = ui.number(
-                                label="Extreme Drawdown (%)",
-                                value=config_data.get('extreme_drawdown_threshold', -15),
-                                step=0.5,
-                                max=-10
-                            ).classes("w-48")
+                        extreme_dd = ui.number(
+                            label="Extreme Drawdown (%)",
+                            value=config_data.get('extreme_drawdown_threshold', -15),
+                            step=0.5,
+                            max=-10
+                        ).classes("w-48")
 
-                    # Investment Multipliers
-                    with ui.expansion("📈 Investment Multipliers").classes("w-full mb-2"):
-                        with ui.row().classes("gap-4"):
-                            minor_mult = ui.number(
-                                label="Minor Multiplier",
-                                value=config_data.get('minor_drawdown_inv_multiplier', 1.75),
-                                step=0.25,
-                                min=1.0,
-                                max=5.0
-                            ).classes("w-48")
+                # Investment Multipliers
+                with ui.expansion("📈 Investment Multipliers").classes("w-full mb-2"):
+                    with ui.row().classes("gap-4"):
+                        minor_mult = ui.number(
+                            label="Minor Multiplier",
+                            value=config_data.get('minor_drawdown_inv_multiplier', 1.75),
+                            step=0.25,
+                            min=1.0,
+                            max=5.0
+                        ).classes("w-48")
 
-                            major_mult = ui.number(
-                                label="Major Multiplier",
-                                value=config_data.get('major_drawdown_inv_multiplier', 3.0),
-                                step=0.25,
-                                min=1.0,
-                                max=5.0
-                            ).classes("w-48")
+                        major_mult = ui.number(
+                            label="Major Multiplier",
+                            value=config_data.get('major_drawdown_inv_multiplier', 3.0),
+                            step=0.25,
+                            min=1.0,
+                            max=5.0
+                        ).classes("w-48")
 
-                            extreme_mult = ui.number(
-                                label="Extreme Multiplier",
-                                value=config_data.get('extreme_drawdown_inv_multiplier', 4.0),
-                                step=0.25,
-                                min=1.0,
-                                max=10.0
-                            ).classes("w-48")
+                        extreme_mult = ui.number(
+                            label="Extreme Multiplier",
+                            value=config_data.get('extreme_drawdown_inv_multiplier', 4.0),
+                            step=0.25,
+                            min=1.0,
+                            max=10.0
+                        ).classes("w-48")
 
-                    # Advanced Settings
-                    with ui.expansion("🔧 Advanced Settings").classes("w-full mb-2"):
-                        with ui.row().classes("gap-4"):
-                            rolling_window = ui.number(
-                                label="Rolling Window (days)",
-                                value=config_data.get('rolling_window', 100),
-                                step=10,
-                                min=20,
-                                max=200
-                            ).classes("w-48")
+                # Advanced Settings
+                with ui.expansion("🔧 Advanced Settings").classes("w-full mb-2"):
+                    with ui.row().classes("gap-4"):
+                        rolling_window = ui.number(
+                            label="Rolling Window (days)",
+                            value=config_data.get('rolling_window', 100),
+                            step=10,
+                            min=20,
+                            max=200
+                        ).classes("w-48")
 
-                            fallback_day = ui.number(
-                                label="Fallback Day",
-                                value=config_data.get('fallback_day', 28),
-                                step=1,
-                                min=1,
-                                max=31
-                            ).classes("w-48")
+                        fallback_day = ui.number(
+                            label="Fallback Day",
+                            value=config_data.get('fallback_day', 28),
+                            step=1,
+                            min=1,
+                            max=31
+                        ).classes("w-48")
 
-                        with ui.row().classes("gap-4"):
-                            min_gap_days = ui.number(
-                                label="Min Investment Gap (days)",
-                                value=config_data.get('min_investment_gap_days', 5),
-                                step=1,
-                                min=1,
-                                max=30
-                            ).classes("w-48")
+                        min_gap_days = ui.number(
+                            label="Min Investment Gap (days)",
+                            value=config_data.get('min_investment_gap_days', 5),
+                            step=1,
+                            min=1,
+                            max=30
+                        ).classes("w-48")
 
-                            price_threshold = ui.number(
-                                label="Price Reduction Threshold (%)",
-                                value=config_data.get('price_reduction_threshold', 5),
-                                step=0.5,
-                                min=0,
-                                max=20
-                            ).classes("w-48")
+                        price_threshold = ui.number(
+                            label="Price Reduction Threshold (%)",
+                            value=config_data.get('price_reduction_threshold', 5),
+                            step=0.5,
+                            min=0,
+                            max=20
+                        ).classes("w-48")
 
-                    # Update config data when values change
-                    def update_config():
-                        configs_data[config_index] = {
-                            'fixed_investment': fixed_investment.value,
-                            'max_amount_in_a_month': max_amount.value,
-                            'force_remaining_investment': force_remaining.value,
-                            'minor_drawdown_threshold': minor_dd.value,
-                            'major_drawdown_threshold': major_dd.value,
-                            'extreme_drawdown_threshold': extreme_dd.value,
-                            'minor_drawdown_inv_multiplier': minor_mult.value,
-                            'major_drawdown_inv_multiplier': major_mult.value,
-                            'extreme_drawdown_inv_multiplier': extreme_mult.value,
-                            'rolling_window': int(rolling_window.value),
-                            'fallback_day': int(fallback_day.value),
-                            'min_investment_gap_days': int(min_gap_days.value),
-                            'price_reduction_threshold': price_threshold.value
-                        }
-
-                    # Bind update function to all inputs
-                    for input_field in [fixed_investment, max_amount, force_remaining, minor_dd, major_dd, extreme_dd,
-                                        minor_mult, major_mult, extreme_mult, rolling_window, fallback_day,
-                                        min_gap_days, price_threshold]:
-                        input_field.on('update:model-value', lambda: update_config())
-
-            def refresh_configs_display():
-                """Refresh the configs display"""
-                configs_container.clear()
-                with configs_container:
-                    for idx, config in enumerate(configs_data):
-                        create_config_card(config, idx)
-
-            # Initialize with default configurations
-            default_configs = [
-                {
-                    'fixed_investment': 5000,
-                    'max_amount_in_a_month': 18000,
-                    'force_remaining_investment': True,
-                    'minor_drawdown_threshold': -4.0,
-                    'major_drawdown_threshold': -10.0,
-                    'extreme_drawdown_threshold': -15.0,
-                    'minor_drawdown_inv_multiplier': 1.75,
-                    'major_drawdown_inv_multiplier': 3.0,
-                    'extreme_drawdown_inv_multiplier': 4.0,
-                    'rolling_window': 100,
-                    'fallback_day': 28,
-                    'min_investment_gap_days': 5,
-                    'price_reduction_threshold': 5.0
-                },
-                {
-                    'fixed_investment': 3000,
-                    'max_amount_in_a_month': 20000,
-                    'force_remaining_investment': True,
-                    'minor_drawdown_threshold': -5.0,
-                    'major_drawdown_threshold': -10.0,
-                    'extreme_drawdown_threshold': -15.0,
-                    'minor_drawdown_inv_multiplier': 2.0,
-                    'major_drawdown_inv_multiplier': 3.0,
-                    'extreme_drawdown_inv_multiplier': 4.0,
-                    'rolling_window': 100,
-                    'fallback_day': 28,
-                    'min_investment_gap_days': 5,
-                    'price_reduction_threshold': 4.0
-                }
-            ]
-
-            configs_data.extend(default_configs)
-
-            def add_new_config():
-                """Add a new configuration"""
-                new_config = {
-                    'fixed_investment': 5000,
-                    'max_amount_in_a_month': 18000,
-                    'force_remaining_investment': True,
-                    'minor_drawdown_threshold': -4.0,
-                    'major_drawdown_threshold': -10.0,
-                    'extreme_drawdown_threshold': -15.0,
-                    'minor_drawdown_inv_multiplier': 1.75,
-                    'major_drawdown_inv_multiplier': 3.0,
-                    'extreme_drawdown_inv_multiplier': 4.0,
-                    'rolling_window': 100,
-                    'fallback_day': 28,
-                    'min_investment_gap_days': 5,
-                    'price_reduction_threshold': 5.0
-                }
-                configs_data.append(new_config)
-                refresh_configs_display()
-                ui.notify(f"Configuration {len(configs_data)} added", type="positive")
-
-            def add_preset_config(preset_name: str):
-                """Add preset configuration"""
-                presets = {
-                    'Conservative': {
-                        'fixed_investment': 3000,
-                        'max_amount_in_a_month': 15000,
-                        'minor_drawdown_threshold': -3.0,
-                        'major_drawdown_threshold': -8.0,
-                        'extreme_drawdown_threshold': -12.0,
-                        'minor_drawdown_inv_multiplier': 1.5,
-                        'major_drawdown_inv_multiplier': 2.5,
-                        'extreme_drawdown_inv_multiplier': 3.5,
-                        'price_reduction_threshold': 3.0
-                    },
-                    'Aggressive': {
-                        'fixed_investment': 7000,
-                        'max_amount_in_a_month': 25000,
-                        'minor_drawdown_threshold': -5.0,
-                        'major_drawdown_threshold': -12.0,
-                        'extreme_drawdown_threshold': -18.0,
-                        'minor_drawdown_inv_multiplier': 2.0,
-                        'major_drawdown_inv_multiplier': 3.5,
-                        'extreme_drawdown_inv_multiplier': 5.0,
-                        'price_reduction_threshold': 6.0
+                # Update config data when values change
+                def update_config():
+                    configs_data[config_index] = {
+                        'fixed_investment': fixed_investment.value,
+                        'max_amount_in_a_month': max_amount.value,
+                        'force_remaining_investment': force_remaining.value,
+                        'minor_drawdown_threshold': minor_dd.value,
+                        'major_drawdown_threshold': major_dd.value,
+                        'extreme_drawdown_threshold': extreme_dd.value,
+                        'minor_drawdown_inv_multiplier': minor_mult.value,
+                        'major_drawdown_inv_multiplier': major_mult.value,
+                        'extreme_drawdown_inv_multiplier': extreme_mult.value,
+                        'rolling_window': int(rolling_window.value),
+                        'fallback_day': int(fallback_day.value),
+                        'min_investment_gap_days': int(min_gap_days.value),
+                        'price_reduction_threshold': price_threshold.value
                     }
-                }
 
-                if preset_name in presets:
-                    base_config = {
-                        'fixed_investment': 5000,
-                        'max_amount_in_a_month': 18000,
-                        'force_remaining_investment': True,
-                        'rolling_window': 100,
-                        'fallback_day': 28,
-                        'min_investment_gap_days': 5
-                    }
-                    base_config.update(presets[preset_name])
-                    configs_data.append(base_config)
-                    refresh_configs_display()
-                    ui.notify(f"{preset_name} configuration added", type="positive")
+                # Bind update function to all inputs
+                for input_field in [fixed_investment, max_amount, force_remaining, minor_dd, major_dd, extreme_dd,
+                                    minor_mult, major_mult, extreme_mult, rolling_window, fallback_day,
+                                    min_gap_days, price_threshold]:
+                    input_field.on('update:model-value', lambda: update_config())
 
-            # Configuration management buttons
-            with ui.row().classes("gap-2 mb-4"):
-                ui.button("➕ Add Configuration", on_click=add_new_config).classes("bg-green-500 text-white")
-                ui.button("🛡️ Add Conservative", on_click=lambda: add_preset_config('Conservative')).classes(
-                    "bg-blue-500 text-white")
-                ui.button("🚀 Add Aggressive", on_click=lambda: add_preset_config('Aggressive')).classes(
-                    "bg-red-500 text-white")
+        def refresh_configs_display():
+            """Refresh the configs display"""
+            configs_container.clear()
+            with configs_container:
+                for idx, config in enumerate(configs_data):
+                    create_config_card(config, idx)
 
-            # Display configurations
+        # Initialize with default configurations
+        default_configs = [
+            {
+                'fixed_investment': 5000,
+                'max_amount_in_a_month': 18000,
+                'force_remaining_investment': True,
+                'minor_drawdown_threshold': -4.0,
+                'major_drawdown_threshold': -10.0,
+                'extreme_drawdown_threshold': -15.0,
+                'minor_drawdown_inv_multiplier': 1.75,
+                'major_drawdown_inv_multiplier': 3.0,
+                'extreme_drawdown_inv_multiplier': 4.0,
+                'rolling_window': 100,
+                'fallback_day': 28,
+                'min_investment_gap_days': 5,
+                'price_reduction_threshold': 5.0
+            },
+            {
+                'fixed_investment': 3000,
+                'max_amount_in_a_month': 20000,
+                'force_remaining_investment': True,
+                'minor_drawdown_threshold': -5.0,
+                'major_drawdown_threshold': -10.0,
+                'extreme_drawdown_threshold': -15.0,
+                'minor_drawdown_inv_multiplier': 2.0,
+                'major_drawdown_inv_multiplier': 3.0,
+                'extreme_drawdown_inv_multiplier': 4.0,
+                'rolling_window': 100,
+                'fallback_day': 28,
+                'min_investment_gap_days': 5,
+                'price_reduction_threshold': 4.0
+            }
+        ]
+
+        configs_data.extend(default_configs)
+
+        def add_new_config():
+            """Add a new configuration"""
+            new_config = {
+                'fixed_investment': 5000,
+                'max_amount_in_a_month': 18000,
+                'force_remaining_investment': True,
+                'minor_drawdown_threshold': -4.0,
+                'major_drawdown_threshold': -10.0,
+                'extreme_drawdown_threshold': -15.0,
+                'minor_drawdown_inv_multiplier': 1.75,
+                'major_drawdown_inv_multiplier': 3.0,
+                'extreme_drawdown_inv_multiplier': 4.0,
+                'rolling_window': 100,
+                'fallback_day': 28,
+                'min_investment_gap_days': 5,
+                'price_reduction_threshold': 5.0
+            }
+            configs_data.append(new_config)
             refresh_configs_display()
+            ui.notify(f"Configuration {len(configs_data)} added", type="positive")
+
+        def add_preset_config(preset_name: str):
+            """Add preset configuration"""
+            presets = {
+                'Conservative': {
+                    'fixed_investment': 3000,
+                    'max_amount_in_a_month': 15000,
+                    'minor_drawdown_threshold': -3.0,
+                    'major_drawdown_threshold': -8.0,
+                    'extreme_drawdown_threshold': -12.0,
+                    'minor_drawdown_inv_multiplier': 1.5,
+                    'major_drawdown_inv_multiplier': 2.5,
+                    'extreme_drawdown_inv_multiplier': 3.5,
+                    'price_reduction_threshold': 3.0
+                },
+                'Aggressive': {
+                    'fixed_investment': 7000,
+                    'max_amount_in_a_month': 25000,
+                    'minor_drawdown_threshold': -5.0,
+                    'major_drawdown_threshold': -12.0,
+                    'extreme_drawdown_threshold': -18.0,
+                    'minor_drawdown_inv_multiplier': 2.0,
+                    'major_drawdown_inv_multiplier': 3.5,
+                    'extreme_drawdown_inv_multiplier': 5.0,
+                    'price_reduction_threshold': 6.0
+                }
+            }
+
+            if preset_name in presets:
+                base_config = {
+                    'fixed_investment': 5000,
+                    'max_amount_in_a_month': 18000,
+                    'force_remaining_investment': True,
+                    'rolling_window': 100,
+                    'fallback_day': 28,
+                    'min_investment_gap_days': 5
+                }
+                base_config.update(presets[preset_name])
+                configs_data.append(base_config)
+                refresh_configs_display()
+                ui.notify(f"{preset_name} configuration added", type="positive")
+
+        # Configuration management buttons
+        with ui.row().classes("gap-2 mb-4"):
+            ui.button("➕ Add Configuration", on_click=add_new_config).classes("bg-green-500 text-white")
+            ui.button("🛡️ Add Conservative", on_click=lambda: add_preset_config('Conservative')).classes(
+                "bg-blue-500 text-white")
+            ui.button("🚀 Add Aggressive", on_click=lambda: add_preset_config('Aggressive')).classes(
+                "bg-red-500 text-white")
+
+        # Display configurations
+        refresh_configs_display()
 
         # Results Section
         batch_results = ui.column().classes("w-full mt-4")
