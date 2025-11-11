@@ -1171,7 +1171,7 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker, po
                         with ui.column().classes("flex-1 gap-2"):
                             ui.label("Product Type").classes("text-sm font-medium theme-text-primary")
                             product_type = ui.select(
-                                options=['MIS', 'CNC'] if broker == 'Zerodha' else ['I', 'D'],
+                                options=['MIS', 'CNC', 'MTF'] if broker == 'Zerodha' else ['I', 'D', 'MTF'],
                                 value='CNC' if broker == 'Zerodha' else 'D'
                             ).classes('w-full')
 
@@ -1226,9 +1226,21 @@ async def render_regular_orders(fetch_api, user_storage, instruments, broker, po
                         with ui.column().classes("flex-1 gap-2"):
                             ui.label("Validity").classes("text-sm font-medium theme-text-primary")
                             validity = ui.select(
-                                options=['DAY', 'IOC'],
+                                options=['DAY', 'IOC', 'TTL'],
                                 value='DAY'
                             ).classes('w-full')
+
+                        if validity.value == 'TTL':
+                            with ui.column().classes("flex-1 gap-2"):
+                                ui.label("Time to Live").classes("text-sm font-medium theme-text-primary")
+                                time_to_live = ui.number(
+                                    value=0,
+                                    min=0,
+                                    step=1,
+                                    format='%d'
+                                ).classes('w-full')
+                                time_to_live.on_value_change(lambda e: validation_state.update(
+                                    {'time_to_live': bool(_safe_int(e.value) >= 0)}))
 
                         with ui.column().classes('flex-1 gap-2'):
                             ui.label("AMO").classes("text-sm font-medium theme-text-primary")
@@ -1985,7 +1997,7 @@ async def render_gtt_orders(fetch_api, user_storage, instruments, broker, positi
                         with ui.column().classes("flex-1 gap-2"):
                             ui.label("Product Type").classes("text-sm font-medium theme-text-primary")
                             product_type = ui.select(
-                                options=['MIS', 'CNC'] if broker == 'Zerodha' else ['I', 'D'],
+                                options=['MIS', 'CNC', 'MTF'] if broker == 'Zerodha' else ['I', 'D', 'MTF'],
                                 value='CNC' if broker == 'Zerodha' else 'D'
                             ).classes('w-full')
 
@@ -2714,7 +2726,7 @@ async def render_auto_orders(fetch_api, user_storage, instruments, broker, posit
                 with ui.column().classes("flex-1 gap-2"):
                     ui.label("Product Type").classes("text-sm font-medium text-gray-300")
                     product_type = ui.select(
-                        options=['MIS', 'CNC'] if broker == 'Zerodha' else ['I', 'D'],
+                        options=['MIS', 'CNC', 'MTF'] if broker == 'Zerodha' else ['I', 'D', 'MTF'],
                         value='CNC' if broker == 'Zerodha' else 'D'
                     ).classes('w-full')
 

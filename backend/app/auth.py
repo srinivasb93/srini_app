@@ -21,7 +21,10 @@ logger = logging.getLogger(__name__)
 # JWT Configuration
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secure-jwt-secret-key")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+# Increased to 8 hours for better user experience
+# Can be configured via environment variable JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "480"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", "30"))
 
 # Password Hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -33,6 +36,8 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 class Token(BaseModel):
     access_token: str
     token_type: str
+    refresh_token: Optional[str] = None
+    expires_in: Optional[int] = None  # seconds until expiration
 
 # User Manager
 class UserManager:
@@ -71,12 +76,20 @@ class UserManager:
             expire = datetime.utcnow() + expires_delta
         else:
             expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        to_encode.update({"exp": expire})
+        to_encode.update({"exp": expire, "type": "access"})
         encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
         return encoded_jwt
 
     @staticmethod
-    def verify_token(token: str) -> Optional[str]:
+    def create_refresh_token(data: dict):
+        to_encode = data.copy()
+        expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+        to_encode.update({"exp": expire, "type": "refresh"})
+        encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+        return encoded_jwt
+
+    @staticmethod
+    def verify_token(token: str, token_type: str = "access") -> Optional[str]:
         credentials_exception = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
@@ -85,10 +98,18 @@ class UserManager:
         try:
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
             user_id: str = payload.get("sub")
+            token_type_in_payload: str = payload.get("type")
+            
+            # Verify token type matches expected type
+            if token_type_in_payload != token_type:
+                logger.warning(f"Token type mismatch. Expected: {token_type}, Got: {token_type_in_payload}")
+                raise credentials_exception
+                
             if user_id is None:
                 raise credentials_exception
             return user_id
-        except JWTError:
+        except JWTError as e:
+            logger.warning(f"Token verification failed: {str(e)}")
             raise credentials_exception
 
     @staticmethod

@@ -301,25 +301,6 @@ async def lifespan(app: FastAPI):
         logger.info("Initializing database system...")
         await init_databases()
         logger.info("Databases initialized successfully")
-        # One-time, idempotent schema adjustments for GTT
-        try:
-            session_factory = db_manager.get_session_factory('trading_db')
-            if session_factory:
-                async with session_factory() as db:
-                    try:
-                        await db.execute(text("ALTER TABLE gtt_orders ADD COLUMN IF NOT EXISTS gtt_type TEXT"))
-                    except Exception as e:
-                        logger.debug(f"gtt_type migration note: {e}")
-                    try:
-                        await db.execute(text("ALTER TABLE gtt_orders ADD COLUMN IF NOT EXISTS rules JSON"))
-                    except Exception as e:
-                        logger.debug(f"rules migration note: {e}")
-                    try:
-                        await db.commit()
-                    except Exception as e:
-                        logger.warning(f"Schema migration commit warning: {e}")
-        except Exception as mig_err:
-            logger.warning(f"Non-fatal schema migration issue: {mig_err}")
 
         # Step 2: Initialize services
         logger.info("Initializing services...")
@@ -860,7 +841,7 @@ async def register(user: UserCreate, db: AsyncSession = Depends(get_db)):
 
 @app.post("/auth/login", tags=["auth"])
 async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
-    """User login"""
+    """User login with access and refresh tokens"""
     # Verify user credentials
     result = await db.execute(select(User).filter(User.email == form_data.username))
     user = result.scalars().first()
@@ -874,16 +855,54 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSessi
     except TokenExpiredError:
         logger.info(f"API tokens expired for user {user.user_id}")
 
-    # Create access token
-    token = UserManager.create_access_token(data={"sub": user.user_id})
+    # Create access and refresh tokens
+    access_token = UserManager.create_access_token(data={"sub": user.user_id})
+    refresh_token = UserManager.create_refresh_token(data={"sub": user.user_id})
 
     logger.info(f"User logged in: {user.email}")
     return {
-        "access_token": token,
+        "access_token": access_token,
+        "refresh_token": refresh_token,
         "token_type": "bearer",
-        "user_id": user.user_id
+        "user_id": user.user_id,
+        "expires_in": 480 * 60  # 8 hours in seconds
     }
 
+
+@app.post("/auth/refresh", tags=["auth"])
+async def refresh_token(refresh_token: str, db: AsyncSession = Depends(get_db)):
+    """
+    Refresh access token using refresh token.
+    
+    This endpoint allows users to obtain a new access token without re-entering credentials.
+    The refresh token must be valid and not expired.
+    """
+    try:
+        # Verify refresh token
+        user_id = UserManager.verify_token(refresh_token, token_type="refresh")
+        
+        # Verify user still exists
+        result = await db.execute(select(User).filter(User.user_id == user_id))
+        user = result.scalars().first()
+        
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        
+        # Create new access token
+        new_access_token = UserManager.create_access_token(data={"sub": user_id})
+        
+        logger.info(f"Access token refreshed for user: {user.email}")
+        return {
+            "access_token": new_access_token,
+            "token_type": "bearer",
+            "user_id": user_id,
+            "expires_in": 480 * 60  # 8 hours in seconds
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Token refresh error: {str(e)}")
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
 
 @app.post("/auth/upstox", tags=["auth"])
 async def auth_upstox(auth_code: str, user_id: str = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -1085,7 +1104,12 @@ async def place_new_order(order: PlaceOrderRequest, user_id: str = Depends(get_c
     if not api:
         raise HTTPException(status_code=400, detail=f"{order.broker} API not initialized")
 
-    app.state.risk_manager = RiskManager()
+    if not hasattr(app.state, 'risk_manager'):
+        app.state.risk_manager = RiskManager()
+        logger.debug(f"Risk manager initialized for user {user_id}")
+    else:
+        logger.debug(f"Risk manager already initialized for user {user_id}")
+
     logger.debug(f"Placing order for user {user_id} with broker {order.broker}: {order.dict()}")
     # CRITICAL SECURITY FIX: Add comprehensive risk validation for all manual orders
     if hasattr(app.state, 'risk_manager'):
@@ -1950,6 +1974,7 @@ async def modify_gtt_order(broker: str, gtt_id: str, order: GTTOrderRequest, use
             limit_price=order.limit_price,
             last_price=order.last_price,
             quantity=order.quantity,
+            transaction_type=order.transaction_type,
             second_trigger_price=order.second_trigger_price,
             second_limit_price=order.second_limit_price,
             rules=order.rules,  # Pass rules for Upstox GTT orders
@@ -4088,7 +4113,7 @@ if __name__ == "__main__":
             trading_symbol='SHRIRAMFIN',
             instrument_token="NSE_EQ|INE721A01047",
             transaction_type="BUY",
-            quantity=35,
+            quantity=1,
             order_type="LIMIT",
             product_type="CNC",
             validity="DAY",
@@ -4096,7 +4121,7 @@ if __name__ == "__main__":
             trigger_price=0.0,
             stop_loss=662,
             target=692,
-            is_trailing_stop_loss=True,
+            is_trailing_stop_loss=False,
             is_amo=False,
             trailing_stop_loss_percent=0,
             trail_start_target_percent=0,

@@ -58,6 +58,11 @@ class Order(Base):
     trailing_stop_triggered_at = Column(DateTime, nullable=True)
     stop_loss_triggered_at = Column(DateTime, nullable=True)
     exit_triggered_at = Column(DateTime, nullable=True)
+    # GTT tracking columns (for automatic stop loss/target execution)
+    gtt_order_id = Column(String, nullable=True)  # ID of GTT order placed for stop loss/target
+    gtt_placement_attempted = Column(Boolean, default=False)  # Whether GTT placement was attempted
+    gtt_placement_error = Column(Text, nullable=True)  # Error message if GTT placement failed
+    gtt_placement_timestamp = Column(DateTime, nullable=True)  # When GTT placement was attempted
 
 class SIPActualTrade(Base):
     __tablename__ = "sip_actual_trades"

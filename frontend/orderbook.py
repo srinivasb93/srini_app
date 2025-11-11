@@ -1297,40 +1297,279 @@ async def render_gtt_orders(fetch_api, user_storage, broker):
                 return
 
             # Initial form values
-            trigger_price_val = full_data.get('trigger_price') or 0.0
-            limit_price_val = full_data.get('limit_price') or trigger_price_val
+            rules_val = full_data.get('rules')
             last_price_val = full_data.get('last_price') or 0.0
             quantity_val = full_data.get('quantity') or 1
-            trigger_type_val = full_data.get('trigger_type') or "single"
-            rules_val = full_data.get('rules')
+            raw_trigger_type = full_data.get('trigger_type') or "single"
+            transaction_type_val = full_data.get('transaction_type') or "BUY"
+            
+            # Handle Upstox orders: extract price values from rules if price fields are None
+            if broker == "Upstox" and rules_val:
+                # Upstox stores prices in rules, not in separate fields
+                # Support 3 trigger values: ENTRY, TARGET, STOPLOSS
+                entry_price_val = 0.0
+                target_price_val = 0.0
+                stoploss_price_val = 0.0
+                entry_trigger_type_val = "ABOVE"
+                target_trigger_type_val = "IMMEDIATE"
+                stoploss_trigger_type_val = "IMMEDIATE"
+                
+                # Extract prices from rules
+                for rule in rules_val:
+                    strategy = rule.get('strategy', '').upper()
+                    trigger_price = rule.get('trigger_price', 0.0)
+                    trigger_type_val = rule.get('trigger_type', 'ABOVE')
+                    if strategy == 'ENTRY':
+                        entry_price_val = trigger_price
+                        entry_trigger_type_val = trigger_type_val
+                    elif strategy == 'TARGET':
+                        target_price_val = trigger_price
+                        target_trigger_type_val = trigger_type_val
+                    elif strategy == 'STOPLOSS':
+                        stoploss_price_val = trigger_price
+                        stoploss_trigger_type_val = trigger_type_val
+                
+                # For compatibility with 2-field UI
+                trigger_price_val = entry_price_val
+                limit_price_val = entry_price_val
+                second_trigger_price_val = target_price_val or stoploss_price_val
+                second_limit_price_val = target_price_val or stoploss_price_val
+            else:
+                # Zerodha or Upstox without rules: use direct price fields
+                trigger_price_val = full_data.get('trigger_price') or 0.0
+                limit_price_val = full_data.get('limit_price') or trigger_price_val
+                second_trigger_price_val = full_data.get('second_trigger_price') or trigger_price_val
+                second_limit_price_val = full_data.get('second_limit_price') or trigger_price_val
+                entry_price_val = trigger_price_val
+                target_price_val = 0.0
+                stoploss_price_val = 0.0
+                entry_trigger_type_val = "ABOVE"
+                target_trigger_type_val = "IMMEDIATE"
+                stoploss_trigger_type_val = "IMMEDIATE"
+            
+            # Normalize trigger type for UI (handle both Zerodha and Upstox formats)
+            # Zerodha: "single", "two-leg"
+            # Upstox: "SINGLE", "OCO" / "MULTIPLE"
+            trigger_type_normalized = raw_trigger_type.lower()
+            if trigger_type_normalized in ["oco", "multiple"]:
+                trigger_type_val = "two-leg"
+            else:
+                trigger_type_val = "single"
 
             # Dialog UI
             def create_modify_dialog():
-                with ui.dialog() as dialog, ui.card().classes("w-full max-w-3xl"):
-                    ui.label(f"Modify GTT Order - {full_data.get('trading_symbol', 'Unknown')}")
+                with ui.dialog() as dialog, ui.card().classes("w-full max-w-4xl"):
+                    ui.label(f"Modify GTT Order - {full_data.get('trading_symbol', 'Unknown')} ({broker})").\
+                        classes("text-xl font-bold mb-4")
 
                     with ui.card_section():
-                        with ui.row().classes("gap-3"):
-                            trig = ui.number("Trigger Price", value=trigger_price_val).classes("w-40")
-                            lim = ui.number("Limit Price", value=limit_price_val).classes("w-40")
-                            qty = ui.number("Quantity", value=quantity_val).classes("w-32")
+                        # For Upstox MULTIPLE orders with 3 rules, show specialized UI
+                        if broker == "Upstox" and rules_val and len(rules_val) == 3:
+                            ui.label("Upstox GTT Rules (3-Leg Order)").classes("text-sm font-semibold mb-2 text-blue-400")
+                            
+                            # ENTRY Rule
+                            with ui.column().classes("w-full gap-2 p-3 bg-green-900/20 border border-green-500/30 rounded-lg mb-2"):
+                                ui.label("ENTRY Rule").classes("text-xs font-semibold text-green-400")
+                                with ui.row().classes("gap-3"):
+                                    entry_price_input = ui.number("Entry Trigger Price", value=entry_price_val).classes("flex-1")
+                                    entry_trigger_type_select = ui.select(
+                                        options=["ABOVE", "BELOW", "IMMEDIATE"],
+                                        value=entry_trigger_type_val,
+                                        label="Trigger Type"
+                                    ).classes("w-32")
+                            
+                            # TARGET Rule
+                            with ui.column().classes("w-full gap-2 p-3 bg-blue-900/20 border border-blue-500/30 rounded-lg mb-2"):
+                                ui.label("TARGET Rule").classes("text-xs font-semibold text-blue-400")
+                                with ui.row().classes("gap-3"):
+                                    target_price_input = ui.number("Target Trigger Price", value=target_price_val).classes("flex-1")
+                                    target_trigger_type_select = ui.select(
+                                        options=["ABOVE", "BELOW", "IMMEDIATE"],
+                                        value=target_trigger_type_val,
+                                        label="Trigger Type"
+                                    ).classes("w-32")
+                            
+                            # STOPLOSS Rule
+                            with ui.column().classes("w-full gap-2 p-3 bg-red-900/20 border border-red-500/30 rounded-lg mb-2"):
+                                ui.label("STOPLOSS Rule").classes("text-xs font-semibold text-red-400")
+                                with ui.row().classes("gap-3"):
+                                    stoploss_price_input = ui.number("Stop Loss Trigger Price", value=stoploss_price_val).classes("flex-1")
+                                    stoploss_trigger_type_select = ui.select(
+                                        options=["ABOVE", "BELOW", "IMMEDIATE"],
+                                        value=stoploss_trigger_type_val,
+                                        label="Trigger Type"
+                                    ).classes("w-32")
+                            
+                            # Set dummy values for compatibility with existing code
+                            trig = entry_price_input
+                            lim = entry_price_input
+                            trig2 = target_price_input
+                            lim2 = target_price_input
+                        else:
+                            # Standard 2-field UI for Zerodha or Upstox with <=2 rules
+                            with ui.row().classes("gap-3"):
+                                trig = ui.number("Trigger Price", value=trigger_price_val).classes("w-40")
+                                lim = ui.number("Limit Price", value=limit_price_val).classes("w-40")
+                                trig2 = ui.number("Second Trigger Price", value=second_trigger_price_val).classes("w-40")
+                                lim2 = ui.number("Second Limit Price", value=second_limit_price_val).classes("w-40")
+                                
+                                # Show/hide second trigger fields based on trigger type
+                                is_two_leg = trigger_type_val == "two-leg"
+                                trig2.visible = is_two_leg
+                                lim2.visible = is_two_leg
+                            
+                            # Create dummy fields for 3-rule logic
+                            entry_price_input = trig
+                            target_price_input = trig2
+                            stoploss_price_input = None
+                            entry_trigger_type_select = None
+                            target_trigger_type_select = None
+                            stoploss_trigger_type_select = None
+                            
                         with ui.row().classes("gap-3 mt-2"):
+                            qty = ui.number("Quantity", value=quantity_val).classes("w-32")
                             lst = ui.number("Last Price", value=last_price_val).classes("w-40")
-                            ttype = ui.select(["single", "two_leg"], value=trigger_type_val, label="Trigger Type").classes("w-40")
+                            
+                            # Disable trigger type selector for Upstox 3-rule orders
+                            is_upstox_3_rule = broker == "Upstox" and rules_val and len(rules_val) == 3
+                            ttype = ui.select(["single", "two-leg"], value=trigger_type_val, label="Trigger Type").classes("w-40")
+                            if is_upstox_3_rule:
+                                ttype.disable()
+                                ttype.tooltip("Cannot change trigger type for 3-rule Upstox GTT orders")
+                            
+                            transaction_type = ui.select(["BUY", "SELL"], value=transaction_type_val, label="Transaction Type").classes("w-40")
+                            
+                            # Update visibility when trigger type changes (only for non-3-rule orders)
+                            if not is_upstox_3_rule:
+                                def on_trigger_type_change():
+                                    is_two_leg = ttype.value == "two-leg"
+                                    trig2.visible = is_two_leg
+                                    lim2.visible = is_two_leg
+                                    trig2.update()
+                                    lim2.update()
+                                
+                                ttype.on_value_change(lambda: on_trigger_type_change())
+
 
                     async def submit_modify():
+                        current_trigger_type = ttype.value or trigger_type_val
+                        
+                        # Build rules array for Upstox based on price fields FIRST
+                        # Then determine broker_trigger_type based on actual rule count
+                        updated_rules = rules_val
+                        if broker == "Upstox":
+                            updated_rules = []
+                            
+                            # Check if we're using 3-rule UI (stoploss_price_input exists and is not None)
+                            if stoploss_price_input is not None:
+                                # 3-Rule UI: Build rules from dedicated inputs
+                                if entry_price_input.value and entry_price_input.value > 0:
+                                    updated_rules.append({
+                                        "strategy": "ENTRY",
+                                        "trigger_type": entry_trigger_type_select.value if entry_trigger_type_select else "ABOVE",
+                                        "trigger_price": float(entry_price_input.value)
+                                    })
+                                
+                                if target_price_input.value and target_price_input.value > 0:
+                                    updated_rules.append({
+                                        "strategy": "TARGET",
+                                        "trigger_type": target_trigger_type_select.value if target_trigger_type_select else "IMMEDIATE",
+                                        "trigger_price": float(target_price_input.value)
+                                    })
+                                
+                                if stoploss_price_input.value and stoploss_price_input.value > 0:
+                                    updated_rules.append({
+                                        "strategy": "STOPLOSS",
+                                        "trigger_type": stoploss_trigger_type_select.value if stoploss_trigger_type_select else "IMMEDIATE",
+                                        "trigger_price": float(stoploss_price_input.value)
+                                    })
+                            else:
+                                # 2-Field UI: Preserve original rules and update prices
+                                if rules_val:
+                                    for rule in rules_val:
+                                        strategy = rule.get('strategy', '').upper()
+                                        trigger_type_rule = rule.get('trigger_type', 'ABOVE')
+                                        
+                                        if strategy == 'ENTRY':
+                                            # Update ENTRY price from first trigger field
+                                            updated_rules.append({
+                                                "strategy": "ENTRY",
+                                                "trigger_type": trigger_type_rule,
+                                                "trigger_price": float(trig.value or 0)
+                                            })
+                                        elif strategy == 'TARGET' and current_trigger_type == "two-leg":
+                                            # Update TARGET price from second trigger field
+                                            updated_rules.append({
+                                                "strategy": "TARGET",
+                                                "trigger_type": trigger_type_rule,
+                                                "trigger_price": float(trig2.value or 0)
+                                            })
+                                        elif strategy == 'STOPLOSS':
+                                            # Keep STOPLOSS rule unchanged or update if no TARGET exists
+                                            if current_trigger_type == "two-leg" and not any(r.get('strategy') == 'TARGET' for r in rules_val):
+                                                updated_rules.append({
+                                                    "strategy": "STOPLOSS",
+                                                    "trigger_type": trigger_type_rule,
+                                                    "trigger_price": float(trig2.value or 0)
+                                                })
+                                            else:
+                                                # Keep original STOPLOSS
+                                                updated_rules.append(rule)
+                                else:
+                                    # No existing rules, create new ones
+                                    if trig.value and trig.value > 0:
+                                        updated_rules.append({
+                                            "strategy": "ENTRY",
+                                            "trigger_type": "ABOVE",
+                                            "trigger_price": float(trig.value)
+                                        })
+                                    
+                                    if current_trigger_type == "two-leg" and trig2.value and trig2.value > 0:
+                                        entry_price = float(trig.value or 0)
+                                        second_price = float(trig2.value or 0)
+                                        if second_price > entry_price:
+                                            updated_rules.append({
+                                                "strategy": "TARGET",
+                                                "trigger_type": "IMMEDIATE",
+                                                "trigger_price": second_price
+                                            })
+                                        else:
+                                            updated_rules.append({
+                                                "strategy": "STOPLOSS",
+                                                "trigger_type": "IMMEDIATE",
+                                                "trigger_price": second_price
+                                            })
+                        
+                        # Determine broker_trigger_type based on actual rule count for Upstox
+                        # Zerodha: "single", "two-leg"
+                        # Upstox: "SINGLE" (1 rule), "MULTIPLE" (2-3 rules)
+                        if broker == "Upstox":
+                            # Determine type based on number of rules
+                            if updated_rules and len(updated_rules) == 1:
+                                broker_trigger_type = "SINGLE"
+                            elif updated_rules and len(updated_rules) >= 2:
+                                broker_trigger_type = "MULTIPLE"
+                            else:
+                                # Fallback: map from UI trigger type
+                                if current_trigger_type == "two-leg":
+                                    broker_trigger_type = "MULTIPLE"
+                                else:
+                                    broker_trigger_type = "SINGLE"
+                        else:  # Zerodha
+                            broker_trigger_type = current_trigger_type
+                        
                         data = {
                             "instrument_token": full_data.get('instrument_token', ''),
                             "trading_symbol": full_data.get('trading_symbol', ''),
-                            "transaction_type": full_data.get('transaction_type', 'BUY'),
+                            "transaction_type": transaction_type.value or transaction_type_val,
                             "quantity": int(qty.value or quantity_val),
-                            "trigger_type": ttype.value or trigger_type_val,
+                            "trigger_type": broker_trigger_type,
                             "trigger_price": float(trig.value or 0.0),
                             "limit_price": float(lim.value or 0.0),
                             "last_price": float(lst.value or 0.0),
-                            "second_trigger_price": full_data.get('second_trigger_price'),
-                            "second_limit_price": full_data.get('second_limit_price'),
-                            "rules": rules_val,
+                            "second_trigger_price": float(trig2.value or 0.0) if current_trigger_type == "two-leg" else 0.0,
+                            "second_limit_price": float(lim2.value or 0.0) if current_trigger_type == "two-leg" else 0.0,
+                            "rules": updated_rules,
                             "broker": broker,
                         }
                         resp = await fetch_api(f"/gtt-orders/{broker}/{gtt_id}", method="PUT", data=data)

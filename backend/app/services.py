@@ -26,6 +26,7 @@ from fastapi import Depends, HTTPException
 from kiteconnect import KiteConnect
 import upstox_client
 from backtesting import Backtest
+from backend.app.market_hours_manager import MarketHoursManager
 from common_utils.backtesting_adapter import (
     RSIStrategy, MACDStrategy, BollingerBandsStrategy,
     prepare_data_for_backtesting, convert_backtesting_result
@@ -98,6 +99,7 @@ class OrderMonitor:
         self.running: bool = True
         self.polling_interval: int = 60
         self.monitor_tasks: List[asyncio.Task] = []
+        self.market_hours_manager = MarketHoursManager()
         logger.info("OrderMonitor initialized")
 
     async def run_scheduled_tasks(self, user_apis: Dict[str, Dict[str, Any]]):
@@ -128,7 +130,7 @@ class OrderMonitor:
 
                                         if upstox_api or zerodha_api:
                                             logger.info(f"Sync Order status for pending orders for user {user_id}")
-                                            await self.sync_order_statuses(upstox_api, zerodha_api, db, user_id)
+                                            await self.sync_order_statuses(upstox_api, zerodha_api, db, user_id, user_apis=apis)
 
                                     except Exception as user_error:
                                         logger.error(f"Error processing user {user_id}: {user_error}")
@@ -234,9 +236,193 @@ class OrderMonitor:
             
         return active_apis
 
-    async def monitor_trailing_stop_loss_orders(self, active_user_apis: Dict[str, Dict[str, Any]], db: AsyncSession):
-        """Monitor and update trailing stop loss orders every 5 minutes"""
+    async def _place_gtt_for_stop_loss_target(self, order_row, user_apis: Dict[str, Any], db: AsyncSession, order_manager):
+        """
+        ENHANCED: Automatically place GTT orders for stop loss and target to avoid slippage.
+        GTT orders execute at the specified price, eliminating the gap between monitoring intervals.
+        """
         try:
+            stop_loss = float(order_row.stop_loss or 0)
+            target = float(order_row.target or 0)
+            
+            # Skip if no stop loss or target is set
+            if stop_loss <= 0 and target <= 0:
+                return
+            
+            trading_symbol = order_row.trading_symbol
+            instrument_token = order_row.instrument_token
+            transaction_type = order_row.transaction_type
+            quantity = order_row.quantity
+            entry_price = float(order_row.price) if order_row.price else 0.0
+            
+            # Get appropriate API for placing GTT order
+            gtt_api = user_apis.get("upstox", {}).get("order") if order_row.broker == "Upstox" else user_apis.get("zerodha", {}).get("kite")
+            
+            if not gtt_api:
+                logger.warning(f"No GTT API available for {order_row.broker}, order {order_row.order_id}")
+                return
+            
+            # Get current market price for GTT last_price requirement
+            market_data_api = user_apis.get("upstox", {}).get("market_data_v3") if order_row.broker == "Upstox" else user_apis.get("zerodha", {}).get("kite")
+            ltp_data = await get_ltp(market_data_api, None, [instrument_token], db)
+            last_price = ltp_data[0].last_price if ltp_data else entry_price
+            
+            # Determine if we need OCO (One-Cancels-Other) or single GTT
+            if stop_loss > 0 and target > 0:
+                # Place OCO GTT order (both stop loss and target)
+                logger.info(f"Placing OCO GTT for {trading_symbol}: SL={stop_loss}, Target={target}")
+                
+                # Exit transaction is opposite of entry
+                exit_transaction_type = "SELL" if transaction_type == "BUY" else "BUY"
+                
+                # Rules for Upstox GTT
+                rules = [
+                    {
+                        "strategy": "STOPLOSS",
+                        "trigger_type": "IMMEDIATE" ,
+                        "trigger_price": stop_loss
+                    },
+                    {
+                        "strategy": "TARGET",
+                        "trigger_type": "IMMEDIATE",
+                        "trigger_price": target
+                    }
+                ]
+                
+                gtt_response = await order_manager.place_gtt_order(
+                    api=gtt_api,
+                    instrument_token=instrument_token,
+                    trading_symbol=trading_symbol,
+                    transaction_type=exit_transaction_type,
+                    quantity=quantity,
+                    trigger_type="OCO",
+                    trigger_price=stop_loss,
+                    limit_price=stop_loss,
+                    last_price=last_price,
+                    second_trigger_price=target,
+                    second_limit_price=target,
+                    rules=rules,
+                    broker=order_row.broker,
+                    db=db,
+                    user_id=order_row.user_id
+                )
+                
+                # Link GTT order to original order
+                if gtt_response and gtt_response.get("status") == "success":
+                    gtt_id = gtt_response.get("gtt_id")
+                    update_query = text("""
+                        UPDATE orders 
+                        SET gtt_order_id = :gtt_id, 
+                            remarks = CONCAT(COALESCE(remarks, ''), ' | GTT Order: ', :gtt_id)
+                        WHERE order_id = :order_id
+                    """)
+                    await db.execute(update_query, {
+                        "gtt_id": gtt_id,
+                        "order_id": order_row.order_id
+                    })
+                    logger.info(f"Successfully placed OCO GTT {gtt_id} for order {order_row.order_id}")
+                    
+            elif stop_loss > 0:
+                # Place single GTT for stop loss only
+                logger.info(f"Placing Stop Loss GTT for {trading_symbol} at {stop_loss}")
+                exit_transaction_type = "SELL" if transaction_type == "BUY" else "BUY"
+                
+                rules = [{
+                    "strategy": "STOPLOSS",
+                    "trigger_type": "IMMEDIATE",
+                    "trigger_price": stop_loss
+                }]
+                
+                gtt_response = await order_manager.place_gtt_order(
+                    api=gtt_api,
+                    instrument_token=instrument_token,
+                    trading_symbol=trading_symbol,
+                    transaction_type=exit_transaction_type,
+                    quantity=quantity,
+                    trigger_type="single",
+                    trigger_price=stop_loss,
+                    limit_price=stop_loss,
+                    last_price=last_price,
+                    rules=rules,
+                    broker=order_row.broker,
+                    db=db,
+                    user_id=order_row.user_id
+                )
+                
+                if gtt_response and gtt_response.get("status") == "success":
+                    gtt_id = gtt_response.get("gtt_id")
+                    update_query = text("""
+                        UPDATE orders 
+                        SET gtt_order_id = :gtt_id,
+                            remarks = CONCAT(COALESCE(remarks, ''), ' | GTT SL: ', :gtt_id)
+                        WHERE order_id = :order_id
+                    """)
+                    await db.execute(update_query, {
+                        "gtt_id": gtt_id,
+                        "order_id": order_row.order_id
+                    })
+                    logger.info(f"Successfully placed Stop Loss GTT {gtt_id} for order {order_row.order_id}")
+                    
+            elif target > 0:
+                # Place single GTT for target only
+                logger.info(f"Placing Target GTT for {trading_symbol} at {target}")
+                exit_transaction_type = "SELL" if transaction_type == "BUY" else "BUY"
+                
+                rules = [{
+                    "strategy": "TARGET",
+                    "trigger_type": "IMMEDIATE",
+                    "trigger_price": target
+                }]
+                
+                gtt_response = await order_manager.place_gtt_order(
+                    api=gtt_api,
+                    instrument_token=instrument_token,
+                    trading_symbol=trading_symbol,
+                    transaction_type=exit_transaction_type,
+                    quantity=quantity,
+                    trigger_type="single",
+                    trigger_price=target,
+                    limit_price=target,
+                    last_price=last_price,
+                    rules=rules,
+                    broker=order_row.broker,
+                    db=db,
+                    user_id=order_row.user_id
+                )
+                
+                if gtt_response and gtt_response.get("status") == "success":
+                    gtt_id = gtt_response.get("gtt_id")
+                    update_query = text("""
+                        UPDATE orders 
+                        SET gtt_order_id = :gtt_id,
+                            remarks = CONCAT(COALESCE(remarks, ''), ' | GTT Target: ', :gtt_id)
+                        WHERE order_id = :order_id
+                    """)
+                    await db.execute(update_query, {
+                        "gtt_id": gtt_id,
+                        "order_id": order_row.order_id
+                    })
+                    logger.info(f"Successfully placed Target GTT {gtt_id} for order {order_row.order_id}")
+                    
+        except Exception as e:
+            logger.error(f"Error placing GTT for stop loss/target for order {order_row.order_id}: {e}")
+
+    async def monitor_trailing_stop_loss_orders(self, active_user_apis: Dict[str, Dict[str, Any]], db: AsyncSession):
+        """
+        Monitor and update trailing stop loss orders every 5 minutes.
+        
+        IMPORTANT LIMITATIONS:
+        1. Manual monitoring has a time gap (currently 5 minutes) which can cause slippage
+        2. If price gaps through stop loss between checks, exit happens at worse price
+        3. For precise stop loss/target execution, GTT orders are recommended (placed automatically on order execution)
+        4. Only monitors during market hours (9:15 AM - 3:30 PM on trading days)
+        """
+        try:
+            # CRITICAL FIX: Only monitor during market hours on trading days
+            if not self.market_hours_manager.is_market_hours():
+                logger.debug("Market is closed. Skipping order monitoring.")
+                return
+            
             user_ids = tuple(active_user_apis.keys()) if active_user_apis else ()
             if not user_ids:
                 logger.debug("No active user APIs for trailing stop loss monitoring")
@@ -521,7 +707,8 @@ class OrderMonitor:
             await db.rollback()
 
     async def sync_order_statuses(self, upstox_api: Optional[Any], zerodha_api: Optional[Any],
-                                  db: AsyncSession, user_id: Optional[str] = None) -> bool:
+                                  db: AsyncSession, user_id: Optional[str] = None, 
+                                  user_apis: Optional[Dict[str, Any]] = None) -> bool:
         """Sync order statuses and GTT orders - ENHANCED: Now syncs both regular orders and GTT orders for users with active APIs"""
         try:
             if not (upstox_api or zerodha_api):
@@ -632,6 +819,25 @@ class OrderMonitor:
                             logger.info(f"Order {order.order_id} failure reason: {failure_reason}")
                         if broker_message:
                             logger.debug(f"Order {order.order_id} broker message: {broker_message}")
+
+                        # CRITICAL ENHANCEMENT: Auto-place GTT orders for stop loss/target when order is executed
+                        # This eliminates slippage from monitoring interval gaps
+                        if order.status in ["complete", "filled"] and old_status not in ["complete", "filled"]:
+                            # Order just got executed, check if it needs GTT for stop loss/target
+                            if (hasattr(order, 'stop_loss') and order.stop_loss) or (hasattr(order, 'target') and order.target):
+                                # Don't place GTT for trailing stop loss orders (they need dynamic monitoring)
+                                if not (hasattr(order, 'is_trailing_stop_loss') and order.is_trailing_stop_loss):
+                                    logger.info(f"Order {order.order_id} executed, automatically placing GTT for stop loss/target")
+                                    try:
+                                        # Only place GTT if we have the full user_apis structure
+                                        if user_apis:
+                                            # Import order_manager from global scope
+                                            from backend.app.main import order_manager
+                                            await self._place_gtt_for_stop_loss_target(order, user_apis, db, order_manager)
+                                        else:
+                                            logger.warning(f"No user_apis structure available to place GTT for order {order.order_id}")
+                                    except Exception as gtt_error:
+                                        logger.error(f"Error placing automatic GTT for order {order.order_id}: {gtt_error}")
 
                         # ===== SYNC SIP ACTUAL TRADES =====
                         # Update corresponding sip_actual_trades records (only if they exist)
@@ -1229,14 +1435,6 @@ class OrderManager:
                     raise ValueError("Instrument key is required for Upstox GTT")
                 if quantity <= 0:
                     raise ValueError("Quantity must be greater than 0 for GTT")
-                # When rules are provided, do not mandate top-level trigger_price
-                if not provided_rules:
-                    if not trigger_price or trigger_price <= 0:
-                        raise ValueError("Trigger price must be greater than 0 for GTT")
-                # For rules-based Upstox OCO, don't require top-level second_trigger_price
-                if not provided_rules:
-                    if trigger_type in ("two_leg", "OCO") and (second_trigger_price is None or second_trigger_price <= 0):
-                        raise ValueError("Second trigger price is required and must be > 0 for OCO GTT")
 
                 # Decide type and rules
                 # Normalize type from UI; Upstox expects SINGLE or MULTIPLE
@@ -1247,49 +1445,49 @@ class OrderManager:
                     type_norm = "SINGLE" if not provided_rules or len(provided_rules) == 1 else "MULTIPLE"
 
                 # If caller provided full rules, use them as-is (validate minimal keys)
-                if provided_rules:
-                    normalized_rules = []
-                    # Upstox typically supports up to 2 rules; trim extras
-                    for r in provided_rules[:2]:
-                        strat = str(r.get("strategy", "ENTRY")).upper()
-                        # Map UI STOP_LOSS to API STOPLOSS
-                        if strat == "STOP_LOSS":
-                            strat = "STOPLOSS"
-                        if strat not in ("ENTRY", "STOPLOSS", "TARGET"):
-                            raise ValueError(f"Invalid rule strategy: {strat}")
-                        ttype = str(r.get("trigger_type", "ABOVE")).upper()
-                        # Upstox supports IMMEDIATE in addition to ABOVE/BELOW
-                        if ttype not in ("ABOVE", "BELOW", "IMMEDIATE"):
-                            raise ValueError(f"Invalid rule trigger_type: {ttype}")
-                        tprice = float(r.get("trigger_price"))
-                        if tprice <= 0:
-                            raise ValueError("trigger_price must be > 0 for each rule")
-                        rule_obj = {
-                            "strategy": strat,
-                            "trigger_type": ttype,
-                            "trigger_price": tprice,
-                        }
-                        normalized_rules.append(rule_obj)
-                    rules_to_send = normalized_rules
-                else:
+                # if provided_rules:
+                #     normalized_rules = []
+                #     # Upstox typically supports up to 2 rules; trim extras
+                #     for r in provided_rules:
+                #         strat = str(r.get("strategy", "ENTRY")).upper()
+                #         # Map UI STOP_LOSS to API STOPLOSS
+                #         if strat == "STOP_LOSS":
+                #             strat = "STOPLOSS"
+                #         if strat not in ("ENTRY", "STOPLOSS", "TARGET"):
+                #             raise ValueError(f"Invalid rule strategy: {strat}")
+                #         ttype = str(r.get("trigger_type", "ABOVE")).upper()
+                #         # Upstox supports IMMEDIATE in addition to ABOVE/BELOW
+                #         if ttype not in ("ABOVE", "BELOW", "IMMEDIATE"):
+                #             raise ValueError(f"Invalid rule trigger_type: {ttype}")
+                #         tprice = float(r.get("trigger_price"))
+                #         if tprice <= 0:
+                #             raise ValueError("trigger_price must be > 0 for each rule")
+                #         rule_obj = {
+                #             "strategy": strat,
+                #             "trigger_type": ttype,
+                #             "trigger_price": tprice,
+                #         }
+                #         normalized_rules.append(rule_obj)
+                #     rules_to_send = normalized_rules
+                # else:
                     # Backward-compatible build when no rules array is provided
-                    rules_to_send = [{
-                        "strategy": "ENTRY",
-                        "trigger_type": "ABOVE" if transaction_type == "BUY" else "BELOW",
-                        "trigger_price": float(trigger_price),
-                    }]
-                    if type_norm == "MULTIPLE" and second_trigger_price is not None:
-                        rules_to_send.append({
-                            "strategy": "TARGET" if transaction_type == "BUY" else "STOPLOSS",
-                            "trigger_type": "ABOVE" if transaction_type == "BUY" else "BELOW",
-                            "trigger_price": float(second_trigger_price),
-                        })
+                    # rules_to_send = [{
+                    #     "strategy": "ENTRY",
+                    #     "trigger_type": "ABOVE" if transaction_type == "BUY" else "BELOW",
+                    #     "trigger_price": float(trigger_price),
+                    # }]
+                    # if type_norm == "MULTIPLE" and second_trigger_price is not None:
+                    #     rules_to_send.append({
+                    #         "strategy": "TARGET" if transaction_type == "BUY" else "STOPLOSS",
+                    #         "trigger_type": "ABOVE" if transaction_type == "BUY" else "BELOW",
+                    #         "trigger_price": float(second_trigger_price),
+                    #     })
 
                 body = {
                     "type": type_norm,
                     "quantity": int(quantity),
                     "product": "D",
-                    "rules": rules_to_send,
+                    "rules": provided_rules,
                     "instrument_token": instrument_token,
                     "transaction_type": transaction_type,
                 }
@@ -1303,16 +1501,15 @@ class OrderManager:
 
                 logger.info(f"Upstox GTT Order placed successfully - {gtt_id}")            
 
-                gtt_id = str(uuid.uuid4())
                 query = """
                     INSERT INTO gtt_orders (
                         gtt_order_id, instrument_token, trading_symbol, transaction_type, quantity,
                         trigger_type, trigger_price, limit_price, last_price, second_trigger_price, second_limit_price,
-                        status, broker, created_at, user_id
+                        status, broker, created_at, user_id, gtt_type, rules
                     ) VALUES (
                         :gtt_id, :instrument_token, :trading_symbol, :transaction_type, :quantity,
                         :trigger_type, :trigger_price, :limit_price, :last_price, :second_trigger_price,
-                        :second_limit_price, :status, :broker, :created_at, :user_id
+                        :second_limit_price, :status, :broker, :created_at, :user_id, :gtt_type, :rules
                     )
                 """
                 await async_execute_query(db, text(query), {
@@ -1330,7 +1527,9 @@ class OrderManager:
                     "status": "PENDING",
                     "broker": broker,
                     "created_at": datetime.now(),
-                    "user_id": user_id
+                    "user_id": user_id,
+                    "gtt_type": type_norm,
+                    "rules": json.dumps(provided_rules) if provided_rules is not None else {}
                 })
                 result = await db.execute(select(User).filter(User.user_id == user_id))
                 user = result.scalars().first()
@@ -1341,7 +1540,7 @@ class OrderManager:
                 # Normalize trigger type for Kite Connect
                 ttype_in = (trigger_type or "single").strip().lower()
                 kite_trigger_type = "single"
-                if ttype_in in ("two-leg", "two_leg", "oco", "o-c-o"):
+                if ttype_in in ("oco", "OCO"):
                     kite_trigger_type = "two-leg"
 
                 condition = {
@@ -1401,18 +1600,18 @@ class OrderManager:
                 logger.info(f"GTT Order placed successfully - {response}")
                 gtt_id = str(response.get("trigger_id"))
 
-            # Derive gtt_type if possible
-            derived_gtt_type = "SINGLE"
-            try:
-                if rules and isinstance(rules, list) and len(rules) > 1:
-                    derived_gtt_type = "MULTIPLE"
-                elif trigger_type and str(trigger_type).lower() not in ("single", "two_leg"):
-                    # Map unknowns conservatively
-                    derived_gtt_type = "SINGLE"
-                elif trigger_type and str(trigger_type).lower() == "two_leg":
-                    derived_gtt_type = "MULTIPLE"
-            except Exception:
-                derived_gtt_type = "SINGLE"
+            # # Derive gtt_type if possible
+            # derived_gtt_type = "SINGLE"
+            # try:
+            #     if rules and isinstance(rules, list) and len(rules) > 1:
+            #         derived_gtt_type = "MULTIPLE"
+            #     elif trigger_type and str(trigger_type).lower() not in ("single", "two_leg"):
+            #         # Map unknowns conservatively
+            #         derived_gtt_type = "SINGLE"
+            #     elif trigger_type and str(trigger_type).lower() == "two_leg":
+            #         derived_gtt_type = "MULTIPLE"
+            # except Exception:
+            #     derived_gtt_type = "SINGLE"
 
             query = """
                 INSERT INTO gtt_orders (
@@ -1441,7 +1640,7 @@ class OrderManager:
                 "broker": broker,
                 "created_at": datetime.now(),
                 "user_id": user_id,
-                "gtt_type": derived_gtt_type,
+                "gtt_type": trigger_type,
                 "rules": json.dumps(rules) if rules is not None else None
             })
             result = await db.execute(select(User).filter(User.user_id == user_id))
@@ -1454,7 +1653,7 @@ class OrderManager:
             return {"status": "error", "message": str(e)}
 
     async def modify_gtt_order(self, api, gtt_id: str, trigger_type: str, trigger_price: float, limit_price: float,
-                               last_price: float, quantity: int, second_trigger_price: Optional[float] = None,
+                               last_price: float, quantity: int, transaction_type: str, second_trigger_price: Optional[float] = None,
                                second_limit_price: Optional[float] = None, rules: Optional[List[Dict[str, Any]]] = None,
                                db: AsyncSession = None):
         try:
@@ -1477,71 +1676,23 @@ class OrderManager:
                     elif type_norm not in ("SINGLE", "MULTIPLE"):
                         type_norm = "SINGLE" if not provided_rules or len(provided_rules) == 1 else "MULTIPLE"
 
-                    # Build rules array for Upstox API
-                    if provided_rules:
-                        # Use provided rules directly (preferred method)
-                        normalized_rules = []
-                        for r in provided_rules[:3]:  # Upstox supports max 3 rules
-                            strat = str(r.get("strategy", "ENTRY")).upper()
-                            # Map UI STOP_LOSS to API STOPLOSS
-                            if strat == "STOP_LOSS":
-                                strat = "STOPLOSS"
-                            if strat not in ("ENTRY", "STOPLOSS", "TARGET"):
-                                raise ValueError(f"Invalid rule strategy: {strat}")
-                            
-                            ttype = str(r.get("trigger_type", "ABOVE")).upper()
-                            # Upstox supports ABOVE, BELOW, IMMEDIATE
-                            if ttype not in ("ABOVE", "BELOW", "IMMEDIATE"):
-                                raise ValueError(f"Invalid rule trigger_type: {ttype}")
-                            
-                            tprice = float(r.get("trigger_price"))
-                            if tprice <= 0:
-                                raise ValueError("trigger_price must be > 0 for each rule")
-                            
-                            rule_obj = {
-                                "strategy": strat,
-                                "trigger_type": ttype,
-                                "trigger_price": tprice,
-                            }
-                            
-                            # Add trailing_gap for STOPLOSS strategy if specified
-                            if strat == "STOPLOSS" and r.get("trailing_gap"):
-                                rule_obj["trailing_gap"] = float(r.get("trailing_gap"))
-                            
-                            normalized_rules.append(rule_obj)
-                        rules_to_send = normalized_rules
-                    else:
-                        # Backward-compatible build when no rules array is provided
-                        rules_to_send = [{
-                            "strategy": "ENTRY",
-                            "trigger_type": "ABOVE" if gtt_order.transaction_type == "BUY" else "BELOW",
-                            "trigger_price": float(trigger_price)
-                        }]
-                        
-                        if type_norm == "MULTIPLE" and second_trigger_price:
-                            rules_to_send.append({
-                                "strategy": "TARGET" if gtt_order.transaction_type == "BUY" else "STOPLOSS",
-                                "trigger_type": "ABOVE" if gtt_order.transaction_type == "BUY" else "BELOW",
-                                "trigger_price": float(second_trigger_price)
-                            })
-
                     # Validate rules according to Upstox API requirements
-                    if not rules_to_send:
+                    if not provided_rules:
                         raise ValueError("At least one rule is required for GTT order")
                     
-                    if type_norm == "SINGLE" and len(rules_to_send) != 1:
+                    if type_norm == "SINGLE" and len(provided_rules) != 1:
                         raise ValueError("SINGLE type GTT must have exactly one rule")
                     
-                    if type_norm == "MULTIPLE" and (len(rules_to_send) < 2 or len(rules_to_send) > 3):
+                    if type_norm == "MULTIPLE" and (len(provided_rules) < 2 or len(provided_rules) > 3):
                         raise ValueError("MULTIPLE type GTT must have 2-3 rules")
                     
                     # Ensure ENTRY strategy is present
-                    entry_rules = [r for r in rules_to_send if r["strategy"] == "ENTRY"]
+                    entry_rules = [r for r in provided_rules if r["strategy"] == "ENTRY"]
                     if not entry_rules:
                         raise ValueError("ENTRY strategy is required for GTT order")
                     
                     # Check for duplicate strategies
-                    strategies = [r["strategy"] for r in rules_to_send]
+                    strategies = [r["strategy"] for r in provided_rules]
                     if len(strategies) != len(set(strategies)):
                         raise ValueError("Duplicate strategies are not allowed in GTT rules")
 
@@ -1549,7 +1700,7 @@ class OrderManager:
                     body = {
                         "type": type_norm,
                         "quantity": int(quantity),
-                        "rules": rules_to_send,
+                        "rules": provided_rules,
                         "gtt_order_id": gtt_id
                     }
 
@@ -1577,7 +1728,7 @@ class OrderManager:
                         "tradingsymbol": gtt_order.trading_symbol,
                         "product": "CNC",
                         "order_type": "LIMIT",
-                        "transaction_type": gtt_order.transaction_type,
+                        "transaction_type": transaction_type,
                         "quantity": quantity,
                         "price": limit_price
                     }]
@@ -1589,7 +1740,7 @@ class OrderManager:
                             "tradingsymbol": gtt_order.trading_symbol,
                             "product": "CNC",
                             "order_type": "LIMIT",
-                            "transaction_type": gtt_order.transaction_type,
+                            "transaction_type": transaction_type,
                             "quantity": quantity,
                             "price": limit_price
                         },
@@ -1598,7 +1749,7 @@ class OrderManager:
                             "tradingsymbol": gtt_order.trading_symbol,
                             "product": "CNC",
                             "order_type": "LIMIT",
-                            "transaction_type": gtt_order.transaction_type,
+                            "transaction_type": transaction_type,
                             "quantity": quantity,
                             "price": second_limit_price
                         }
@@ -1612,22 +1763,12 @@ class OrderManager:
                     last_price=condition["last_price"],
                     orders=orders
                 )
-            
-            # Update database with modified values (including optional rules and gtt_type)
-            # Compute gtt_type if rules suggest multi-leg
-            derived_gtt_type = None
-            try:
-                if rules is not None:
-                    derived_gtt_type = "MULTIPLE" if isinstance(rules, list) and len(rules) > 1 else "SINGLE"
-                elif trigger_type is not None:
-                    derived_gtt_type = "MULTIPLE" if str(trigger_type).lower() == "two_leg" else "SINGLE"
-            except Exception:
-                derived_gtt_type = None
 
             set_clauses = [
                 "trigger_type = :trigger_type",
                 "trigger_price = :trigger_price",
                 "limit_price = :limit_price",
+                "transaction_type = :transaction_type",
                 "second_trigger_price = :second_trigger_price",
                 "second_limit_price = :second_limit_price",
                 "quantity = :quantity",
@@ -1635,8 +1776,7 @@ class OrderManager:
             ]
             if rules is not None:
                 set_clauses.append("rules = :rules")
-            if derived_gtt_type is not None:
-                set_clauses.append("gtt_type = :gtt_type")
+
 
             query = f"""
                 UPDATE gtt_orders
@@ -1648,6 +1788,7 @@ class OrderManager:
                 "trigger_type": trigger_type,
                 "trigger_price": trigger_price,
                 "limit_price": limit_price,
+                "transaction_type": transaction_type,
                 "second_trigger_price": second_trigger_price,
                 "second_limit_price": second_limit_price,
                 "quantity": quantity,
@@ -1655,8 +1796,6 @@ class OrderManager:
             }
             if rules is not None:
                 params["rules"] = json.dumps(rules)  # Convert list to JSON string
-            if derived_gtt_type is not None:
-                params["gtt_type"] = derived_gtt_type
 
             await async_execute_query(db, text(query), params)
             
@@ -1810,7 +1949,7 @@ async def place_order(api, instrument_token, trading_symbol, transaction_type, q
             if not trail_start_target_percent or trail_start_target_percent <= 0:
                 raise ValueError("Trail start target percentage must be greater than 0")
 
-        # CRITICAL SECURITY FIX: Wrap order placement and database save in transaction
+        # Wrap order placement and database save in transaction
         primary_order_id = None
         response = None
 
@@ -1940,12 +2079,6 @@ async def place_order(api, instrument_token, trading_symbol, transaction_type, q
             await notify(f"{order_type_msg} Placed: {transaction_type} for {trading_symbol}",
                          f"Order ID: {primary_order_id}, Quantity: {quantity}, Price: {price}", user.email)
         logger.info(f"Order placed: {primary_order_id} for {trading_symbol}, user {user_id}, trailing_stop_loss: {is_trailing_stop_loss}")
-
-        # NOTE: Removed individual order monitoring since monitor_trailing_stop_loss_orders now handles all monitoring
-        # The centralized monitoring function runs every 5 minutes and handles:
-        # - Regular stop loss/target monitoring
-        # - Trailing stop loss monitoring
-        # - Better performance through batched processing
 
         return response
     except ValueError as ve:
@@ -2724,7 +2857,6 @@ async def get_historical_data(upstox_api, upstox_access_token, trading_symbol: s
     logger.info(f"Returning {len(data_points)} historical data points for {trading_symbol}")
     return historical_data
 
-
 async def fetch_instruments(db: AsyncSession, refresh: bool = False) -> List[InstrumentSchema]:
     try:
         if refresh:
@@ -2787,7 +2919,7 @@ async def fetch_symbols_for_instruments(db: AsyncSession, instruments: List[str]
                 Instrument.instrument_token.in_(instruments),
                 Instrument.trading_symbol.in_(instruments)
             )
-)
+            )
         result = await db.execute(query)
         instruments = result.scalars().all()
 
@@ -3012,7 +3144,6 @@ async def schedule_strategy_execution(api, strategy: str, instrument_token: str,
         logger.error(f"Error scheduling strategy {strategy}: {str(e)}")
         return {"status": "error", "message": str(e)}
 
-
 async def stop_strategy_execution(strategy: str, instrument_token: str, user_id: str, db: AsyncSession):
     try:
         # Note: In a production system, store task references in a database or Redis
@@ -3039,7 +3170,6 @@ async def stop_strategy_execution(strategy: str, instrument_token: str, user_id:
     except Exception as e:
         logger.error(f"Error stopping strategy {strategy} for {instrument_token}, user {user_id}: {str(e)}")
         return {"status": "error", "message": str(e)}
-
 
 async def backtest_strategy(trading_symbol: str, instrument_token: str, timeframe: str, strategy: str,
                             params: Dict, start_date: str, end_date: str, ws_callback: Optional[Callable] = None,
@@ -3190,7 +3320,6 @@ async def backtest_strategy(trading_symbol: str, instrument_token: str, timefram
         logger.error(f"Error in backtest_strategy: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-
 async def run_parameter_optimization(df, strategy_func, params, ws_callback, indicator_details: Optional[List[Dict]] = None):
     """
     Runs multiple backtests with varying parameters to find the optimal set.
@@ -3253,7 +3382,6 @@ async def run_parameter_optimization(df, strategy_func, params, ws_callback, ind
 
     return {"best_result": best_result, "all_runs": all_runs}
 
-
 async def backtest_custom_strategy(df, strategy_data, params, ws_callback, indicator_details: Optional[List[Dict]] = None):
     """
     Generates signals for a custom strategy and then uses the generic backtesting engine.
@@ -3281,7 +3409,6 @@ async def backtest_custom_strategy(df, strategy_data, params, ws_callback, indic
         result = await backtest_strategy_generic(df, custom_strategy_func, params, ws_callback, indicator_details=indicator_details)
 
         return result
-
 
 async def run_parameter_optimization_for_custom_strategy(df, strategy_data, params, ws_callback,
                                                          indicator_details: Optional[List[Dict]] = None):
@@ -3365,14 +3492,13 @@ async def run_parameter_optimization_for_custom_strategy(df, strategy_data, para
 
     return {"best_result": best_result, "all_runs": all_runs}
 
-
 async def backtest_strategy_generic(
         df: pd.DataFrame,
         strategy_func: Callable,
         params: Dict,
         ws_callback: Optional[Callable] = None,
         indicator_details: Optional[List[Dict]] = None
-) -> Dict:
+    ) -> Dict:
     """
     It preserves all original logic for complex exits (stop-loss, trailing stops,
     and partial take-profits) while adding the ability to capture and log the specific
@@ -3586,7 +3712,6 @@ async def backtest_strategy_generic(
         "LosingTrades": total_trades - winning_trades,
         "Tradebook": tradebook
     }
-
 
 async def run_optimization_backtest(instrument_token: str,
                                     timeframe: str,
@@ -3864,7 +3989,6 @@ async def backtest_short_sell(df, initial_investment: float, stop_loss_atr_mult:
 def check_short_sell_signal(row, atr):
     return "SELL" if row["close"] > row["open"] else None
 
-
 # Helper functions to refactor backtest_strategy
 async def get_historical_dataframe(trading_symbol, instrument_token, timeframe, start_date, end_date, db, nse_db):
     data = await get_historical_data(upstox_api=None, upstox_access_token=None, trading_symbol=trading_symbol,
@@ -3878,7 +4002,6 @@ async def get_historical_dataframe(trading_symbol, instrument_token, timeframe, 
     df.set_index('timestamp', inplace=True)
     df.sort_index(inplace=True)
     return df
-
 
 def get_strategy_details(strategy: str) -> (Optional[Callable], str, bool):
     if strategy.startswith("{"):
@@ -3939,13 +4062,13 @@ def evaluate_condition(left_value, right_value, comparison):
     return False
 
 async def calculate_portfolio_current_value(
-    portfolio_id: str,
-    symbols_data: List[Any],
-    upstox_api=None,
-    kite_api=None,
-    trading_db: AsyncSession = None,
-    fallback_price: float = 0.0
-) -> float:
+        portfolio_id: str,
+        symbols_data: List[Any],
+        upstox_api=None,
+        kite_api=None,
+        trading_db: AsyncSession = None,
+        fallback_price: float = 0.0
+    ) -> float:
     """
     Optimized function to calculate current portfolio value from LTP data.
     This eliminates redundant code across multiple endpoints.

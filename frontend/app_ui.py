@@ -74,6 +74,8 @@ BASE_URL = "http://localhost:8000"
 
 # Storage constants
 STORAGE_TOKEN_KEY = 'auth_token'
+STORAGE_REFRESH_TOKEN_KEY = 'refresh_token'
+STORAGE_TOKEN_EXPIRY_KEY = 'token_expiry'
 STORAGE_USER_ID_KEY = 'user_id'
 STORAGE_BROKER_KEY = 'default_broker'
 STORAGE_THEME_KEY = 'app_theme'
@@ -227,7 +229,83 @@ def is_admin_user() -> bool:
         return False
 
 
+async def refresh_access_token():
+    """
+    Refresh the access token using the refresh token.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        refresh_token = app.storage.user.get(STORAGE_REFRESH_TOKEN_KEY)
+        if not refresh_token:
+            logger.warning("No refresh token available")
+            return False
+        
+        # Call the refresh endpoint without authorization header
+        url = f"{BASE_URL}/auth/refresh"
+        session = await get_http_session()
+        
+        async with session.post(url, json={"refresh_token": refresh_token}) as response:
+            if response.status == 200:
+                data = await response.json()
+                # Update tokens in storage
+                app.storage.user[STORAGE_TOKEN_KEY] = data["access_token"]
+                
+                # Calculate and store expiry time (5 minutes before actual expiry for safety margin)
+                import time
+                expires_in = data.get("expires_in", 480 * 60)  # Default 8 hours
+                expiry_time = time.time() + expires_in - 300  # 5 minutes safety margin
+                app.storage.user[STORAGE_TOKEN_EXPIRY_KEY] = expiry_time
+                
+                logger.info("Access token refreshed successfully")
+                return True
+            else:
+                logger.error(f"Token refresh failed with status {response.status}")
+                return False
+    except Exception as e:
+        logger.error(f"Error refreshing token: {e}")
+        return False
+
+async def ensure_valid_token():
+    """
+    Check if token is expired or about to expire and refresh if needed.
+    Returns True if token is valid, False if refresh failed.
+    """
+    try:
+        import time
+        token = app.storage.user.get(STORAGE_TOKEN_KEY)
+        expiry_time = app.storage.user.get(STORAGE_TOKEN_EXPIRY_KEY)
+        
+        if not token:
+            return False
+        
+        # If no expiry time is set, assume token is still valid
+        # (for backward compatibility with existing sessions)
+        if not expiry_time:
+            return True
+        
+        current_time = time.time()
+        
+        # If token is expired or about to expire (within 1 minute)
+        if current_time >= expiry_time:
+            logger.info("Token expired or about to expire, refreshing...")
+            return await refresh_access_token()
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error checking token validity: {e}")
+        return True  # Assume valid to avoid breaking existing functionality
+
 async def fetch_api(endpoint, method="GET", data=None, params=None, retries=3, backoff=1):
+    # Ensure token is valid before making the API call (skip for login/register endpoints)
+    if not any(auth_endpoint in endpoint for auth_endpoint in ['/auth/login', '/auth/register', '/auth/refresh']):
+        token_valid = await ensure_valid_token()
+        if not token_valid and hasattr(app, 'storage') and hasattr(app.storage, 'user'):
+            # Token refresh failed, clear storage and redirect to login
+            app.storage.user.clear()
+            ui.navigate.to('/')
+            safe_notify("Session expired. Please log in again.", "negative")
+            return {"error": {"code": "UNAUTHORIZED", "message": "Session expired"}, "status": 401}
+    
     token = app.storage.user.get(STORAGE_TOKEN_KEY) if hasattr(app, 'storage') and hasattr(app.storage, 'user') else None
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     request_kwargs = {"headers": headers}
@@ -773,13 +851,30 @@ async def login_page(client: Client):
         response = await fetch_api("/auth/login", method="POST", data=data)
         if response and "access_token" in response:
             try:
+                import time
+                
+                # Store access token
                 app.storage.user[STORAGE_TOKEN_KEY] = response["access_token"]
-                user_profile = await fetch_api("/users/me")
-                if user_profile and "id" in user_profile:
-                    app.storage.user[STORAGE_USER_ID_KEY] = user_profile["id"]
+                
+                # Store refresh token if provided
+                if "refresh_token" in response:
+                    app.storage.user[STORAGE_REFRESH_TOKEN_KEY] = response["refresh_token"]
+                
+                # Calculate and store token expiry time (5 minutes before actual expiry for safety)
+                expires_in = response.get("expires_in", 480 * 60)  # Default 8 hours in seconds
+                expiry_time = time.time() + expires_in - 300  # Subtract 5 minutes for safety margin
+                app.storage.user[STORAGE_TOKEN_EXPIRY_KEY] = expiry_time
+                
+                # Store user ID from response or fetch profile
+                if "user_id" in response:
+                    app.storage.user[STORAGE_USER_ID_KEY] = response["user_id"]
                 else:
-                    app.storage.user[STORAGE_USER_ID_KEY] = user_profile.get("email",
-                                                                             "default_user_id") if user_profile else "default_user_id"
+                    user_profile = await fetch_api("/users/me")
+                    if user_profile and "id" in user_profile:
+                        app.storage.user[STORAGE_USER_ID_KEY] = user_profile["id"]
+                    else:
+                        app.storage.user[STORAGE_USER_ID_KEY] = user_profile.get("email",
+                                                                                 "default_user_id") if user_profile else "default_user_id"
 
                 ui.notify("Login successful!", type="positive")
                 
@@ -1305,7 +1400,7 @@ if __name__ in {"__main__", "__mp_main__"}:
 
     ui.run(
         title="AlgoTrade Pro - Advanced Trading Platform",
-        port=8083,
+        port=8084,
         reload=True,  # Disable reload for clean shutdown - use external reloader if needed
         uvicorn_reload_dirs='.',
         uvicorn_reload_includes='*.py',
